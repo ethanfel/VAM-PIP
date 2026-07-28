@@ -53,6 +53,8 @@ class WorkspaceWebUITests(unittest.TestCase):
         self.assertIn('params.append("type", resourceType)', self.javascript)
         self.assertIn('api("/api/vam/resource/apply"', self.javascript)
         self.assertIn("requireBridgeQueue(result", self.javascript)
+        self.assertIn("requireWorkspaceBridgeQueue(result", self.javascript)
+        self.assertIn('typeof result.bridge_request === "string"', self.javascript)
         self.assertIn("result.bridge_busy !== true", self.javascript)
         self.assertIn("Required packages remain enabled", self.javascript)
         self.assertIn("snapshot.bridge_busy === true", self.javascript)
@@ -443,8 +445,8 @@ class WorkspaceWebUITests(unittest.TestCase):
                 self.assertIn(selector, self.styles)
 
     def test_static_assets_use_the_current_cache_version(self) -> None:
-        self.assertIn("/styles.css?v=0.6.3", self.html)
-        self.assertIn("/app.js?v=0.6.3", self.html)
+        self.assertIn("/styles.css?v=0.6.4", self.html)
+        self.assertIn("/app.js?v=0.6.4", self.html)
 
 
 if __name__ == "__main__":

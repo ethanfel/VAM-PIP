@@ -3488,7 +3488,7 @@ async function applyWorkspaceResource(item, category, sourceButton) {
       method: "POST",
       body,
     });
-    requireBridgeQueue(result, `${prettyType(category.noun)} load`);
+    requireWorkspaceBridgeQueue(result, `${prettyType(category.noun)} load`);
     if (createIfMissing) app.pendingAtomUid = atomTargetUid;
     const requestId =
       result.request_id || result.action_id || result.bridge_request || "";
@@ -4740,6 +4740,26 @@ function requireBridgeQueue(result, actionLabel) {
     : "";
   throw new Error(
     `${actionLabel} was not queued because ${reason}.${leaseNote} Retry after the current bridge action finishes.`,
+  );
+}
+
+function requireWorkspaceBridgeQueue(result, actionLabel) {
+  requireBridgeQueue(result, actionLabel);
+  if (
+    result &&
+    typeof result.bridge_request === "string" &&
+    result.bridge_request.trim()
+  ) {
+    return;
+  }
+  const reason =
+    result?.bridge_message ||
+    "the manager did not publish a bridge request";
+  const leaseNote = result?.lease
+    ? " Required packages remain enabled by the new lease."
+    : "";
+  throw new Error(
+    `${actionLabel} was not queued because ${reason}.${leaseNote} Retry after VaM and the bridge are ready.`,
   );
 }
 

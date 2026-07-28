@@ -780,7 +780,9 @@ class PersonWorkspaceTests(unittest.TestCase):
                 )
         lease.assert_not_called()
 
-    def test_already_active_and_local_presets_skip_composite_rescan(self) -> None:
+    def test_active_packaged_preset_rescans_but_local_preset_does_not(
+        self,
+    ) -> None:
         self.service.pin(["Creator.HairPack.1"])
         self.service.reconcile(apply=True, activate=True)
         self.pids.append(1234)
@@ -796,8 +798,8 @@ class PersonWorkspaceTests(unittest.TestCase):
                 target_uid="Person",
             )
         self.assertEqual(active["lease"]["reconcile"]["enable"], 0)
-        self.assertFalse(active["rescan"])
-        self.assertFalse(request.call_args.kwargs["rescan"])
+        self.assertTrue(active["rescan"])
+        self.assertTrue(request.call_args.kwargs["rescan"])
 
         # A loose preset has no package visibility state to refresh at all.
         local_member = (

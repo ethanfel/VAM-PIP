@@ -9,6 +9,7 @@ import unittest
 from unittest import mock
 import zipfile
 
+from vampip.bridge import read_bridge_request, request_scene_load as write_scene_request
 from vampip.catalog import import_browserassist, search_resources
 from vampip.database import connect
 from vampip.inventory import scan
@@ -127,6 +128,167 @@ class ReferenceTests(unittest.TestCase):
                 {item["id"] for item in active},
                 {"Core.Base.1", "Scene.Demo.1", "Asset.Extra.2"},
             )
+
+    def test_active_packaged_scene_rescans_before_load_when_already_enabled(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            vam_root = base / "VaM"
+            addons = vam_root / "AddonPackages"
+            state = base / "state"
+            addons.mkdir(parents=True)
+            scene_member = "Saves/scene/Demo.json"
+            metadata = {
+                "creatorName": "Scene",
+                "packageName": "Demo",
+                "dependencies": {},
+            }
+            for version in (1, 2):
+                with zipfile.ZipFile(
+                    addons / f"Scene.Demo.{version}.var",
+                    "w",
+                    compression=zipfile.ZIP_DEFLATED,
+                ) as archive:
+                    archive.writestr("meta.json", json.dumps(metadata))
+                    archive.writestr(scene_member, '{"atoms":[]}')
+
+            with connect(state) as connection:
+                scan(addons, connection)
+                cursor = connection.execute(
+                    """
+                    INSERT INTO catalog_resources (
+                        root, source, resource_key, creator, package_name,
+                        versions_json, resource_path, resource_type, atom_type,
+                        favorite, hidden, tags_json, imported_utc
+                    ) VALUES (?, 'browserassist', 'packaged-scene',
+                              'Scene', 'Demo', '["1"]', ?, 'Scene', '',
+                              0, 0, '[]', '2026-01-01T00:00:00+00:00')
+                    """,
+                    (str(vam_root), scene_member.replace("/", "\\")),
+                )
+                resource_id = int(cursor.lastrowid)
+                connection.execute(
+                    """
+                    INSERT INTO catalog_resource_versions(
+                        resource_id, version_text
+                    ) VALUES (?, '1')
+                    """,
+                    (resource_id,),
+                )
+
+            pids: list[int] = []
+            service = ManagerService(
+                addons,
+                state,
+                process_probe=lambda: list(pids),
+            )
+            service.pin(["Scene.Demo.2"])
+            service.reconcile(apply=True, activate=True)
+            pids.append(4321)
+
+            with mock.patch.object(
+                service,
+                "persons",
+                return_value={
+                    "vam_running": True,
+                    "available": True,
+                    "capabilities": ["scene-load"],
+                },
+            ):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "confirm_replace must be true",
+                ):
+                    service.apply_resource(resource_id)
+            self.assertIsNone(read_bridge_request(vam_root))
+            with connect(state) as connection:
+                self.assertEqual(
+                    connection.execute(
+                        "SELECT COUNT(*) FROM manager_leases"
+                    ).fetchone()[0],
+                    0,
+                )
+
+            order: list[str] = []
+            original_lease_resource = service.lease_resource
+
+            def lease_resource(*args: object, **kwargs: object) -> dict[str, object]:
+                result = original_lease_resource(*args, **kwargs)
+                order.append("lease")
+                return result
+
+            def load_scene(
+                root: Path,
+                resource_ref: str,
+                *,
+                rescan: bool,
+                merge: bool,
+            ) -> str:
+                order.append("request")
+                self.assertEqual(root, vam_root)
+                self.assertEqual(
+                    resource_ref,
+                    "Scene.Demo.2:/Saves/scene/Demo.json",
+                )
+                self.assertTrue(rescan)
+                self.assertFalse(merge)
+                return write_scene_request(
+                    root,
+                    resource_ref,
+                    rescan=rescan,
+                    merge=merge,
+                )
+
+            with (
+                mock.patch.object(
+                    service,
+                    "persons",
+                    return_value={
+                        "vam_running": True,
+                        "available": True,
+                        "capabilities": ["scene-load"],
+                    },
+                ),
+                mock.patch.object(
+                    service,
+                    "lease_resource",
+                    side_effect=lease_resource,
+                ),
+                mock.patch(
+                    "vampip.service.request_scene_load",
+                    side_effect=load_scene,
+                ),
+            ):
+                result = service.apply_resource(
+                    resource_id,
+                    confirm_replace=True,
+                )
+
+            self.assertEqual(order, ["lease", "request"])
+            self.assertEqual(result["lease"]["reconcile"]["enable"], 0)
+            self.assertEqual(
+                result["lease"]["discovered_roots"],
+                ["Scene.Demo.2"],
+            )
+            self.assertTrue(result["rescan"])
+            self.assertFalse(result["bridge_busy"])
+            request = read_bridge_request(vam_root)
+            assert request is not None
+            self.assertEqual(result["bridge_request"], request["requestId"])
+            self.assertEqual(request["command"], "loadScene")
+            self.assertEqual(
+                request["resourceRef"],
+                "Scene.Demo.2:/Saves/scene/Demo.json",
+            )
+            self.assertTrue(request["rescan"])
+            with connect(state) as connection:
+                self.assertEqual(
+                    connection.execute(
+                        "SELECT COUNT(*) FROM manager_leases"
+                    ).fetchone()[0],
+                    1,
+                )
 
     def test_local_scene_apply_enables_embedded_packages_before_bridge_load(
         self,

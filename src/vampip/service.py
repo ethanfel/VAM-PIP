@@ -1316,17 +1316,25 @@ class ManagerService:
     def _lease_requires_bridge_rescan(
         lease: dict[str, object],
     ) -> bool:
-        """Return whether a composite action made packages newly visible.
+        """Return whether a composite action depends on VaM packages.
 
-        A loose resource can still reference packaged assets, so its location
-        alone cannot determine whether VaM needs a rescan. A completed
-        reconciliation exposes its exact enable count; resources with no
-        package references explicitly report ``already_local``. Unknown or
-        custom lease results stay conservative.
+        Inventory ``enabled`` state only describes the filesystem. It does not
+        prove that a running VaM FileManager has registered an archive, for
+        example when a valid package appeared externally just before this
+        action. Keep the rescan ordered with every package-backed live load;
+        the bridge rate-limits redundant core rescans. Resources with no
+        package references explicitly report ``already_local`` and remain the
+        only safe no-rescan case. Unknown or custom lease results stay
+        conservative.
         """
 
         if lease.get("already_local") is True:
             return False
+        roots = lease.get("discovered_roots", lease.get("roots"))
+        if isinstance(roots, (list, tuple)) and any(
+            isinstance(root, str) and bool(root.strip()) for root in roots
+        ):
+            return True
         reconcile = lease.get("reconcile")
         if not isinstance(reconcile, dict):
             return True

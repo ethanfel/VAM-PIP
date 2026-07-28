@@ -21,12 +21,13 @@ leaving managed mode restores that baseline.
 
 ## Current status
 
-Version 0.6.3 is functional but should still be treated as an early release.
+Version 0.6.4 is functional but should still be treated as an early release.
 Package switching is deliberately conservative:
 
 - entering managed mode requires explicit confirmation;
 - invalid archives are reported and left untouched;
 - packages are never disabled while VaM is running;
+- package-backed live loads rescan VaM before resolving their virtual paths;
 - ambiguous same-ID copies are hashed and conflicting data is refused;
 - a failed multi-file switch rolls back completed renames automatically;
 - every applied switch has a recovery manifest.

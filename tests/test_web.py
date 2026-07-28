@@ -156,8 +156,8 @@ class WebSecurityTests(unittest.TestCase):
             "frame-ancestors 'none'", response.getheader("Content-Security-Policy")
         )
         document = response.read().decode("utf-8")
-        self.assertIn("/styles.css?v=0.6.3", document)
-        self.assertIn("/app.js?v=0.6.3", document)
+        self.assertIn("/styles.css?v=0.6.4", document)
+        self.assertIn("/app.js?v=0.6.4", document)
 
     def test_session_plugin_endpoints_report_and_import_defaults(self) -> None:
         preset_path = write_web_session_defaults(self.vam_root)
