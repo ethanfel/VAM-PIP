@@ -77,7 +77,8 @@ class WorkspaceWebUITests(unittest.TestCase):
         block = self.javascript[block_start:block_end]
         self.assertIn('api("/api/vam/person/clothing"', block)
         self.assertIn("resource_id: resourceId", block)
-        self.assertIn("target_uid: app.selectedPersonUid", block)
+        self.assertIn("const targetUid = app.selectedPersonUid", block)
+        self.assertIn("target_uid: targetUid", block)
         self.assertIn("active: availability.desiredActive", block)
         self.assertIn("revision: availability.revision", block)
         for forbidden in (
@@ -118,8 +119,113 @@ class WorkspaceWebUITests(unittest.TestCase):
         self.assertIn("person.clothing?.revision", self.javascript)
         self.assertIn(
             "if (isIndividualClothingCategory()) {\n"
-            "        await loadLibrary();",
+            "          await loadLibrary({ preserveCount: true });",
             self.javascript,
+        )
+
+    def test_live_scene_responses_cannot_overwrite_a_newer_snapshot(self) -> None:
+        self.assertIn("personRequestGeneration: 0", self.javascript)
+        self.assertIn(
+            "const sceneRequestGeneration = beginPersonSnapshotRequest();",
+            self.javascript,
+        )
+        accept_start = self.javascript.index(
+            "function acceptPersonSnapshot("
+        )
+        accept_end = self.javascript.index(
+            "async function loadPersons(", accept_start
+        )
+        accept = self.javascript[accept_start:accept_end]
+        self.assertIn(
+            "!personSnapshotRequestIsCurrent(generation)",
+            accept,
+        )
+        self.assertGreaterEqual(accept.count("return false;"), 2)
+
+        load_start = self.javascript.index("async function loadPersons(")
+        load_end = self.javascript.index(
+            "function renderPersonContext()", load_start
+        )
+        load = self.javascript[load_start:load_end]
+        self.assertIn(
+            "const requestGeneration = beginPersonSnapshotRequest();",
+            load,
+        )
+        self.assertIn(
+            "acceptPersonSnapshot(snapshot, requestGeneration)",
+            load,
+        )
+        self.assertIn(
+            "acceptPersonSnapshotError(error, requestGeneration)",
+            load,
+        )
+        self.assertIn("if (responseAccepted) {", load)
+
+    def test_clothing_browse_only_cards_keep_package_access_controls(self) -> None:
+        card_start = self.javascript.index("function createResourceCard(")
+        card_end = self.javascript.index(
+            "function appendPackageAccessActions(", card_start
+        )
+        card = self.javascript[card_start:card_end]
+        self.assertIn("if (workspaceCategory.liveAction) {", card)
+        self.assertIn("if (!availability.allowed) {", card)
+        self.assertIn("appendPackageAccessActions(actions, item", card)
+
+        access_start = card_end
+        access_end = self.javascript.index(
+            "function isIndividualClothingCategory(", access_start
+        )
+        access = self.javascript[access_start:access_end]
+        self.assertIn('"Keep for 3 days"', access)
+        self.assertIn('"Enable for 3 days"', access)
+        self.assertIn("createThreeDayLease(", access)
+        self.assertIn("addPin(root, title, pinButton)", access)
+
+    def test_workspace_category_failures_retry_automatically(self) -> None:
+        self.assertIn("workspaceCategoriesRetryAt: 0", self.javascript)
+        activity_start = self.javascript.index("async function loadActivity(")
+        activity_end = self.javascript.index(
+            "async function fetchLiveSceneSnapshot()", activity_start
+        )
+        activity = self.javascript[activity_start:activity_end]
+        self.assertIn("app.workspaceCategoriesError", activity)
+        self.assertIn(
+            "Date.now() - app.workspaceCategoriesRetryAt > 5000",
+            activity,
+        )
+        self.assertIn("scheduleRefresh = true", activity)
+        self.assertIn(
+            "app.workspaceCategoriesRetryAt = 0",
+            self.javascript,
+        )
+
+    def test_clothing_action_keeps_original_target_and_loaded_page_count(self) -> None:
+        action_start = self.javascript.index(
+            "async function setPersonClothing("
+        )
+        action_end = self.javascript.index(
+            "function workspaceApplyAvailability(", action_start
+        )
+        action = self.javascript[action_start:action_end]
+        self.assertIn("const targetUid = app.selectedPersonUid;", action)
+        self.assertIn("target_uid: targetUid", action)
+        self.assertIn("for ${targetUid}.", action)
+        self.assertNotIn("for ${app.selectedPersonUid}.", action)
+
+        library_start = self.javascript.index("async function loadLibrary(")
+        library_end = self.javascript.index(
+            "function renderStatus()", library_start
+        )
+        library = self.javascript[library_start:library_end]
+        self.assertIn("preserveCount = false", library)
+        self.assertIn(
+            "Math.min(Math.max(PAGE_SIZE, app.items.length), 500)",
+            library,
+        )
+        self.assertIn("limit: String(limit)", library)
+        self.assertGreaterEqual(
+            self.javascript.count("loadLibrary({ preserveCount: true })"),
+            4,
         )
 
     def test_scene_replace_requires_explicit_confirmation(self) -> None:
@@ -314,8 +420,8 @@ class WorkspaceWebUITests(unittest.TestCase):
                 self.assertIn(selector, self.styles)
 
     def test_static_assets_use_the_current_cache_version(self) -> None:
-        self.assertIn("/styles.css?v=0.6.0", self.html)
-        self.assertIn("/app.js?v=0.6.0", self.html)
+        self.assertIn("/styles.css?v=0.6.1", self.html)
+        self.assertIn("/app.js?v=0.6.1", self.html)
 
 
 if __name__ == "__main__":

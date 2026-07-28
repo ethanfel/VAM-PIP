@@ -845,7 +845,12 @@ class BridgeSourceTests(unittest.TestCase):
             repository / "src" / "vampip" / "bridge_assets" / "VAMPipBridge.cs"
         ).read_text(encoding="utf-8")
         self.assertIn("ProtocolVersion = 2", source)
-        self.assertIn('BridgeVersion = "0.6.0"', source)
+        self.assertIn('BridgeVersion = "0.6.1"', source)
+        self.assertIn("IgnoreCompletedLegacyRequest();", source)
+        self.assertIn(
+            "Ignored completed protocol-",
+            source,
+        )
         self.assertIn('"applyPersonPreset"', source)
         self.assertIn('"addAtom"', source)
         self.assertIn('"applyAtomPreset"', source)

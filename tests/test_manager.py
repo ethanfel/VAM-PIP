@@ -691,12 +691,84 @@ class ManagerServiceTests(unittest.TestCase):
         self.assertNotIn("shell", keywords)
         self.assertTrue(keywords["start_new_session"])
 
+    def test_launch_uses_mailbox_then_operation_lock_order(self) -> None:
+        service = self.service()
+        service.pin(["Core.Base"])
+        service.reconcile(apply=True, activate=True)
+        script = self.vam_root / "launch-vam-desktop-proton.sh"
+        script.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        script.chmod(0o755)
+        launch_attempted_mailbox = threading.Event()
+        mailbox_held = threading.Event()
+        operation_acquired: list[bool] = []
+        launch_errors: list[BaseException] = []
+        launch_results: list[dict[str, object]] = []
+        raw_mailbox_lock = service._bridge_mailbox_lock
+
+        class SignallingRLock:
+            def acquire(
+                self,
+                blocking: bool = True,
+                timeout: float = -1,
+            ) -> bool:
+                if threading.current_thread().name == "managed-launch":
+                    launch_attempted_mailbox.set()
+                if timeout == -1:
+                    return raw_mailbox_lock.acquire(blocking)
+                return raw_mailbox_lock.acquire(blocking, timeout)
+
+            def release(self) -> None:
+                raw_mailbox_lock.release()
+
+            def __enter__(self) -> SignallingRLock:
+                self.acquire()
+                return self
+
+            def __exit__(self, *args: object) -> None:
+                self.release()
+
+        service._bridge_mailbox_lock = SignallingRLock()  # type: ignore[assignment]
+
+        def contend() -> None:
+            with service._bridge_mailbox_lock:
+                mailbox_held.set()
+                if not launch_attempted_mailbox.wait(2):
+                    return
+                acquired = service._operation_gate.acquire(timeout=0.5)
+                operation_acquired.append(acquired)
+                if acquired:
+                    service._operation_gate.release()
+
+        def launch() -> None:
+            try:
+                launch_results.append(service.launch_vam())
+            except BaseException as error:
+                launch_errors.append(error)
+
+        contender = threading.Thread(target=contend, name="mailbox-contender")
+        contender.start()
+        self.assertTrue(mailbox_held.wait(2))
+        with mock.patch(
+            "vampip.service.subprocess.Popen",
+            return_value=mock.Mock(pid=8765),
+        ):
+            launcher = threading.Thread(target=launch, name="managed-launch")
+            launcher.start()
+            contender.join(2)
+            launcher.join(2)
+
+        self.assertFalse(contender.is_alive())
+        self.assertFalse(launcher.is_alive())
+        self.assertEqual(operation_acquired, [True])
+        self.assertEqual(launch_errors, [])
+        self.assertEqual(launch_results[0]["pid"], 8765)
+
     def test_bridge_installer_is_idempotent_and_refuses_overwrite(self) -> None:
         installed = install_bridge(self.vam_root)
         self.assertEqual(len(installed), 2)
         self.assertTrue(all(path.is_file() for path in installed))
         source = installed[0].read_text(encoding="utf-8")
-        self.assertIn('BridgeVersion = "0.6.0"', source)
+        self.assertIn('BridgeVersion = "0.6.1"', source)
         self.assertNotRegex(source, r"(?m)^\s*Type(?:\s|\.)")
         self.assertNotIn("new Type[]", source)
         self.assertNotIn("System.Reflection", source)
@@ -742,6 +814,51 @@ class ManagerServiceTests(unittest.TestCase):
 
 
 class DatabaseMigrationTests(unittest.TestCase):
+    def test_newer_schema_is_rejected_before_local_schema_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory)
+            database = state / "inventory.sqlite3"
+            connection = sqlite3.connect(database)
+            connection.executescript(
+                f"""
+                CREATE TABLE schema_meta (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL
+                );
+                INSERT INTO schema_meta(key, value)
+                VALUES ('schema_version', '{SCHEMA_VERSION + 1}');
+                CREATE TABLE future_only (value TEXT);
+                """
+            )
+            connection.commit()
+            connection.close()
+
+            with self.assertRaisesRegex(sqlite3.DatabaseError, "newer"):
+                with connect(state):
+                    self.fail("newer schemas must not be opened")
+
+            unchanged = sqlite3.connect(database)
+            try:
+                tables = {
+                    str(row[0])
+                    for row in unchanged.execute(
+                        """
+                        SELECT name FROM sqlite_master
+                        WHERE type = 'table'
+                        """
+                    )
+                }
+                self.assertEqual(
+                    tables,
+                    {"schema_meta", "future_only"},
+                )
+                self.assertEqual(
+                    unchanged.execute("PRAGMA journal_mode").fetchone()[0],
+                    "delete",
+                )
+            finally:
+                unchanged.close()
+
     def test_v01_package_table_is_extended_without_losing_rows(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             state = Path(directory)

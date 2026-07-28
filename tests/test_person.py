@@ -411,6 +411,118 @@ class PersonWorkspaceTests(unittest.TestCase):
             rescan=False,
         )
 
+    def test_clothing_enable_reserves_cross_process_mailbox_until_publish(
+        self,
+    ) -> None:
+        resource_id = self.insert_resource(
+            "Clothing (Female)",
+            CLOTHING_MEMBER,
+            key="cross-process-clothing",
+        )
+        self.service.reconcile(apply=True, activate=True)
+        self.assertFalse(self.archive.exists())
+        self.pids.append(1234)
+        second_service = ManagerService(
+            self.addons,
+            self.state.parent / "second-state",
+            vam_root=self.vam_root,
+            process_probe=lambda: list(self.pids),
+        )
+        original_lease_resource = self.service.lease_resource
+        package_enabled = threading.Event()
+        release_wear = threading.Event()
+        external_writer_called = threading.Event()
+        results: dict[str, object] = {}
+        errors: dict[str, BaseException] = {}
+
+        def blocking_lease_resource(*args: object, **kwargs: object) -> object:
+            result = original_lease_resource(*args, **kwargs)
+            package_enabled.set()
+            if not release_wear.wait(2):
+                raise TimeoutError("test did not release clothing publication")
+            return result
+
+        def external_writer() -> str:
+            external_writer_called.set()
+            return request_select_atom(self.vam_root, "Light")
+
+        def wear() -> None:
+            try:
+                results["wear"] = self.service.set_person_clothing(
+                    resource_id,
+                    target_uid="Person",
+                    active=True,
+                    revision="a" * 32,
+                )
+            except BaseException as error:
+                errors["wear"] = error
+
+        def publish_external() -> None:
+            try:
+                results["external"] = second_service._queue_bridge_request(
+                    external_writer
+                )
+            except BaseException as error:
+                errors["external"] = error
+
+        with (
+            mock.patch.object(
+                self.service,
+                "_scene_snapshot",
+                return_value=self.clothing_roster(),
+            ),
+            mock.patch.object(
+                self.service,
+                "lease_resource",
+                side_effect=blocking_lease_resource,
+            ),
+        ):
+            wear_thread = threading.Thread(target=wear)
+            wear_thread.start()
+            self.assertTrue(package_enabled.wait(2))
+            external_thread = threading.Thread(target=publish_external)
+            external_thread.start()
+            wrote_before_wear_published = external_writer_called.wait(0.1)
+            release_wear.set()
+            wear_thread.join(2)
+            external_thread.join(2)
+
+        self.assertFalse(wear_thread.is_alive())
+        self.assertFalse(external_thread.is_alive())
+        self.assertFalse(wrote_before_wear_published)
+        self.assertFalse(external_writer_called.is_set())
+        self.assertNotIn("wear", errors)
+        self.assertIsInstance(errors.get("external"), LiveActionBusyError)
+        wear_result = results["wear"]
+        assert isinstance(wear_result, dict)
+        self.assertTrue(wear_result["rescan"])
+        self.assertFalse(wear_result["bridge_busy"])
+        request = read_bridge_request(self.vam_root)
+        self.assertIsNotNone(request)
+        assert request is not None
+        self.assertEqual(request["requestId"], wear_result["bridge_request"])
+        self.assertEqual(request["command"], "setPersonClothingResource")
+        self.assertIs(request["rescan"], True)
+
+    def test_catalog_reference_normalizes_leading_dot_archive_member(self) -> None:
+        location = mock.Mock(
+            resource_path=CLOTHING_MEMBER,
+            archive_member=f"./{CLOTHING_MEMBER}",
+            package_ref="Creator.HairPack.1",
+        )
+
+        reference = self.service._catalog_resource_reference(
+            location,
+            required_prefix="Custom/Clothing/Female/",
+            extension=".vam",
+            require_preset_basename=False,
+        )
+
+        self.assertEqual(
+            reference,
+            f"Creator.HairPack.1:/{CLOTHING_MEMBER}",
+        )
+
     def test_clothing_changes_fail_closed_on_stale_gender_and_lock(self) -> None:
         resource_id = self.insert_resource(
             "Clothing (Female)",
@@ -1785,6 +1897,36 @@ class PersonWorkspaceTests(unittest.TestCase):
         assert request is not None
         self.assertEqual(request["requestId"], results["first"])
         self.assertEqual(request["targetUid"], "Light")
+
+    def test_mailbox_transaction_is_reentrant_without_relocking_file(
+        self,
+    ) -> None:
+        self.assertEqual(self.service._bridge_mailbox_transaction_depth, 0)
+        with self.service._bridge_mailbox_transaction(require_idle=False):
+            self.assertEqual(self.service._bridge_mailbox_transaction_depth, 1)
+            with self.service._bridge_mailbox_transaction(require_idle=False):
+                self.assertEqual(
+                    self.service._bridge_mailbox_transaction_depth,
+                    2,
+                )
+            self.assertEqual(self.service._bridge_mailbox_transaction_depth, 1)
+        self.assertEqual(self.service._bridge_mailbox_transaction_depth, 0)
+
+    def test_reconcile_if_idle_does_not_wait_for_another_manager_mailbox(
+        self,
+    ) -> None:
+        second_service = ManagerService(
+            self.addons,
+            self.state.parent / "second-state",
+            vam_root=self.vam_root,
+            process_probe=lambda: list(self.pids),
+        )
+        with (
+            self.service._bridge_mailbox_transaction(require_idle=False),
+            mock.patch.object(second_service, "_run_reconcile") as reconcile,
+        ):
+            self.assertIsNone(second_service.reconcile_if_idle(apply=True))
+        reconcile.assert_not_called()
 
     def test_reconcile_holds_mailbox_lock_across_switch_and_request(self) -> None:
         from vampip import service as service_module

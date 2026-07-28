@@ -158,6 +158,17 @@ class ManagerRequestHandler(BaseHTTPRequestHandler):
             raise ValueError("roots must be a list of package references")
         return roots
 
+    @staticmethod
+    def _boolean(
+        document: dict[str, Any],
+        key: str,
+        default: bool,
+    ) -> bool:
+        value = document.get(key, default)
+        if not isinstance(value, bool):
+            raise ValueError(f"{key} must be a boolean")
+        return value
+
     def _serve_static(self, path: str) -> None:
         names = {
             "/": "index.html",
@@ -316,8 +327,9 @@ class ManagerRequestHandler(BaseHTTPRequestHandler):
             document = self._read_json() if method == "POST" else {}
             service = self.server.service
             if method == "POST" and parsed.path == "/api/scan":
+                catalog = self._boolean(document, "catalog", True)
                 result: dict[str, object] = {"packages": service.scan_packages()}
-                if bool(document.get("catalog", True)):
+                if catalog:
                     result["catalog"] = service.import_catalog()
                 self._json(HTTPStatus.OK, result)
                 return
@@ -340,6 +352,7 @@ class ManagerRequestHandler(BaseHTTPRequestHandler):
                 )
                 return
             if method == "POST" and parsed.path == "/api/pins":
+                apply = self._boolean(document, "apply", False)
                 self._json(
                     HTTPStatus.OK,
                     service.pin(
@@ -349,7 +362,7 @@ class ManagerRequestHandler(BaseHTTPRequestHandler):
                             if document.get("label") is not None
                             else None
                         ),
-                        apply=bool(document.get("apply", False)),
+                        apply=apply,
                     ),
                 )
                 return
@@ -364,6 +377,7 @@ class ManagerRequestHandler(BaseHTTPRequestHandler):
                 )
                 return
             if method == "POST" and parsed.path == "/api/leases":
+                apply = self._boolean(document, "apply", True)
                 self._json(
                     HTTPStatus.OK,
                     service.lease(
@@ -374,12 +388,13 @@ class ManagerRequestHandler(BaseHTTPRequestHandler):
                             if document.get("label") is not None
                             else None
                         ),
-                        apply=bool(document.get("apply", True)),
+                        apply=apply,
                     ),
                 )
                 return
             resource_lease = _RESOURCE_LEASE.fullmatch(parsed.path)
             if method == "POST" and resource_lease:
+                apply = self._boolean(document, "apply", True)
                 self._json(
                     HTTPStatus.OK,
                     service.lease_resource(
@@ -390,7 +405,7 @@ class ManagerRequestHandler(BaseHTTPRequestHandler):
                             if document.get("label") is not None
                             else None
                         ),
-                        apply=bool(document.get("apply", True)),
+                        apply=apply,
                     ),
                 )
                 return
@@ -415,32 +430,38 @@ class ManagerRequestHandler(BaseHTTPRequestHandler):
                 )
                 return
             if method == "POST" and parsed.path == "/api/reconcile":
+                apply = self._boolean(document, "apply", False)
+                activate = self._boolean(document, "activate", False)
                 self._json(
                     HTTPStatus.OK,
                     service.reconcile(
-                        apply=bool(document.get("apply", False)),
-                        activate=bool(document.get("activate", False)),
+                        apply=apply,
+                        activate=activate,
                     ),
                 )
                 return
             if method == "POST" and parsed.path == "/api/deactivate":
+                apply = self._boolean(document, "apply", False)
                 self._json(
                     HTTPStatus.OK,
-                    service.deactivate(apply=bool(document.get("apply", False))),
+                    service.deactivate(apply=apply),
                 )
                 return
             if method == "POST" and parsed.path == "/api/settings":
                 if "auto_reconcile" in document:
-                    service.set_auto_reconcile(bool(document["auto_reconcile"]))
+                    service.set_auto_reconcile(
+                        self._boolean(document, "auto_reconcile", False)
+                    )
                 self._json(
                     HTTPStatus.OK,
                     {"auto_reconcile": service.auto_reconcile_enabled()},
                 )
                 return
             if method == "POST" and parsed.path == "/api/vam/launch":
+                reconcile = self._boolean(document, "reconcile", True)
                 self._json(
                     HTTPStatus.OK,
-                    service.launch_vam(reconcile=bool(document.get("reconcile", True))),
+                    service.launch_vam(reconcile=reconcile),
                 )
                 return
             if method == "POST" and parsed.path == "/api/vam/resource/apply":

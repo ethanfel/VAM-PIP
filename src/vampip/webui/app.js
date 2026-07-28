@@ -353,6 +353,7 @@ const app = {
   personError: null,
   personInFlight: false,
   personPollAt: 0,
+  personRequestGeneration: 0,
   selectedPersonUid: "",
   selectedAtomUid: "",
   atomTargetMode: "existing",
@@ -364,6 +365,7 @@ const app = {
   workspaceCategories: [],
   workspaceCategoriesError: null,
   workspaceCategoriesSource: "fallback",
+  workspaceCategoriesRetryAt: 0,
   selectedWorkspaceCategoryId: "scene",
   workspaceApplyMode: "replace",
   personMutationInFlight: false,
@@ -560,7 +562,7 @@ function bindEvents() {
     renderPersonContext();
     if (app.view === "workspace") {
       if (isIndividualClothingCategory()) {
-        loadLibrary();
+        loadLibrary({ preserveCount: true });
       } else {
         renderLibrary();
       }
@@ -762,6 +764,14 @@ async function loadActivity({ refreshOnTerminal = true } = {}) {
     if (shouldPollScene && Date.now() - app.personPollAt > 3000) {
       loadPersons({ quiet: true });
     }
+    if (
+      app.workspaceCategoriesError &&
+      !app.refreshing &&
+      Date.now() - app.workspaceCategoriesRetryAt > 5000
+    ) {
+      app.workspaceCategoriesRetryAt = Date.now();
+      scheduleRefresh = true;
+    }
     setConnection("online", "Local manager");
 
     const operation = app.activity.operation || {};
@@ -807,6 +817,15 @@ async function fetchLiveSceneSnapshot() {
   }
 }
 
+function beginPersonSnapshotRequest() {
+  app.personRequestGeneration += 1;
+  return app.personRequestGeneration;
+}
+
+function personSnapshotRequestIsCurrent(generation) {
+  return generation === app.personRequestGeneration;
+}
+
 async function fetchWorkspaceCategories() {
   try {
     return await api("/api/workspace/categories");
@@ -829,6 +848,8 @@ async function refreshAll(options = {}) {
 
   app.refreshing = true;
   setButtonBusy(elements.refreshButton, true);
+  const sceneRequestGeneration = beginPersonSnapshotRequest();
+  const sceneRequest = fetchLiveSceneSnapshot();
   try {
     const [
       statusResult,
@@ -841,7 +862,7 @@ async function refreshAll(options = {}) {
         api("/api/status"),
         api("/api/catalog/facets"),
         api("/api/session-plugins"),
-        fetchLiveSceneSnapshot(),
+        sceneRequest,
         fetchWorkspaceCategories(),
       ]);
 
@@ -869,15 +890,21 @@ async function refreshAll(options = {}) {
     renderSessionPlugins();
 
     if (sceneResult.status === "fulfilled") {
-      acceptPersonSnapshot(sceneResult.value || {});
+      acceptPersonSnapshot(
+        sceneResult.value || {},
+        sceneRequestGeneration,
+      );
     } else {
-      app.personError = sceneResult.reason;
-      app.personPollAt = Date.now();
+      acceptPersonSnapshotError(
+        sceneResult.reason,
+        sceneRequestGeneration,
+      );
     }
     if (workspaceCategoriesResult.status === "fulfilled") {
       acceptWorkspaceCategories(workspaceCategoriesResult.value);
     } else {
       app.workspaceCategoriesError = workspaceCategoriesResult.reason;
+      app.workspaceCategoriesRetryAt = Date.now();
       if (!app.workspaceCategories.length) {
         app.workspaceCategories = fallbackWorkspaceCategories();
       }
@@ -886,7 +913,7 @@ async function refreshAll(options = {}) {
     renderWorkspaceCategorySummary();
 
     if (app.view !== "access") {
-      await loadLibrary();
+      await loadLibrary({ preserveCount: true });
     }
   } catch (error) {
     setConnection("error", "Unavailable");
@@ -1133,6 +1160,7 @@ function acceptWorkspaceCategories(payload) {
   const categories = published.length ? published : fallbackWorkspaceCategories();
   app.workspaceCategories = categories;
   app.workspaceCategoriesError = null;
+  app.workspaceCategoriesRetryAt = 0;
   app.workspaceCategoriesSource = published.length ? "server" : "fallback";
 
   if (
@@ -1611,7 +1639,13 @@ function personControlKey() {
   });
 }
 
-function acceptPersonSnapshot(snapshot) {
+function acceptPersonSnapshot(snapshot, generation) {
+  if (
+    generation !== undefined &&
+    !personSnapshotRequestIsCurrent(generation)
+  ) {
+    return false;
+  }
   if (!snapshot || typeof snapshot !== "object") snapshot = {};
   app.person = snapshot;
   app.personError = null;
@@ -1644,19 +1678,33 @@ function acceptPersonSnapshot(snapshot) {
         ? selected.uid
         : atoms[0]?.uid || "";
   }
+  return true;
+}
+
+function acceptPersonSnapshotError(error, generation) {
+  if (
+    generation !== undefined &&
+    !personSnapshotRequestIsCurrent(generation)
+  ) {
+    return false;
+  }
+  app.personError = error;
+  app.personPollAt = Date.now();
+  return true;
 }
 
 async function loadPersons({ quiet = false } = {}) {
   if (app.personInFlight) return app.person;
   app.personInFlight = true;
   const previousKey = personControlKey();
+  const requestGeneration = beginPersonSnapshotRequest();
+  let responseAccepted = false;
   try {
     const snapshot = await fetchLiveSceneSnapshot();
-    acceptPersonSnapshot(snapshot);
+    responseAccepted = acceptPersonSnapshot(snapshot, requestGeneration);
   } catch (error) {
-    app.personError = error;
-    app.personPollAt = Date.now();
-    if (!quiet) {
+    responseAccepted = acceptPersonSnapshotError(error, requestGeneration);
+    if (responseAccepted && !quiet) {
       toast(
         "Live Person controls unavailable",
         `${errorMessage(error)} Catalogue browsing is still available.`,
@@ -1665,13 +1713,15 @@ async function loadPersons({ quiet = false } = {}) {
     }
   } finally {
     app.personInFlight = false;
-    renderPersonContext();
-    renderAtomContext();
-    if (app.view === "workspace" && previousKey !== personControlKey()) {
-      if (isIndividualClothingCategory()) {
-        await loadLibrary();
-      } else {
-        renderLibrary();
+    if (responseAccepted) {
+      renderPersonContext();
+      renderAtomContext();
+      if (app.view === "workspace" && previousKey !== personControlKey()) {
+        if (isIndividualClothingCategory()) {
+          await loadLibrary({ preserveCount: true });
+        } else {
+          renderLibrary();
+        }
       }
     }
   }
@@ -2491,7 +2541,7 @@ async function loadStatus() {
   setConnection("online", "Local manager");
 }
 
-async function loadLibrary({ append = false } = {}) {
+async function loadLibrary({ append = false, preserveCount = false } = {}) {
   if (app.view === "access") return;
 
   if (app.requestController) {
@@ -2502,6 +2552,10 @@ async function loadLibrary({ append = false } = {}) {
   app.loading = true;
 
   const offset = append ? app.items.length : 0;
+  const limit =
+    !append && preserveCount
+      ? Math.min(Math.max(PAGE_SIZE, app.items.length), 500)
+      : PAGE_SIZE;
   if (!append) {
     app.items = [];
     app.offset = 0;
@@ -2512,7 +2566,7 @@ async function loadLibrary({ append = false } = {}) {
   }
 
   const params = new URLSearchParams({
-    limit: String(PAGE_SIZE),
+    limit: String(limit),
     offset: String(offset),
   });
   if (app.query) params.set("q", app.query);
@@ -2971,16 +3025,27 @@ function createResourceCard(item) {
     workspaceCategory?.operation === "set-person-clothing"
   ) {
     const availability = clothingActionAvailability(item, workspaceCategory);
-    const clothingButton = button(
-      availability.label,
-      item.worn === true ? "secondary-button" : "primary-button",
-    );
-    clothingButton.disabled = !availability.allowed;
-    clothingButton.title = availability.reason;
-    clothingButton.addEventListener("click", () =>
-      setPersonClothing(item, workspaceCategory, clothingButton),
-    );
-    actions.append(clothingButton);
+    if (workspaceCategory.liveAction) {
+      const clothingButton = button(
+        availability.label,
+        item.worn === true ? "secondary-button" : "primary-button",
+      );
+      clothingButton.disabled = !availability.allowed;
+      clothingButton.title = availability.reason;
+      clothingButton.addEventListener("click", () =>
+        setPersonClothing(item, workspaceCategory, clothingButton),
+      );
+      actions.append(clothingButton);
+    }
+    if (!availability.allowed) {
+      appendPackageAccessActions(actions, item, {
+        active,
+        state,
+        root,
+        title,
+        pinned,
+      });
+    }
     body.append(actions);
     card.append(preview, body);
     return card;
@@ -3002,6 +3067,24 @@ function createResourceCard(item) {
     return card;
   }
 
+  appendPackageAccessActions(actions, item, {
+    active,
+    state,
+    root,
+    title,
+    pinned,
+  });
+  body.append(actions);
+
+  card.append(preview, body);
+  return card;
+}
+
+function appendPackageAccessActions(
+  actions,
+  item,
+  { active, state, root, title, pinned },
+) {
   const leaseButton = button(
     active ? "Keep for 3 days" : "Enable for 3 days",
     active ? "secondary-button" : "primary-button",
@@ -3039,10 +3122,6 @@ function createResourceCard(item) {
     pinned ? removePin(root, pinButton) : addPin(root, title, pinButton),
   );
   actions.append(pinButton);
-  body.append(actions);
-
-  card.append(preview, body);
-  return card;
 }
 
 function isIndividualClothingCategory(
@@ -3158,6 +3237,7 @@ async function setPersonClothing(item, category, sourceButton) {
     return;
   }
   const resourceId = Number(item.id);
+  const targetUid = app.selectedPersonUid;
   const key = `${category.id}:${resourceId}`;
   app.applyingWorkspaceResources.add(key);
   setButtonBusy(
@@ -3170,7 +3250,7 @@ async function setPersonClothing(item, category, sourceButton) {
       method: "POST",
       body: {
         resource_id: resourceId,
-        target_uid: app.selectedPersonUid,
+        target_uid: targetUid,
         active: availability.desiredActive,
         revision: availability.revision,
         days: 3,
@@ -3181,7 +3261,7 @@ async function setPersonClothing(item, category, sourceButton) {
       availability.desiredActive ? "Clothing queued" : "Removal queued",
       `${
         availability.desiredActive ? "Wear" : "Remove"
-      } “${resourceTitle(item)}” for ${app.selectedPersonUid}.`,
+      } “${resourceTitle(item)}” for ${targetUid}.`,
     );
     await refreshAll({ force: true });
   } catch (error) {
@@ -3192,7 +3272,7 @@ async function setPersonClothing(item, category, sourceButton) {
     );
     if (/revision|stale/i.test(errorMessage(error))) {
       await loadPersons({ quiet: true });
-      await loadLibrary();
+      await loadLibrary({ preserveCount: true });
     }
   } finally {
     app.applyingWorkspaceResources.delete(key);

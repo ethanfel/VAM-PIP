@@ -407,8 +407,16 @@ def classify_switch_move(entry: Mapping[str, object]) -> str:
     )
 
 
+class ManagerLockBusyError(RuntimeError):
+    """Raised when a non-blocking manager lock is already owned."""
+
+
 @contextmanager
-def manager_lock(state_dir: Path) -> Iterator[None]:
+def manager_lock(
+    state_dir: Path,
+    *,
+    blocking: bool = True,
+) -> Iterator[None]:
     """Serialize all manager operations that can rename archives."""
 
     state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -418,16 +426,26 @@ def manager_lock(state_dir: Path) -> Iterator[None]:
         pass
     lock_path = state_dir / "manager.lock"
     handle = lock_path.open("a+", encoding="utf-8")
+    locked = False
     try:
         try:
             import fcntl
         except ImportError:  # pragma: no cover - the manager targets Linux
             fcntl = None
         if fcntl is not None:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            flags = fcntl.LOCK_EX
+            if not blocking:
+                flags |= fcntl.LOCK_NB
+            try:
+                fcntl.flock(handle.fileno(), flags)
+            except BlockingIOError as error:
+                raise ManagerLockBusyError(
+                    f"manager lock is already held: {lock_path}"
+                ) from error
+            locked = True
         yield
     finally:
-        if fcntl is not None:
+        if locked:
             fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
         handle.close()
 

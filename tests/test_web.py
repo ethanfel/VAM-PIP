@@ -156,8 +156,8 @@ class WebSecurityTests(unittest.TestCase):
             "frame-ancestors 'none'", response.getheader("Content-Security-Policy")
         )
         document = response.read().decode("utf-8")
-        self.assertIn("/styles.css?v=0.6.0", document)
-        self.assertIn("/app.js?v=0.6.0", document)
+        self.assertIn("/styles.css?v=0.6.1", document)
+        self.assertIn("/app.js?v=0.6.1", document)
 
     def test_session_plugin_endpoints_report_and_import_defaults(self) -> None:
         preset_path = write_web_session_defaults(self.vam_root)
@@ -237,6 +237,88 @@ class WebSecurityTests(unittest.TestCase):
         self.assertEqual(response.status, 400)
         document = self.response_json(response)
         self.assertIn("include_disabled must be a boolean", document["error"])
+
+    def test_mutating_routes_require_strict_boolean_flags(self) -> None:
+        cases = (
+            (
+                "/api/scan",
+                {"catalog": "false"},
+                "catalog",
+                "scan_packages",
+            ),
+            (
+                "/api/pins",
+                {"roots": ["Creator.Package.1"], "apply": "false"},
+                "apply",
+                "pin",
+            ),
+            (
+                "/api/leases",
+                {"roots": ["Creator.Package.1"], "apply": "false"},
+                "apply",
+                "lease",
+            ),
+            (
+                "/api/resources/1/lease",
+                {"apply": "false"},
+                "apply",
+                "lease_resource",
+            ),
+            (
+                "/api/reconcile",
+                {"apply": "false"},
+                "apply",
+                "reconcile",
+            ),
+            (
+                "/api/reconcile",
+                {"activate": "false"},
+                "activate",
+                "reconcile",
+            ),
+            (
+                "/api/deactivate",
+                {"apply": "false"},
+                "apply",
+                "deactivate",
+            ),
+            (
+                "/api/settings",
+                {"auto_reconcile": "false"},
+                "auto_reconcile",
+                "set_auto_reconcile",
+            ),
+            (
+                "/api/vam/launch",
+                {"reconcile": "false"},
+                "reconcile",
+                "launch_vam",
+            ),
+        )
+        headers = {
+            "X-VAMPIP-Token": self.token,
+            "Content-Type": "application/json",
+        }
+
+        for route, document, field, service_method in cases:
+            with self.subTest(route=route, field=field):
+                body = json.dumps(document).encode("utf-8")
+                with mock.patch.object(
+                    self.server.service,
+                    service_method,
+                    return_value={},
+                ) as operation:
+                    self.connection.request(
+                        "POST",
+                        route,
+                        body=body,
+                        headers={**headers, "Content-Length": str(len(body))},
+                    )
+                    response = self.connection.getresponse()
+                    self.assertEqual(response.status, 400)
+                    payload = self.response_json(response)
+                    self.assertIn(f"{field} must be a boolean", payload["error"])
+                    operation.assert_not_called()
 
     def test_person_routes_expose_roster_and_accept_only_catalog_identity(self) -> None:
         roster = {

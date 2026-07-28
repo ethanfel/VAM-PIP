@@ -17,7 +17,7 @@ namespace VAMPip
     public class VAMPipBridge : MVRScript
     {
         private const int ProtocolVersion = 2;
-        private const string BridgeVersion = "0.6.0";
+        private const string BridgeVersion = "0.6.1";
 
         private const string PluginDataRoot = "Saves\\PluginData";
         private const string DataRoot = "Saves\\PluginData\\VAMPip";
@@ -210,6 +210,7 @@ namespace VAMPip
                 _instanceId = Guid.NewGuid().ToString("N");
                 EnsureBridgeDirectory();
                 RecoverLastCompletedRequest();
+                IgnoreCompletedLegacyRequest();
 
                 if (containingAtom == null ||
                     containingAtom.name != "CoreControl" ||
@@ -341,6 +342,63 @@ namespace VAMPip
             {
                 // The external reader and this recovery path both retry after
                 // a transient partial status write.
+            }
+        }
+
+        private void IgnoreCompletedLegacyRequest()
+        {
+            if (!FileManagerSecure.FileExists(RequestPath) ||
+                !FileManagerSecure.FileExists(StatusPath))
+            {
+                return;
+            }
+
+            try
+            {
+                string payload = FileManagerSecure.ReadAllText(RequestPath);
+                JSONClass request = JSON.Parse(payload).AsObject;
+                JSONClass status =
+                    JSON.Parse(FileManagerSecure.ReadAllText(StatusPath)).AsObject;
+                if (request == null || status == null)
+                {
+                    return;
+                }
+
+                int requestProtocol = request["protocol"].AsInt;
+                if (requestProtocol <= 0 ||
+                    requestProtocol >= ProtocolVersion ||
+                    status["protocol"].AsInt != requestProtocol)
+                {
+                    return;
+                }
+
+                string requestId =
+                    ((string)request["requestId"] ?? "").Trim();
+                string completedRequestId =
+                    ((string)status["lastCompletedRequestId"] ?? "").Trim();
+                if (requestId.Length == 0 ||
+                    !string.Equals(
+                        requestId,
+                        completedRequestId,
+                        StringComparison.Ordinal))
+                {
+                    return;
+                }
+
+                // A completed request from an older bridge is historical
+                // mailbox state, not work for this protocol generation.
+                // Remember its exact payload so the first poll does not turn
+                // a successful bridge upgrade into a spurious error.
+                _lastRequestPayload = payload;
+                SuperController.LogMessage(
+                    "[VAM-PIP Bridge] Ignored completed protocol-" +
+                    requestProtocol +
+                    " mailbox request after upgrade.");
+            }
+            catch
+            {
+                // PollRequestFile will validate and report a malformed or
+                // partially-written request once the bridge is operational.
             }
         }
 

@@ -308,6 +308,73 @@ class CatalogTests(unittest.TestCase):
                 after_database_failure["items"][0]["resource_type"], "Scene"
             )
 
+    def test_search_uses_json_scalar_values_without_exposing_internal_metadata(
+        self,
+    ) -> None:
+        resource_path = (
+            "Custom\\Clothing\\Female\\Creator\\Gala Dress\\Gala Dress.vam"
+        )
+        resource = {
+            "creatorName": "Creator",
+            "packageName": "Wardrobe",
+            "resourceFullFileName": resource_path,
+            "resourceType": "Clothing (Female)",
+            "presetAtomType": "Person",
+            "varVersions": ["1"],
+            "clothingVersions": [
+                {
+                    "varVersion": "1",
+                    "clothing": {
+                        "itemType": "ClothingFemale",
+                        "uid": "Creator:Gala Dress",
+                        "displayName": "Moonlit Gala",
+                        "creatorName": "Creator",
+                        "tags": "formal, evening",
+                        "isRealItem": True,
+                    },
+                }
+            ],
+        }
+        self.write_catalogue(
+            [resource],
+            user=[
+                {
+                    "creatorName": "Creator",
+                    "packageName": "Wardrobe",
+                    "resourceFullFileName": resource_path,
+                    "Tags": [
+                        {"tagName": "Keeper", "tagCategory": "User"},
+                    ],
+                }
+            ],
+        )
+
+        with connect(self.state) as database:
+            import_browserassist(database, self.vam_root)
+
+            for key_name in ("is_real_item", "tagName", "tagCategory"):
+                with self.subTest(key_name=key_name):
+                    result = search_resources(
+                        database,
+                        self.vam_root,
+                        query=key_name,
+                        include_package_state=False,
+                    )
+                    self.assertEqual(result["total"], 0)
+
+            for value in ("Moonlit Gala", "evening", "Keeper", "User", "true"):
+                with self.subTest(value=value):
+                    result = search_resources(
+                        database,
+                        self.vam_root,
+                        query=value,
+                        include_package_state=False,
+                    )
+                    self.assertEqual(result["total"], 1)
+                    item = result["items"][0]
+                    self.assertNotIn("clothing_versions", item)
+                    self.assertNotIn("clothing", item)
+
     def test_refresh_preserves_only_omitted_hidden_package_resources(self) -> None:
         hidden_resource = {
             "creatorName": "Creator",
@@ -562,7 +629,7 @@ class CatalogTests(unittest.TestCase):
                 self.addons / f"Creator.Wardrobe.{version}.var",
                 creator="Creator",
                 package="Wardrobe",
-                members={member: b"{}"},
+                members={f"./{member}": b"{}"},
             )
 
         with connect(self.state) as database:
@@ -756,6 +823,90 @@ class CatalogTests(unittest.TestCase):
                 str(SCHEMA_VERSION),
             )
 
+    def test_package_state_uses_the_version_that_contains_the_resource(self) -> None:
+        versioned_path = "Saves\\scene\\Versioned.json"
+        active_path = "Saves\\scene\\Active.json"
+        self.write_catalogue(
+            [
+                {
+                    "creatorName": "Creator",
+                    "packageName": "Bundle",
+                    "resourceFullFileName": versioned_path,
+                    "resourceType": "Scene",
+                    "presetAtomType": "",
+                    "varVersions": ["1", "2"],
+                },
+                {
+                    "creatorName": "Creator",
+                    "packageName": "ActiveOnly",
+                    "resourceFullFileName": active_path,
+                    "resourceType": "Scene",
+                    "presetAtomType": "",
+                    "varVersions": ["1"],
+                },
+            ]
+        )
+        hidden_path = self.addons / "Creator.Bundle.1.var"
+        make_var(
+            hidden_path,
+            creator="Creator",
+            package="Bundle",
+            members={"Saves/scene/Versioned.json": b"{}"},
+        )
+        hidden_path.rename(Path(f"{hidden_path}.vampip-disabled"))
+        make_var(
+            self.addons / "Creator.Bundle.2.var",
+            creator="Creator",
+            package="Bundle",
+            members={"Saves/scene/Other.json": b"{}"},
+        )
+        active_only_archive = self.addons / "Creator.ActiveOnly.1.var"
+        make_var(
+            active_only_archive,
+            creator="Creator",
+            package="ActiveOnly",
+            members={"Saves/scene/Active.json": b"{}"},
+        )
+
+        with connect(self.state) as database:
+            scan(self.addons, database)
+            import_browserassist(database, self.vam_root)
+
+            real_zip_file = zipfile.ZipFile
+            opened_archives: list[Path] = []
+
+            def tracking_zip_file(path, *args, **kwargs):
+                opened_archives.append(Path(path))
+                return real_zip_file(path, *args, **kwargs)
+
+            with mock.patch(
+                "vampip.catalog.zipfile.ZipFile",
+                side_effect=tracking_zip_file,
+            ):
+                hidden = search_resources(
+                    database,
+                    self.vam_root,
+                    addon_root=self.addons,
+                    package_state="hidden",
+                )
+
+            self.assertEqual(hidden["total"], 1)
+            hidden_item = hidden["items"][0]
+            self.assertEqual(hidden_item["package_ref"], "Creator.Bundle.1")
+            self.assertEqual(hidden_item["selected_version"], "1")
+            self.assertFalse(hidden_item["enabled"])
+            self.assertNotIn(active_only_archive, opened_archives)
+
+            active = search_resources(
+                database,
+                self.vam_root,
+                addon_root=self.addons,
+                package_state="active",
+            )
+            self.assertEqual(active["total"], 1)
+            self.assertEqual(active["items"][0]["package"], "ActiveOnly")
+            self.assertTrue(active["items"][0]["enabled"])
+
     def test_resolver_verifies_the_member_in_an_allowed_version(self) -> None:
         resource_path = "Saves\\scene\\Versioned.json"
         self.write_catalogue(
@@ -776,8 +927,8 @@ class CatalogTests(unittest.TestCase):
             creator="Creator",
             package="Bundle",
             members={
-                "Saves/scene/Versioned.json": b"{}",
-                "Saves/scene/Versioned.JPG": jpeg,
+                "./Saves/scene/Versioned.json": b"{}",
+                "./Saves/scene/Versioned.JPG": jpeg,
             },
         )
         make_var(
@@ -800,7 +951,7 @@ class CatalogTests(unittest.TestCase):
             self.assertIsNotNone(location)
             assert location is not None
             self.assertEqual(location.version_text, "1")
-            self.assertEqual(location.archive_member, "Saves/scene/Versioned.json")
+            self.assertEqual(location.archive_member, "./Saves/scene/Versioned.json")
             self.assertEqual(location.package_ref, "Creator.Bundle.1")
 
             active = search_resources(

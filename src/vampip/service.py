@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import asdict
 from datetime import datetime, timezone
 import hashlib
@@ -10,7 +11,7 @@ import re
 import sqlite3
 import subprocess
 import threading
-from typing import Callable
+from typing import Callable, Iterator
 import uuid
 
 from vampip.analysis import family_id, package_id
@@ -67,6 +68,7 @@ from vampip.session_plugins import (
     load_session_plugin_defaults,
 )
 from vampip.switching import (
+    ManagerLockBusyError,
     SwitchPlan,
     apply_switch,
     build_baseline_restore_plan,
@@ -367,6 +369,7 @@ class ManagerService:
         # reconciliation and request publication so a standalone rescan
         # cannot replace an ordered live action (or vice versa).
         self._bridge_mailbox_lock = threading.RLock()
+        self._bridge_mailbox_transaction_depth = 0
         self._activity_lock = threading.Lock()
         self._operation_sequence = 0
         self._operation: dict[str, object] = {
@@ -1051,6 +1054,9 @@ class ManagerService:
         resource_path = str(getattr(location, "resource_path", "")).replace("\\", "/")
         archive_member = getattr(location, "archive_member", None)
         candidate = str(archive_member or resource_path).replace("\\", "/")
+        if archive_member is not None:
+            while candidate.startswith("./"):
+                candidate = candidate[2:]
         if (
             not candidate
             or candidate != candidate.strip()
@@ -1191,19 +1197,52 @@ class ManagerService:
                 "the VaM bridge is still handling another request"
             )
 
+    @contextmanager
+    def _bridge_mailbox_transaction(
+        self,
+        *,
+        require_idle: bool = True,
+        blocking: bool = True,
+    ) -> Iterator[None]:
+        """Reserve the bridge mailbox across one composite live action.
+
+        The in-process lock orders local actions, while the dedicated file
+        lock extends that reservation to other manager processes. Callers may
+        safely reconcile package visibility before publishing their request:
+        another manager cannot occupy the mailbox in between those steps.
+        """
+
+        with self._bridge_mailbox_lock:
+            if self._bridge_mailbox_transaction_depth:
+                if require_idle:
+                    self._ensure_bridge_mailbox_idle()
+                self._bridge_mailbox_transaction_depth += 1
+                try:
+                    yield
+                finally:
+                    self._bridge_mailbox_transaction_depth -= 1
+                return
+
+            lock_dir = bridge_directory(self.vam_root) / ".vampip-mailbox-lock"
+            with manager_lock(lock_dir, blocking=blocking):
+                if require_idle:
+                    self._ensure_bridge_mailbox_idle()
+                self._bridge_mailbox_transaction_depth = 1
+                try:
+                    yield
+                finally:
+                    self._bridge_mailbox_transaction_depth = 0
+
     def _queue_bridge_request(self, writer: Callable[[], str]) -> str:
         """Publish one ordered request after an atomic cross-process check."""
 
-        with self._bridge_mailbox_lock:
-            # This is deliberately distinct from state_dir/manager.lock.
-            # Live actions can reconcile packages before publication; a
-            # dedicated mailbox lock avoids reversing that filesystem lock's
-            # order while still serializing managers that use different
-            # state directories for the same VaM installation.
-            lock_dir = bridge_directory(self.vam_root) / ".vampip-mailbox-lock"
-            with manager_lock(lock_dir):
-                self._ensure_bridge_mailbox_idle()
-                return writer()
+        # This is deliberately distinct from state_dir/manager.lock.
+        # Live actions can reconcile packages before publication; a dedicated
+        # mailbox lock avoids reversing that filesystem lock's order while
+        # still serializing managers that use different state directories for
+        # the same VaM installation.
+        with self._bridge_mailbox_transaction():
+            return writer()
 
     def _try_queue_bridge_request(
         self,
@@ -1275,8 +1314,7 @@ class ManagerService:
     ) -> dict[str, object]:
         """Apply a live-action resource selected solely by catalog identity."""
 
-        with self._bridge_mailbox_lock:
-            self._ensure_bridge_mailbox_idle()
+        with self._bridge_mailbox_transaction():
             return self._apply_resource_locked(
                 resource_id,
                 target_uid=target_uid,
@@ -1317,8 +1355,7 @@ class ManagerService:
         if isinstance(days, bool) or not isinstance(days, (int, float)):
             raise TypeError("days must be a number")
 
-        with self._bridge_mailbox_lock:
-            self._ensure_bridge_mailbox_idle()
+        with self._bridge_mailbox_transaction():
             with connect(self.state_dir) as connection:
                 self._rows(connection, refresh=False)
                 row = connection.execute(
@@ -1471,8 +1508,7 @@ class ManagerService:
     ) -> dict[str, object]:
         """Compatibility wrapper for catalog-backed Person preset application."""
 
-        with self._bridge_mailbox_lock:
-            self._ensure_bridge_mailbox_idle()
+        with self._bridge_mailbox_transaction():
             return self._apply_resource_locked(
                 resource_id,
                 target_uid=target_uid,
@@ -2742,13 +2778,22 @@ class ManagerService:
         activate: bool = False,
         bridge_rescan: bool = True,
     ) -> dict[str, object]:
-        # Lock order is bridge mailbox -> operation gate -> filesystem
-        # manager lock. Composite live actions already own the mailbox gate
-        # when they recurse here through lease_resource().
-        with self._bridge_mailbox_lock:
+        # Applied reconciliation follows the shared mailbox -> operation ->
+        # state lock order across manager processes. Dry runs do not mutate
+        # packages or publish bridge work, so they need only local ordering.
+        if not apply:
+            with self._bridge_mailbox_lock:
+                with self._operation_gate:
+                    return self._run_reconcile(
+                        apply=False,
+                        activate=activate,
+                        bridge_rescan=bridge_rescan,
+                    )
+
+        with self._bridge_mailbox_transaction(require_idle=False):
             with self._operation_gate:
                 return self._run_reconcile(
-                    apply=apply,
+                    apply=True,
                     activate=activate,
                     bridge_rescan=bridge_rescan,
                 )
@@ -2765,16 +2810,35 @@ class ManagerService:
         if not self._bridge_mailbox_lock.acquire(blocking=False):
             return None
         try:
-            if not self._operation_gate.acquire(blocking=False):
-                return None
+            if not apply:
+                if not self._operation_gate.acquire(blocking=False):
+                    return None
+                try:
+                    return self._run_reconcile(
+                        apply=False,
+                        activate=activate,
+                        bridge_rescan=bridge_rescan,
+                    )
+                finally:
+                    self._operation_gate.release()
+
             try:
-                return self._run_reconcile(
-                    apply=apply,
-                    activate=activate,
-                    bridge_rescan=bridge_rescan,
-                )
-            finally:
-                self._operation_gate.release()
+                with self._bridge_mailbox_transaction(
+                    require_idle=False,
+                    blocking=False,
+                ):
+                    if not self._operation_gate.acquire(blocking=False):
+                        return None
+                    try:
+                        return self._run_reconcile(
+                            apply=True,
+                            activate=activate,
+                            bridge_rescan=bridge_rescan,
+                        )
+                    finally:
+                        self._operation_gate.release()
+            except ManagerLockBusyError:
+                return None
         finally:
             self._bridge_mailbox_lock.release()
 
@@ -3079,10 +3143,12 @@ class ManagerService:
             return bool(get_setting(connection, "auto_reconcile", True))
 
     def launch_vam(self, *, reconcile: bool = True) -> dict[str, object]:
-        # Keep launch inside the same in-process gate as package switches. The
-        # lock is reentrant because a managed launch reconciles before Popen.
-        with self._operation_gate:
-            return self._launch_vam_locked(reconcile=reconcile)
+        # Reserve the shared mailbox before the operation gate. A managed
+        # launch can then nest applied reconciliation without reversing the
+        # lock order used by composite live actions.
+        with self._bridge_mailbox_transaction(require_idle=False):
+            with self._operation_gate:
+                return self._launch_vam_locked(reconcile=reconcile)
 
     def _launch_vam_locked(self, *, reconcile: bool) -> dict[str, object]:
         pids = self._running_pids()

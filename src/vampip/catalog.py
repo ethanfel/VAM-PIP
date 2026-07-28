@@ -883,6 +883,31 @@ def _escape_like(value: str) -> str:
     return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
+def _json_scalar_search(column: str) -> str:
+    """Return SQL that searches JSON values without matching object keys."""
+
+    return f"""
+        EXISTS (
+            SELECT 1
+            FROM json_tree(
+                CASE
+                    WHEN json_valid(catalog_resources.{column})
+                    THEN catalog_resources.{column}
+                    ELSE '[]'
+                END
+            ) AS json_value
+            WHERE (
+                CASE json_value.type
+                    WHEN 'true' THEN 'true'
+                    WHEN 'false' THEN 'false'
+                    WHEN 'null' THEN 'null'
+                    ELSE CAST(json_value.atom AS TEXT)
+                END
+            ) COLLATE NOCASE LIKE ? ESCAPE '\\'
+        )
+    """
+
+
 def _tag_identities(row: sqlite3.Row) -> set[tuple[str, str]]:
     identities: set[tuple[str, str]] = set()
     for tag in _json_list(row["tags_json"]):
@@ -927,6 +952,7 @@ def search_resources(
     if source is not None:
         where.append("source = ?")
         parameters.append(source)
+    packages_root: Path | None = None
     if package_state is not None:
         if package_state not in {"active", "hidden", "missing", "local"}:
             raise ValueError(
@@ -937,36 +963,6 @@ def search_resources(
             if addon_root is not None
             else (Path(vam_root).expanduser().resolve() / "AddonPackages")
         )
-        installed = """
-            EXISTS (
-                SELECT 1
-                FROM catalog_resource_versions AS rv
-                JOIN package_files AS pf
-                  ON pf.root = ?
-                 AND pf.valid = 1
-                 AND pf.creator = catalog_resources.creator COLLATE NOCASE
-                 AND pf.package_name =
-                     catalog_resources.package_name COLLATE NOCASE
-                 AND pf.version_text = rv.version_text COLLATE NOCASE
-                WHERE rv.resource_id = catalog_resources.id
-            )
-        """
-        active = installed.replace(
-            "AND pf.valid = 1", "AND pf.valid = 1 AND pf.enabled = 1"
-        )
-        packaged = "(creator != '' OR package_name != '')"
-        local = "(creator = '' AND package_name = '')"
-        if package_state == "local":
-            where.append(local)
-        elif package_state == "active":
-            where.append(f"({local} OR {active})")
-            parameters.append(str(packages_root))
-        elif package_state == "hidden":
-            where.append(f"({packaged} AND {installed} AND NOT {active})")
-            parameters.extend((str(packages_root), str(packages_root)))
-        else:
-            where.append(f"({packaged} AND NOT {installed})")
-            parameters.append(str(packages_root))
     selected_resource_types = {
         value.strip()
         for value in ([resource_type] if resource_type is not None else [])
@@ -1010,17 +1006,98 @@ def search_resources(
             "resource_path",
             "resource_type",
             "atom_type",
-            "tags_json",
-            "clothing_versions_json",
         )
+        json_fields = ("tags_json", "clothing_versions_json")
         where.append(
             "("
             + " OR ".join(
                 f"{field} COLLATE NOCASE LIKE ? ESCAPE '\\'" for field in fields
             )
+            + " OR "
+            + " OR ".join(_json_scalar_search(field) for field in json_fields)
             + ")"
         )
-        parameters.extend(pattern for _ in fields)
+        parameters.extend(pattern for _ in (*fields, *json_fields))
+
+    resolver: _ResourceResolver | None = None
+    if package_state is not None:
+        assert packages_root is not None
+        installed = """
+            EXISTS (
+                SELECT 1
+                FROM catalog_resource_versions AS rv
+                JOIN package_files AS pf
+                  ON pf.root = ?
+                 AND pf.valid = 1
+                 AND pf.creator = catalog_resources.creator COLLATE NOCASE
+                 AND pf.package_name =
+                     catalog_resources.package_name COLLATE NOCASE
+                 AND pf.version_text = rv.version_text COLLATE NOCASE
+                WHERE rv.resource_id = catalog_resources.id
+            )
+        """
+        active = installed.replace(
+            "AND pf.valid = 1", "AND pf.valid = 1 AND pf.enabled = 1"
+        )
+        inactive = installed.replace(
+            "AND pf.valid = 1", "AND pf.valid = 1 AND pf.enabled = 0"
+        )
+        packaged = "(creator != '' OR package_name != '')"
+        local = "(creator = '' AND package_name = '')"
+        packages_root_text = str(packages_root)
+        if package_state == "local":
+            where.append(local)
+        elif package_state == "missing":
+            where.append(f"({packaged} AND NOT {installed})")
+            parameters.append(packages_root_text)
+        else:
+            # An enabled and a hidden allowed version can disagree about whether
+            # this exact resource exists. Verify only those ambiguous rows
+            # against the archives; the normal all-catalog path remains SQL-only.
+            ambiguous_where = " AND ".join(
+                [*where, packaged, active, inactive]
+            )
+            ambiguous_rows = list(
+                connection.execute(
+                    f"""
+                    SELECT * FROM catalog_resources
+                    WHERE {ambiguous_where}
+                    """,
+                    [*parameters, packages_root_text, packages_root_text],
+                )
+            )
+            resolver = _ResourceResolver(
+                connection,
+                Path(vam_root).expanduser().resolve(),
+                addon_root=addon_root,
+            )
+            exact_hidden_ids: set[int] = set()
+            exact_non_active_ids: set[int] = set()
+            for row in ambiguous_rows:
+                location = resolver.resolve_row(row)
+                resource_id = int(row["id"])
+                if location is None or not location.enabled:
+                    exact_non_active_ids.add(resource_id)
+                if location is not None and not location.enabled:
+                    exact_hidden_ids.add(resource_id)
+            if package_state == "active":
+                state_filter = f"({local} OR {active})"
+                state_parameters: list[object] = [packages_root_text]
+                if exact_non_active_ids:
+                    ids = ", ".join(
+                        str(value) for value in sorted(exact_non_active_ids)
+                    )
+                    state_filter = f"({state_filter} AND id NOT IN ({ids}))"
+                where.append(state_filter)
+                parameters.extend(state_parameters)
+            else:
+                state_filter = f"({packaged} AND {installed} AND NOT {active})"
+                state_parameters = [packages_root_text, packages_root_text]
+                if exact_hidden_ids:
+                    ids = ", ".join(str(value) for value in sorted(exact_hidden_ids))
+                    state_filter = f"({state_filter} OR id IN ({ids}))"
+                where.append(state_filter)
+                parameters.extend(state_parameters)
 
     where_sql = " AND ".join(where)
     order_sql = """
@@ -1075,17 +1152,19 @@ def search_resources(
 
     items = [_resource_document(row) for row in rows]
     if include_package_state and rows:
-        resolver = _ResourceResolver(
-            connection,
-            Path(vam_root).expanduser().resolve(),
-            addon_root=addon_root,
-        )
+        if resolver is None:
+            resolver = _ResourceResolver(
+                connection,
+                Path(vam_root).expanduser().resolve(),
+                addon_root=addon_root,
+            )
         for row, item in zip(rows, items):
             item.update(resolver.resource_state(row))
             clothing = _select_clothing_metadata(item)
             if clothing is not None:
                 item["clothing"] = clothing
-            item.pop("clothing_versions", None)
+    for item in items:
+        item.pop("clothing_versions", None)
     return {
         "items": items,
         "total": total,
@@ -1387,9 +1466,9 @@ class _ResourceResolver:
                 "clothing (female)",
                 "clothing (male)",
             }:
-                resource_path = str(
-                    location.archive_member or location.resource_path
-                ).replace("\\", "/")
+                resource_path = _normalized_member(
+                    str(location.archive_member or location.resource_path)
+                )
                 state["resolved_resource_ref"] = (
                     f"{location.package_ref}:/{resource_path}"
                     if location.package_ref

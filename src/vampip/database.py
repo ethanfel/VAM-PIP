@@ -156,6 +156,24 @@ def connect(state_dir: Path) -> Iterator[sqlite3.Connection]:
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA foreign_keys = ON")
     connection.execute("PRAGMA busy_timeout = 5000")
+    has_schema_meta = connection.execute(
+        """
+        SELECT 1 FROM sqlite_master
+        WHERE type = 'table' AND name = 'schema_meta'
+        """
+    ).fetchone()
+    if has_schema_meta is not None:
+        stored_version = connection.execute(
+            "SELECT value FROM schema_meta WHERE key = 'schema_version'"
+        ).fetchone()
+        if (
+            stored_version is not None
+            and int(stored_version["value"]) > SCHEMA_VERSION
+        ):
+            connection.close()
+            raise sqlite3.DatabaseError(
+                "VAM-PIP state was created by a newer, incompatible version"
+            )
     connection.execute("PRAGMA journal_mode = WAL")
     connection.executescript(SCHEMA)
     columns = {
@@ -189,14 +207,6 @@ def connect(state_dir: Path) -> Iterator[sqlite3.Connection]:
         )
         """
     )
-    stored_version = connection.execute(
-        "SELECT value FROM schema_meta WHERE key = 'schema_version'"
-    ).fetchone()
-    if stored_version is not None and int(stored_version["value"]) > SCHEMA_VERSION:
-        connection.close()
-        raise sqlite3.DatabaseError(
-            "VAM-PIP state was created by a newer, incompatible version"
-        )
     connection.execute(
         """
         INSERT INTO schema_meta(key, value) VALUES ('schema_version', ?)
