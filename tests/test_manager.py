@@ -16,6 +16,7 @@ from vampip.manager_state import add_pin, list_leases
 from vampip.session_plugins import SessionPluginPresetError
 from vampip.service import ManagerService
 from vampip.switching import rollback_switch
+from vampip.web import AutoReconciler
 
 from tests.test_vampip import make_var
 
@@ -242,6 +243,121 @@ class ManagerServiceTests(unittest.TestCase):
         status = service.status()
         self.assertFalse(status["managed_mode"])
         self.assertEqual(status["baseline_count"], 0)
+
+    def test_status_refresh_discovers_new_package_version(self) -> None:
+        downloads = self.addons / "Downloads"
+        downloads.mkdir()
+        service = self.service()
+        initial = service.status()
+
+        make_var(
+            downloads / "Scene.Show.2.var",
+            creator="Scene",
+            package="Show",
+        )
+
+        refreshed = service.status()
+        listed = service.list_packages(query="Scene.Show")
+
+        self.assertEqual(
+            refreshed["packages"]["total"],
+            initial["packages"]["total"] + 1,
+        )
+        self.assertEqual(
+            {item["id"] for item in listed["items"]},
+            {"Scene.Show.1", "Scene.Show.2"},
+        )
+
+    def test_status_refresh_skips_full_scan_when_inventory_is_unchanged(
+        self,
+    ) -> None:
+        service = self.service()
+        initial = service.status()
+
+        with mock.patch("vampip.service.scan", wraps=scan) as full_scan:
+            refreshed = service.status()
+
+        full_scan.assert_not_called()
+        self.assertEqual(refreshed["packages"], initial["packages"])
+
+    def test_auto_reconciler_rescans_new_enabled_package_once_while_vam_runs(
+        self,
+    ) -> None:
+        downloads = self.addons / "Downloads"
+        downloads.mkdir()
+        offline = self.service()
+        offline.pin(["Core.Base"])
+        offline.reconcile(apply=True, activate=True)
+
+        running = self.service([4321])
+        running.set_auto_reconcile(False)
+        running.status()
+        make_var(
+            downloads / "Fresh.Download.1.var",
+            creator="Fresh",
+            package="Download",
+        )
+        reconciler = AutoReconciler(running, interval=0.01)
+
+        with (
+            mock.patch(
+                "vampip.bridge._write_request",
+                return_value="rescan-request",
+            ) as write_bridge_request,
+            mock.patch.object(
+                reconciler._stop,
+                "wait",
+                side_effect=[False, False, True],
+            ),
+        ):
+            reconciler._run()
+
+        write_bridge_request.assert_called_once()
+        self.assertEqual(
+            write_bridge_request.call_args.args[1]["command"],
+            "rescan",
+        )
+
+    def test_auto_reconciler_waits_until_a_new_archive_is_valid(self) -> None:
+        downloads = self.addons / "Downloads"
+        downloads.mkdir()
+        self.service().status()
+        running = self.service([4321])
+        running.status()
+        incoming = downloads / "Fresh.Download.1.var"
+        incoming.write_bytes(b"incomplete download")
+
+        invalid_reconciler = AutoReconciler(running, interval=0.01)
+        with (
+            mock.patch("vampip.bridge._write_request") as write_bridge_request,
+            mock.patch.object(
+                invalid_reconciler._stop,
+                "wait",
+                side_effect=[False, True],
+            ),
+        ):
+            invalid_reconciler._run()
+        write_bridge_request.assert_not_called()
+
+        make_var(
+            incoming,
+            creator="Fresh",
+            package="Download",
+        )
+        valid_reconciler = AutoReconciler(running, interval=0.01)
+        with (
+            mock.patch(
+                "vampip.bridge._write_request",
+                return_value="rescan-request",
+            ) as write_bridge_request,
+            mock.patch.object(
+                valid_reconciler._stop,
+                "wait",
+                side_effect=[False, False, True],
+            ),
+        ):
+            valid_reconciler._run()
+        write_bridge_request.assert_called_once()
 
     def test_session_plugins_reports_package_and_loose_plugin_state(self) -> None:
         write_session_plugin_defaults(

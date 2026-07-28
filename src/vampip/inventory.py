@@ -24,6 +24,8 @@ class ScanResult:
     unchanged: int
     invalid: int
     removed: int
+    added: int
+    active_changed: int
     elapsed: float
 
 
@@ -34,6 +36,75 @@ def _iter_var_files(root: Path) -> Iterable[Path]:
             folded = filename.casefold()
             if folded.endswith(".var") or folded.endswith(f".var{DISABLED_SUFFIX}"):
                 yield base / filename
+
+
+def _fingerprint_entries(
+    entries: Iterable[tuple[str, int, int, int, int]],
+) -> str:
+    ordered = sorted(entries)
+    digest = hashlib.blake2b(digest_size=16)
+    for relative_path, size, mtime_ns, device, inode in ordered:
+        digest.update(os.fsencode(relative_path))
+        digest.update(b"\0")
+        for value in (size, mtime_ns, device, inode):
+            digest.update(str(value).encode("ascii"))
+            digest.update(b"\0")
+    return f"1:{len(ordered)}:{digest.hexdigest()}"
+
+
+def inventory_fingerprint(root: Path) -> str:
+    """Return a cheap recursive identity for package directory contents."""
+
+    root = root.resolve()
+    if not root.is_dir():
+        raise FileNotFoundError(f"AddonPackages directory does not exist: {root}")
+    root_text = os.fspath(root)
+    entries: list[tuple[str, int, int, int, int]] = []
+    pending = [(root_text, "")]
+    while pending:
+        directory, prefix = pending.pop()
+        try:
+            with os.scandir(directory) as iterator:
+                directory_entries = list(iterator)
+        except OSError:
+            continue
+        for entry in directory_entries:
+            relative_path = prefix + entry.name
+            try:
+                if entry.is_dir(follow_symlinks=False):
+                    pending.append((entry.path, relative_path + os.sep))
+                    continue
+                folded = entry.name.casefold()
+                if not (
+                    folded.endswith(".var")
+                    or folded.endswith(f".var{DISABLED_SUFFIX}")
+                ):
+                    continue
+                stat = entry.stat()
+            except OSError:
+                continue
+            entries.append(
+                (
+                    relative_path,
+                    stat.st_size,
+                    stat.st_mtime_ns,
+                    stat.st_dev,
+                    stat.st_ino,
+                )
+            )
+    return _fingerprint_entries(entries)
+
+
+def inventory_changed(connection: sqlite3.Connection, root: Path) -> bool:
+    """Return whether package paths or filesystem identities changed."""
+
+    root = root.resolve()
+    key = f"inventory_fingerprint:{root}"
+    stored = connection.execute(
+        "SELECT value FROM schema_meta WHERE key = ?",
+        (key,),
+    ).fetchone()
+    return stored is None or stored["value"] != inventory_fingerprint(root)
 
 
 def _flatten_dependencies(value: object) -> list[str]:
@@ -161,7 +232,8 @@ def scan(root: Path, connection: sqlite3.Connection) -> ScanResult:
     existing_by_inode: dict[tuple[int, int], sqlite3.Row] = {}
     for row in existing.values():
         existing_by_inode.setdefault((row["device"], row["inode"]), row)
-    found = inspected = unchanged = 0
+    found = inspected = unchanged = added = active_changed = 0
+    fingerprint_entries: list[tuple[str, int, int, int, int]] = []
 
     upsert = """
         INSERT INTO package_files (
@@ -202,6 +274,16 @@ def scan(root: Path, connection: sqlite3.Connection) -> ScanResult:
         except OSError:
             continue
         path_text = str(path.resolve())
+        relative_path = os.path.relpath(path, root)
+        fingerprint_entries.append(
+            (
+                relative_path,
+                stat.st_size,
+                stat.st_mtime_ns,
+                stat.st_dev,
+                stat.st_ino,
+            )
+        )
         cached = existing.get(path_text)
         enabled = 0 if path.name.casefold().endswith(DISABLED_SUFFIX) else 1
         cached_unchanged = (
@@ -211,9 +293,20 @@ def scan(root: Path, connection: sqlite3.Connection) -> ScanResult:
             and cached["device"] == stat.st_dev
             and cached["inode"] == stat.st_ino
         )
+        moved = (
+            existing_by_inode.get((stat.st_dev, stat.st_ino))
+            if cached is None
+            else None
+        )
+        inspect_active_change = False
+        if cached is None and moved is None:
+            added += 1
+            if enabled:
+                inspect_active_change = True
+        elif cached is not None and not cached_unchanged and enabled:
+            inspect_active_change = True
 
         if cached is None:
-            moved = existing_by_inode.get((stat.st_dev, stat.st_ino))
             if (
                 not force_inspection
                 and moved is not None
@@ -253,6 +346,8 @@ def scan(root: Path, connection: sqlite3.Connection) -> ScanResult:
                         "scan_generation": generation,
                     },
                 )
+                if enabled and not moved["enabled"] and moved["valid"]:
+                    active_changed += 1
                 unchanged += 1
                 continue
 
@@ -279,6 +374,8 @@ def scan(root: Path, connection: sqlite3.Connection) -> ScanResult:
 
         details = inspect_archive(path)
         inspected += 1
+        if inspect_active_change and details["valid"]:
+            active_changed += 1
         connection.execute(
             upsert,
             {
@@ -296,9 +393,18 @@ def scan(root: Path, connection: sqlite3.Connection) -> ScanResult:
                 **details,
             },
         )
-        if found % 250 == 0:
-            connection.commit()
 
+    removed_active = int(
+        connection.execute(
+            """
+            SELECT COUNT(*) FROM package_files
+            WHERE root = ? AND scan_generation != ?
+              AND enabled = 1 AND valid = 1
+            """,
+            (str(root), generation),
+        ).fetchone()[0]
+    )
+    active_changed += removed_active
     cursor = connection.execute(
         "DELETE FROM package_files WHERE root = ? AND scan_generation != ?",
         (str(root), generation),
@@ -309,6 +415,16 @@ def scan(root: Path, connection: sqlite3.Connection) -> ScanResult:
         ON CONFLICT(key) DO UPDATE SET value = excluded.value
         """,
         (inspection_key, str(ARCHIVE_INSPECTION_VERSION)),
+    )
+    connection.execute(
+        """
+        INSERT INTO schema_meta(key, value) VALUES (?, ?)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value
+        """,
+        (
+            f"inventory_fingerprint:{root}",
+            _fingerprint_entries(fingerprint_entries),
+        ),
     )
     invalid_total = connection.execute(
         "SELECT COUNT(*) FROM package_files WHERE root = ? AND valid = 0",
@@ -321,6 +437,8 @@ def scan(root: Path, connection: sqlite3.Connection) -> ScanResult:
         unchanged=unchanged,
         invalid=invalid_total,
         removed=cursor.rowcount,
+        added=added,
+        active_changed=active_changed,
         elapsed=time.monotonic() - started,
     )
 

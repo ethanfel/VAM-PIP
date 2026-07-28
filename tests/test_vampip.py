@@ -192,6 +192,25 @@ class InventoryTests(unittest.TestCase):
             result = scan(self.addons, database)
             self.assertEqual(result.inspected, 1)
 
+    def test_scan_reports_external_enable_and_active_removal(self) -> None:
+        archive = self.addons / "Owner.Asset.1.var"
+        make_var(archive, creator="Owner", package="Asset")
+        hidden = Path(f"{archive}.vampip-disabled")
+        archive.rename(hidden)
+
+        with connect(self.state) as database:
+            initial = scan(self.addons, database)
+            self.assertEqual(initial.active_changed, 0)
+
+            hidden.rename(archive)
+            enabled = scan(self.addons, database)
+            self.assertEqual(enabled.active_changed, 1)
+
+            archive.unlink()
+            removed = scan(self.addons, database)
+            self.assertEqual(removed.active_changed, 1)
+            self.assertEqual(removed.removed, 1)
+
     def test_inspection_version_invalidates_unchanged_archive_cache(self) -> None:
         archive = self.addons / "Owner.Asset.1.var"
         make_var(archive, creator="Owner", package="Asset")

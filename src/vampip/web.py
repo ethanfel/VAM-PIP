@@ -684,14 +684,16 @@ class AutoReconciler:
                 operation = activity.get("operation", {})
                 if isinstance(operation, dict) and bool(operation.get("busy")):
                     continue
-                if not self.service.auto_reconcile_enabled():
-                    continue
                 status = self.service.status()
-                if not status["managed_mode"]:
+                if self.service.rescan_discovered_packages_if_idle() is not None:
+                    continue
+                if not self.service.auto_reconcile_enabled():
                     continue
                 packages_need_enable = int(status.get("pending_enable", 0)) > 0
                 packages_need_disable = int(status.get("pending_disable", 0)) > 0
                 vam_running = bool(status["vam"]["running"])
+                if not status["managed_mode"]:
+                    continue
                 if packages_need_enable or (packages_need_disable and not vam_running):
                     self.service.reconcile_if_idle(apply=True)
             except Exception as exc:

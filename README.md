@@ -21,7 +21,7 @@ leaving managed mode restores that baseline.
 
 ## Current status
 
-Version 0.6.2 is functional but should still be treated as an early release.
+Version 0.6.3 is functional but should still be treated as an early release.
 Package switching is deliberately conservative:
 
 - entering managed mode requires explicit confirmation;
@@ -109,6 +109,18 @@ last-good catalogue rows for exact installed hidden package versions, while
 still removing stale local, uninstalled, invalid, and active-package entries.
 This keeps hidden looks and hair searchable without treating every old row as
 permanent.
+
+The running manager fingerprints the package directory recursively. Adding,
+replacing, renaming, or removing a `.var` causes the next status refresh or
+15-second monitor pass to run the incremental inventory scanner; an unchanged
+library does not trigger a full scan. If VaM is open and a newly discovered
+archive is already enabled, the bridge receives one core package rescan.
+
+For an already indexed BrowserAssist resource, VAM-PIP can resolve a newer
+installed package version even while BrowserAssist's version list is stale. It
+opens candidate archives and accepts the newer version only when the exact
+resource member is present. Entirely new resources still require BrowserAssist
+to rebuild its manifest before VAM-PIP can import their metadata.
 
 No dependency scanner can identify packages loaded dynamically by every
 third-party script. Pin known runtime plugins that a collection always needs.

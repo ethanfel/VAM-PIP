@@ -521,7 +521,10 @@ Before deactivation or rollback:
   status.
 - No live refresh of BrowserAssist's private package/resource manifest. VaM's
   loose-plugin sandbox prohibits reflection and BrowserAssist exposes no public
-  rescan action, so reload BrowserAssist or restart VaM when needed.
+  rescan action. VAM-PIP can verify a newer package version for an existing
+  indexed resource by its exact archive member, but entirely new resources
+  still require reloading BrowserAssist or restarting VaM before catalogue
+  import.
 - No automatic resolution of a crash-window mismatch between disk and journal.
 - No guarantee that heuristic scene reference scanning finds every runtime
   dependency.

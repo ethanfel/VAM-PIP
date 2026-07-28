@@ -1014,6 +1014,101 @@ class CatalogTests(unittest.TestCase):
             )
             self.assertIsNone(rejected)
 
+    def test_resolver_adopts_newer_inventory_version_with_exact_member(
+        self,
+    ) -> None:
+        resource_path = "Saves\\scene\\Versioned.json"
+        self.write_catalogue(
+            [
+                {
+                    "creatorName": "Creator",
+                    "packageName": "Bundle",
+                    "resourceFullFileName": resource_path,
+                    "resourceType": "Scene",
+                    "presetAtomType": "",
+                    "varVersions": ["1"],
+                }
+            ]
+        )
+        make_var(
+            self.addons / "Creator.Bundle.1.var",
+            creator="Creator",
+            package="Bundle",
+            members={"Saves/scene/Versioned.json": b'{"version":1}'},
+        )
+
+        with connect(self.state) as database:
+            scan(self.addons, database)
+            import_browserassist(database, self.vam_root)
+            original = search_resources(database, self.vam_root)["items"][0]
+            self.assertEqual(original["selected_version"], "1")
+            (self.addons / "Creator.Bundle.1.var").unlink()
+
+            make_var(
+                self.addons / "Creator.Bundle.2.var",
+                creator="Creator",
+                package="Bundle",
+                members={"Saves/scene/Versioned.json": b'{"version":2}'},
+            )
+            make_var(
+                self.addons / "Creator.Bundle.3.var",
+                creator="Creator",
+                package="Bundle",
+                members={"Saves/scene/Removed.json": b"{}"},
+            )
+            scan(self.addons, database)
+
+            listed = search_resources(database, self.vam_root)["items"][0]
+            self.assertEqual(listed["selected_version"], "2")
+            self.assertEqual(listed["package_ref"], "Creator.Bundle.2")
+            self.assertFalse(listed["missing"])
+
+            active = search_resources(
+                database,
+                self.vam_root,
+                addon_root=self.addons,
+                package_state="active",
+            )
+            self.assertEqual(active["total"], 1)
+            self.assertEqual(
+                active["items"][0]["package_ref"],
+                "Creator.Bundle.2",
+            )
+            missing = search_resources(
+                database,
+                self.vam_root,
+                addon_root=self.addons,
+                package_state="missing",
+            )
+            self.assertEqual(missing["total"], 0)
+
+            location = resolve_resource_archive(
+                database,
+                self.vam_root,
+                listed["id"],
+            )
+            self.assertIsNotNone(location)
+            assert location is not None
+            self.assertEqual(location.version_text, "2")
+            self.assertEqual(
+                location.archive_member,
+                "Saves/scene/Versioned.json",
+            )
+            self.assertEqual(
+                [
+                    row["version_text"]
+                    for row in database.execute(
+                        """
+                        SELECT version_text
+                        FROM catalog_resource_versions
+                        WHERE resource_id = ?
+                        """,
+                        (listed["id"],),
+                    )
+                ],
+                ["1"],
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

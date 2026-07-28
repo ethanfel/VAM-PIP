@@ -42,7 +42,13 @@ from vampip.catalog import (
     search_resources as find_catalog_resources,
 )
 from vampip.database import connect
-from vampip.inventory import ScanResult, ensure_hashes, rows_for_root, scan
+from vampip.inventory import (
+    ScanResult,
+    ensure_hashes,
+    inventory_changed,
+    rows_for_root,
+    scan,
+)
 from vampip.manager_state import (
     add_pin,
     clear_baseline,
@@ -80,6 +86,9 @@ from vampip.switching import (
 
 class LiveActionBusyError(RuntimeError):
     """Raised when an ordered VaM bridge action is still in flight."""
+
+
+_LIVE_PACKAGE_RESCAN_SETTING = "pending_live_package_rescan"
 
 
 _PERSON_PRESET_CATEGORIES: tuple[dict[str, object], ...] = (
@@ -654,6 +663,8 @@ class ManagerService:
         result = None
         if refresh or not existing:
             result = scan(self.addon_dir, connection)
+            if result.active_changed and self._running_pids():
+                set_setting(connection, _LIVE_PACKAGE_RESCAN_SETTING, True)
             existing = rows_for_root(connection, self.addon_dir)
         return existing, result
 
@@ -668,6 +679,8 @@ class ManagerService:
             "cached": result.unchanged,
             "invalid": result.invalid,
             "vanished": result.removed,
+            "added": result.added,
+            "active_changed": result.active_changed,
             "elapsed": result.elapsed,
             "active": sum(bool(row["enabled"]) for row in rows),
         }
@@ -1254,6 +1267,50 @@ class ManagerService:
             return self._queue_bridge_request(writer), None
         except LiveActionBusyError as error:
             return None, str(error)
+
+    def rescan_discovered_packages_if_idle(self) -> str | None:
+        """Publish one core VaM rescan for externally changed active archives."""
+
+        with connect(self.state_dir) as connection:
+            pending = bool(
+                get_setting(connection, _LIVE_PACKAGE_RESCAN_SETTING, False)
+            )
+        if not pending:
+            return None
+        if not self._running_pids():
+            with manager_lock(self.state_dir), connect(self.state_dir) as connection:
+                set_setting(connection, _LIVE_PACKAGE_RESCAN_SETTING, False)
+            return None
+
+        try:
+            with self._bridge_mailbox_transaction(blocking=False):
+                with manager_lock(self.state_dir), connect(
+                    self.state_dir
+                ) as connection:
+                    if not bool(
+                        get_setting(
+                            connection,
+                            _LIVE_PACKAGE_RESCAN_SETTING,
+                            False,
+                        )
+                    ):
+                        return None
+                    if not self._running_pids():
+                        set_setting(
+                            connection,
+                            _LIVE_PACKAGE_RESCAN_SETTING,
+                            False,
+                        )
+                        return None
+                    request_id = request_rescan(self.vam_root)
+                    set_setting(
+                        connection,
+                        _LIVE_PACKAGE_RESCAN_SETTING,
+                        False,
+                    )
+                    return request_id
+        except (LiveActionBusyError, ManagerLockBusyError):
+            return None
 
     @staticmethod
     def _lease_requires_bridge_rescan(
@@ -2462,10 +2519,14 @@ class ManagerService:
 
     def status(self, *, refresh_if_empty: bool = True) -> dict[str, object]:
         with manager_lock(self.state_dir), connect(self.state_dir) as connection:
+            existing = rows_for_root(connection, self.addon_dir)
             rows, scan_result = self._rows(
                 connection,
                 refresh=refresh_if_empty
-                and not rows_for_root(connection, self.addon_dir),
+                and (
+                    not existing
+                    or inventory_changed(connection, self.addon_dir)
+                ),
             )
             managed_mode = bool(get_setting(connection, "managed_mode", False))
             auto_reconcile = bool(get_setting(connection, "auto_reconcile", True))
@@ -2525,6 +2586,8 @@ class ManagerService:
             "initial_scan": (
                 {
                     "found": scan_result.found,
+                    "added": scan_result.added,
+                    "active_changed": scan_result.active_changed,
                     "elapsed": scan_result.elapsed,
                 }
                 if scan_result is not None

@@ -1024,16 +1024,28 @@ def search_resources(
         assert packages_root is not None
         installed = """
             EXISTS (
-                SELECT 1
-                FROM catalog_resource_versions AS rv
-                JOIN package_files AS pf
-                  ON pf.root = ?
-                 AND pf.valid = 1
-                 AND pf.creator = catalog_resources.creator COLLATE NOCASE
-                 AND pf.package_name =
-                     catalog_resources.package_name COLLATE NOCASE
-                 AND pf.version_text = rv.version_text COLLATE NOCASE
-                WHERE rv.resource_id = catalog_resources.id
+                SELECT 1 FROM package_files AS pf
+                WHERE pf.root = ?
+                  AND pf.valid = 1
+                  AND pf.creator = catalog_resources.creator COLLATE NOCASE
+                  AND pf.package_name =
+                      catalog_resources.package_name COLLATE NOCASE
+                  AND (
+                      EXISTS (
+                          SELECT 1
+                          FROM catalog_resource_versions AS rv
+                          WHERE rv.resource_id = catalog_resources.id
+                            AND rv.version_text =
+                                pf.version_text COLLATE NOCASE
+                      )
+                      OR pf.version > (
+                          SELECT MAX(CAST(rv.version_text AS INTEGER))
+                          FROM catalog_resource_versions AS rv
+                          WHERE rv.resource_id = catalog_resources.id
+                            AND rv.version_text != ''
+                            AND rv.version_text NOT GLOB '*[^0-9]*'
+                      )
+                  )
             )
         """
         active = installed.replace(
@@ -1359,6 +1371,10 @@ class _ResourceResolver:
         allowed = _allowed_versions(row)
         if not allowed:
             return []
+        numeric_allowed = {
+            int(value) for value in allowed if value.isdecimal()
+        }
+        newest_declared = max(numeric_allowed) if numeric_allowed else None
         key = (
             str(row["creator"]).casefold(),
             str(row["package_name"]).casefold(),
@@ -1366,7 +1382,14 @@ class _ResourceResolver:
         return [
             package_row
             for package_row in self.packages.get(key, ())
-            if str(package_row["version_text"]).casefold() in allowed
+            if (
+                str(package_row["version_text"]).casefold() in allowed
+                or (
+                    newest_declared is not None
+                    and package_row["version"] is not None
+                    and int(package_row["version"]) > newest_declared
+                )
+            )
         ]
 
     def _archive_index(
@@ -1514,10 +1537,10 @@ def resolve_resource_archive(
 ) -> ResourceLocation | None:
     """Resolve a resource to a real loose file or matching archive member.
 
-    A package version is eligible only when BrowserAssist associates the
-    resource with that version and the installed ZIP actually contains the
-    member. This avoids incorrectly choosing a newer family version that
-    removed the selected scene or preset.
+    BrowserAssist-associated versions and newer installed family versions are
+    eligible, but the installed ZIP must contain the exact member. This lets a
+    stale BrowserAssist manifest use a newly installed package version without
+    incorrectly choosing one that removed the selected scene or preset.
     """
 
     root = Path(vam_root).expanduser().resolve()
