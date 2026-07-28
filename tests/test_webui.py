@@ -161,6 +161,29 @@ class WorkspaceWebUITests(unittest.TestCase):
         )
         self.assertIn("if (responseAccepted) {", load)
 
+    def test_live_scene_poll_updates_global_bridge_feedback(self) -> None:
+        load_start = self.javascript.index("async function loadPersons(")
+        load_end = self.javascript.index(
+            "function renderPersonContext()", load_start
+        )
+        load = self.javascript[load_start:load_end]
+        self.assertIn(
+            "if (responseAccepted) {\n"
+            "      renderLiveState(app.status || {});",
+            load,
+        )
+
+        render_start = self.javascript.index("function renderLiveState(")
+        render_end = self.javascript.index(
+            "function renderAccess()", render_start
+        )
+        render = self.javascript[render_start:render_end]
+        self.assertIn(
+            "const bridge = app.person?.bridge || status.bridge;",
+            render,
+        )
+        self.assertIn("bridge.message", render)
+
     def test_clothing_browse_only_cards_keep_package_access_controls(self) -> None:
         card_start = self.javascript.index("function createResourceCard(")
         card_end = self.javascript.index(
@@ -420,8 +443,8 @@ class WorkspaceWebUITests(unittest.TestCase):
                 self.assertIn(selector, self.styles)
 
     def test_static_assets_use_the_current_cache_version(self) -> None:
-        self.assertIn("/styles.css?v=0.6.1", self.html)
-        self.assertIn("/app.js?v=0.6.1", self.html)
+        self.assertIn("/styles.css?v=0.6.2", self.html)
+        self.assertIn("/app.js?v=0.6.2", self.html)
 
 
 if __name__ == "__main__":

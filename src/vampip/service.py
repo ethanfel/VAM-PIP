@@ -1258,17 +1258,17 @@ class ManagerService:
     @staticmethod
     def _lease_requires_bridge_rescan(
         lease: dict[str, object],
-        *,
-        packaged: bool,
     ) -> bool:
         """Return whether a composite action made packages newly visible.
 
-        Loose resources never require a package rescan. For packaged
-        resources, a completed reconciliation exposes its exact enable count;
-        unknown/custom lease results stay conservative.
+        A loose resource can still reference packaged assets, so its location
+        alone cannot determine whether VaM needs a rescan. A completed
+        reconciliation exposes its exact enable count; resources with no
+        package references explicitly report ``already_local``. Unknown or
+        custom lease results stay conservative.
         """
 
-        if not packaged:
+        if lease.get("already_local") is True:
             return False
         reconcile = lease.get("reconcile")
         if not isinstance(reconcile, dict):
@@ -1462,13 +1462,10 @@ class ManagerService:
                     resource_id,
                     days=float(days),
                     label=f"Clothing: {label}",
-                    apply=location.packaged,
+                    apply=True,
                     bridge_rescan=False,
                 )
-                rescan = self._lease_requires_bridge_rescan(
-                    lease,
-                    packaged=location.packaged,
-                )
+                rescan = self._lease_requires_bridge_rescan(lease)
 
             request_id, bridge_message = self._try_queue_bridge_request(
                 lambda: request_person_clothing(
@@ -1638,13 +1635,10 @@ class ManagerService:
                 resource_id,
                 days=float(days),
                 label=f"{person_spec['label']}: {label}",
-                apply=location.packaged,
+                apply=True,
                 bridge_rescan=False,
             )
-            rescan = self._lease_requires_bridge_rescan(
-                lease,
-                packaged=location.packaged,
-            )
+            rescan = self._lease_requires_bridge_rescan(lease)
             request_id, bridge_message = self._try_queue_bridge_request(
                 lambda: request_person_preset(
                     self.vam_root,
@@ -1708,13 +1702,10 @@ class ManagerService:
                 resource_id,
                 days=float(days),
                 label=f"{atom_type} preset: {label}",
-                apply=location.packaged,
+                apply=True,
                 bridge_rescan=False,
             )
-            rescan = self._lease_requires_bridge_rescan(
-                lease,
-                packaged=location.packaged,
-            )
+            rescan = self._lease_requires_bridge_rescan(lease)
             request_id, bridge_message = self._try_queue_bridge_request(
                 lambda: request_atom_preset(
                     self.vam_root,
@@ -1784,13 +1775,10 @@ class ManagerService:
                 resource_id,
                 days=float(days),
                 label=f"Custom Unity Asset: {label}",
-                apply=location.packaged,
+                apply=True,
                 bridge_rescan=False,
             )
-            rescan = self._lease_requires_bridge_rescan(
-                lease,
-                packaged=location.packaged,
-            )
+            rescan = self._lease_requires_bridge_rescan(lease)
             request_id, bridge_message = self._try_queue_bridge_request(
                 lambda: request_custom_unity_asset_load(
                     self.vam_root,
@@ -1857,13 +1845,10 @@ class ManagerService:
                 resource_id,
                 days=float(days),
                 label=f"SubScene: {label}",
-                apply=location.packaged,
+                apply=True,
                 bridge_rescan=False,
             )
-            rescan = self._lease_requires_bridge_rescan(
-                lease,
-                packaged=location.packaged,
-            )
+            rescan = self._lease_requires_bridge_rescan(lease)
             request_id, bridge_message = self._try_queue_bridge_request(
                 lambda: request_subscene_load(
                     self.vam_root,
@@ -1912,13 +1897,10 @@ class ManagerService:
             resource_id,
             days=float(days),
             label=f"Scene: {label}",
-            apply=location.packaged,
+            apply=True,
             bridge_rescan=False,
         )
-        rescan = self._lease_requires_bridge_rescan(
-            lease,
-            packaged=location.packaged,
-        )
+        rescan = self._lease_requires_bridge_rescan(lease)
         request_id, bridge_message = self._try_queue_bridge_request(
             lambda: request_scene_load(
                 self.vam_root,

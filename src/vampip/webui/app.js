@@ -1714,6 +1714,7 @@ async function loadPersons({ quiet = false } = {}) {
   } finally {
     app.personInFlight = false;
     if (responseAccepted) {
+      renderLiveState(app.status || {});
       renderPersonContext();
       renderAtomContext();
       if (app.view === "workspace" && previousKey !== personControlKey()) {
@@ -2679,7 +2680,7 @@ function renderLiveState(status = app.status || {}) {
     document.createTextNode(gameRunning ? "VaM running" : "VaM closed"),
   );
 
-  const bridge = status.bridge;
+  const bridge = app.person?.bridge || status.bridge;
   if (busy && !gameRunning) {
     elements.bridgeStatus.textContent =
       "VaM is closed. VAM-PIP is updating package visibility.";
