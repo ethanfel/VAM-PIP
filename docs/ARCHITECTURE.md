@@ -380,24 +380,33 @@ filename change from the running process's perspective on the same filesystem.
 The implementation does not `fsync` archive directories, so this is not a
 power-loss durability guarantee.
 
-Before the first rename, VAM-PIP writes a format-1 `manager-switch` manifest
+Before the first rename, VAM-PIP writes a format-2 `manager-switch` manifest
 under:
 
 ```text
 <state-dir>/manager-runs/
 ```
 
-The manifest moves through `planned`, `applying`, and `complete`, with each
-entry updated after its rename. Manifest updates use a temporary file followed
-by `os.replace()`, but do not `fsync` the file or its directory. After a caught
-switch failure, VAM-PIP attempts reverse-order rollback and records
-`rolled-back` or `rollback-failed` when journal writes remain available. A
-journal I/O failure can prevent that best-effort rollback from starting or
-finishing.
+The canonical manifest holds the immutable plan. Individual completion events
+are appended to a sibling `.progress.jsonl` file and `fsync`ed in batches of
+64, so switching thousands of packages remains linear instead of rewriting a
+multi-megabyte document for every archive. The canonical manifest and journal
+directory are durably replaced at state transitions. Archive directories are
+not `fsync`ed, so recovery still compares the filesystem with the recorded
+device, inode, size, and modification time.
+
+Archive moves use Linux `renameat2(RENAME_NOREPLACE)`: an unexpected source or
+destination can stop a switch, but is never overwritten. After a caught
+failure, VAM-PIP classifies the complete plan, attempts reverse-order rollback
+of every identity-matching target, and records `rolled-back` only when every
+archive is back at its source. Otherwise it records `rollback-failed`.
 
 `rollback_switch()` validates manifest structure, action/path consistency,
 AddonPackages containment, and the recorded device, inode, size, and
-modification time before reversing entries marked `complete`.
+modification time before its first reverse move. A format-2 switch interrupted
+in `applying`, `rolling-back`, or `rollback-failed` can be explicitly rolled
+back only when every move is unambiguously at its recorded source or target.
+Legacy format-1 rollback remains supported.
 Crash-level caveats and the recovery procedure are documented in
 [SAFETY.md](SAFETY.md#crash-consistency-and-recovery).
 
@@ -483,11 +492,14 @@ The server may bind only to `127.0.0.1` or `localhost`. Static UI files are
 served from an explicit three-file allowlist. Every `/api/` request requires
 the manager token.
 
-Read endpoints expose status, packages, resources, facets, thumbnails, and the
-detected default session plugins. Mutating endpoints cover scans, catalog
-imports, session-default imports, pins, leases, reconciliation, deactivation,
-settings, and VaM launch. The HTTP layer only validates and translates
-requests; it delegates behavior to `ManagerService`.
+Read endpoints expose status, lightweight live activity, packages, resources,
+facets, thumbnails, and the detected default session plugins. `/api/activity`
+does not take the filesystem manager lock, so the UI can report the real VaM
+process state and batched reconciliation/rollback progress while a large
+switch is running. Mutating endpoints cover scans, catalog imports,
+session-default imports, pins, leases, reconciliation, deactivation, settings,
+and VaM launch. The HTTP layer only validates and translates requests; it
+delegates behavior to `ManagerService`.
 
 The token is generated with `secrets.token_urlsafe(32)` and stored in
 `manager_settings`. The launch URL carries it in a fragment. The UI moves it to
@@ -498,6 +510,7 @@ The automatic reconciler wakes every 15 seconds by default:
 
 - pending enables are applied even while VaM runs;
 - pending disables are applied only after VaM is no longer detected;
+- duplicate in-process reconciliation requests are coalesced;
 - no action is taken outside managed mode or when auto-reconcile is disabled.
 
 ## VaM process detection and launch

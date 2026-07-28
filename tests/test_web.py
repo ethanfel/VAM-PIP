@@ -113,6 +113,26 @@ class WebSecurityTests(unittest.TestCase):
         document = self.response_json(response)
         self.assertEqual(document["packages"]["total"], 1)
 
+    def test_activity_endpoint_is_authenticated_and_reports_live_state(self) -> None:
+        self.connection.request("GET", "/api/activity")
+        unauthorized = self.connection.getresponse()
+        self.assertEqual(unauthorized.status, 401)
+        unauthorized.read()
+
+        self.connection.request(
+            "GET",
+            "/api/activity",
+            headers={"X-VAMPIP-Token": self.token},
+        )
+        response = self.connection.getresponse()
+        self.assertEqual(response.status, 200)
+        document = self.response_json(response)
+        self.assertEqual(len(document["manager_instance"]), 32)
+        self.assertFalse(document["vam"]["running"])
+        self.assertEqual(document["vam"]["pids"], [])
+        self.assertFalse(document["operation"]["busy"])
+        self.assertEqual(document["operation"]["status"], "idle")
+
     def test_mutation_rejects_foreign_origin(self) -> None:
         body = json.dumps({"apply": False}).encode()
         self.connection.request(
@@ -141,7 +161,9 @@ class WebSecurityTests(unittest.TestCase):
         self.assertIn(
             "frame-ancestors 'none'", response.getheader("Content-Security-Policy")
         )
-        response.read()
+        document = response.read().decode("utf-8")
+        self.assertIn("/styles.css?v=0.3.5", document)
+        self.assertIn("/app.js?v=0.3.5", document)
 
     def test_session_plugin_endpoints_report_and_import_defaults(self) -> None:
         preset_path = write_web_session_defaults(self.vam_root)

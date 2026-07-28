@@ -185,7 +185,7 @@ class ManagerRequestHandler(BaseHTTPRequestHandler):
             HTTPStatus.OK,
             payload,
             content_type,
-            cache="no-cache" if name == "index.html" else "public, max-age=3600",
+            cache="no-cache",
         )
 
     def do_HEAD(self) -> None:
@@ -204,6 +204,9 @@ class ManagerRequestHandler(BaseHTTPRequestHandler):
             self._error(HTTPStatus.UNAUTHORIZED, "invalid manager token")
             return
         try:
+            if parsed.path == "/api/activity":
+                self._json(HTTPStatus.OK, self.server.service.activity())
+                return
             if parsed.path == "/api/status":
                 self._json(HTTPStatus.OK, self.server.service.status())
                 return
@@ -457,6 +460,10 @@ class AutoReconciler:
     def _run(self) -> None:
         while not self._stop.wait(self.interval):
             try:
+                activity = self.service.activity()
+                operation = activity.get("operation", {})
+                if isinstance(operation, dict) and bool(operation.get("busy")):
+                    continue
                 if not self.service.auto_reconcile_enabled():
                     continue
                 status = self.service.status()
@@ -466,7 +473,7 @@ class AutoReconciler:
                 packages_need_disable = int(status.get("pending_disable", 0)) > 0
                 vam_running = bool(status["vam"]["running"])
                 if packages_need_enable or (packages_need_disable and not vam_running):
-                    self.service.reconcile(apply=True)
+                    self.service.reconcile_if_idle(apply=True)
             except Exception as exc:
                 print(f"[VAM-PIP manager] automatic reconciliation failed: {exc}")
 

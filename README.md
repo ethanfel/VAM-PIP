@@ -21,7 +21,7 @@ leaving managed mode restores that baseline.
 
 ## Current status
 
-Version 0.2 is functional but should still be treated as an early release.
+Version 0.3.5 is functional but should still be treated as an early release.
 Package switching is deliberately conservative:
 
 - entering managed mode requires explicit confirmation;
@@ -37,6 +37,7 @@ A backup of an important VaM installation is still recommended.
 
 - Linux
 - Python 3.10 or newer
+- a local filesystem supporting Linux `renameat2(RENAME_NOREPLACE)`
 - a VaM installation with an `AddonPackages` directory
 - BrowserAssist for in-game-style resource browsing (optional)
 - Proton only if you want VAM-PIP to invoke a Proton launch script
@@ -110,6 +111,11 @@ third-party script. Pin known runtime plugins that a collection always needs.
 VAM-PIP can enable packages while VaM is open, but it never hides an archive
 that the process may still be using. Lease expiry and unpin operations therefore
 show as pending disables until VaM exits.
+
+The web app polls a lightweight live-activity endpoint independently of the
+inventory lock. When VaM closes and automatic reconciliation begins, the
+banner changes to **Hiding X of Y packages**, shows progress, keeps the real
+VaM process badge current, and disables launch until the switch finishes.
 
 Install the optional session bridge:
 
@@ -259,6 +265,12 @@ To inspect and reverse one specific switch:
 ./vampip manager rollback /path/to/manager-runs/MANIFEST.json
 ./vampip manager rollback /path/to/manager-runs/MANIFEST.json --apply
 ```
+
+The first command is read-only and reports the recorded state against the
+actual source/target paths. New format-2 switches use a small append-only
+progress sidecar, so a large package set no longer rewrites a multi-megabyte
+manifest after every filename change. Rollback preflights every archive and
+uses atomic no-clobber renames.
 
 Do not rename the same managed archives manually while applying or rolling back
 a switch. VAM-PIP refuses to overwrite an existing target.

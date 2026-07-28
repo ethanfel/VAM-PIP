@@ -117,11 +117,18 @@ Those filesystem and SQLite steps are ordered but are not one transaction.
 ### 8. Mutations are journalled before the first rename
 
 Each managed switch gets a JSON manifest under
-`<state-dir>/manager-runs/`. The plan is written before filesystem mutation and
-an update is attempted after every completed move. Manifest updates use a
-temporary file and `os.replace()`, but neither manifest files nor containing
-directories are `fsync`ed. Caught failures record their error and automatic
-rollback outcome only while journal I/O remains available.
+`<state-dir>/manager-runs/`. Format 2 writes the complete immutable move plan
+before filesystem mutation, then records move completion in a sibling
+append-only `.progress.jsonl` file. Progress is flushed and `fsync`ed every 64
+events and at state transitions. Successful completion rewrites the canonical
+manifest once with its final status. Canonical replacements and the containing
+journal directory are also `fsync`ed.
+
+This keeps large switches linear in the number of archives instead of
+rewriting a multi-megabyte manifest after every rename. The earlier format-1
+manifest remains supported for rollback, but new switches do not create it.
+Caught failures record their error and best-effort automatic rollback outcome
+while journal I/O remains available.
 
 ### 9. Normal manager switches are serialized
 
@@ -198,10 +205,13 @@ constructed names, binary references, or nonstandard syntax may be missed.
 
 ## Crash consistency and recovery
 
-An individual adjacent `os.replace()` is atomic from the running process's
-perspective, but a multi-file switch is not one filesystem transaction. The
-implementation does not `fsync` manifests or the directories containing
-manifest and archive renames.
+An individual adjacent Linux `renameat2(RENAME_NOREPLACE)` is atomic from the
+running process's perspective and refuses to overwrite an unexpected path, but
+a multi-file switch is not one filesystem transaction. The canonical
+manifest, append-only progress evidence, and journal directory are `fsync`ed
+as described above. Directories containing archive renames are not `fsync`ed,
+so the journal is stronger crash evidence but still not a power-loss
+transaction.
 
 ### Handled exceptions with a writable journal
 
@@ -210,26 +220,29 @@ attempts this flow:
 
 1. the manifest enters `rolling-back`;
 2. completed moves are reversed in reverse order;
-3. each result is journalled;
+3. each result is appended to the progress journal;
 4. the manifest ends as `rolled-back` or `rollback-failed`;
 5. the original exception is re-raised.
 
-If writing `rolling-back` or a later manifest update itself fails, the
-exception path can stop before rollback begins or finishes. Inspect disk state
-manually in that case.
+Journal write errors do not deliberately prevent the in-memory completed set
+from being rolled back, but an archive rename or process failure can still
+leave a partial rollback. Inspect disk state manually in that case.
 
 ### Process termination
 
-`SIGKILL` or a process crash can occur between an archive rename and the
-following manifest update. The filesystem may then be one move ahead of the
-journal. Automatic recovery cannot prove which side is authoritative.
+`SIGKILL` or a process crash can occur after an archive rename but before its
+progress event is in an `fsync`ed batch. The filesystem may therefore be ahead
+of durable progress evidence. `inspect_switch()` classifies every move as an
+identity-matching source, identity-matching target, conflict, missing, or
+changed file so recovery does not have to infer state from the last log line.
 
 ### Power loss or storage failure
 
-Because there is no file or directory `fsync`, a power loss can persist
-manifest and archive renames in an order different from the program order, or
-lose recent updates. Recovery must treat both the manifest and filesystem as
-evidence to compare, not assume either is durable ground truth.
+Because archive directories are not `fsync`ed, a power loss can persist
+journal evidence and archive renames in a different order, or lose recent
+renames despite a flushed progress batch. Recovery must treat both the
+manifest and filesystem as evidence to compare, not assume either is durable
+ground truth.
 
 ### SQLite and filesystem gaps
 
@@ -252,17 +265,24 @@ Use this recovery sequence:
 3. Record `managed_mode`, `baseline_count`, and `auto_reconcile` from manager
    status before resuming automated work.
 4. Run a fresh package scan to observe actual suffix state.
-5. Inspect the newest file under `<state-dir>/manager-runs/`.
+5. Inspect the newest file under `<state-dir>/manager-runs/` with
+   `vampip manager rollback MANIFEST` (without `--apply`).
 6. Compare every incomplete entry's `source` and `target` paths on disk.
-7. Use `vampip manager rollback <manifest> --apply` only when entries marked
-   `complete` accurately describe the filesystem.
+   The dry run uses the read-only `inspect_switch()` helper to report compact
+   state counts and samples unsafe or inconsistent moves.
+7. Use `vampip manager rollback <manifest> --apply` only when the inspection
+   says the switch is safe to roll back. Format-2 rollback preflights every
+   move and can recover an identity-consistent `applying`, `complete`,
+   `rolling-back`, or `rollback-failed` switch. It refuses conflicts, missing
+   files, replacements, inconsistent completed manifests, and manifests
+   explicitly marked `superseded`.
 8. Reconcile or deactivate only after the manifest/filesystem mismatch is
    resolved, and do not restart the web server until the intended suffix state,
    baseline, and mode flag agree.
 
-`rollback_switch()` reverses only entries marked `complete`. It deliberately
-does not guess about `planned`, `rollback-failed`, missing, or conflicting
-paths.
+Format-2 recovery treats filesystem identity as authoritative rather than
+guessing from the last possibly batched progress event. Legacy format-1
+rollback still reverses only entries marked `complete`.
 
 ### Baseline recovery
 
@@ -328,8 +348,8 @@ can freeze VaM briefly.
 | Path traversal in local resources | Absolute paths, `..`, colon components, and resolved escapes are rejected | Symlink behavior depends on the resolved filesystem at access time |
 | Ambiguous ZIP member casing | Case-insensitive fallback is accepted only for one unique member | Malformed archives may still be expensive to inspect |
 | Same-ID copy ambiguity | Different sizes or known SHA-256 digests are rejected | If hashing every same-size copy raises `OSError`, their content remains unverified |
-| Concurrent manager mutation | Advisory manager lock, destination preflight, SQLite WAL | Non-cooperating tools and manual renames bypass the lock |
-| Partial multi-file switch | Prewritten manifest, per-move updates, best-effort reverse rollback | SIGKILL can leave a rename ahead of the journal; journal I/O failure can interrupt rollback; no `fsync` ordering is guaranteed after power loss |
+| Concurrent manager mutation | Advisory manager lock, destination preflight, atomic no-clobber archive renames, SQLite WAL | Non-cooperating tools and manual renames can still force a switch to stop |
+| Partial multi-file switch | Prewritten canonical plan, batched `fsync`ed append-only progress, filesystem identity inspection, preflighted rollback, best-effort automatic reverse rollback | SIGKILL can leave a rename ahead of a progress batch; archive directories are not `fsync`ed, and no transaction spans every rename |
 | SQLite/filesystem split state | Baseline and mode updates are deliberately ordered around switches | No transaction spans SQLite and archive renames; a crash requires checking both |
 | Live package removal | Running VaM gets enable-only plans | A false-negative process probe can make an unsafe disable possible |
 | Bridge abuse | Rescan-only schema, duplicate suppression, loading deferral, five-second rate limit | A same-user process or VaM plugin can still cause periodic rescan stalls |

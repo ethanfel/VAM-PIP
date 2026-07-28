@@ -24,7 +24,7 @@ from vampip.inventory import rows_for_root, scan
 from vampip.models import parse_var_filename
 from vampip.runtime import atomic_write_text, derive_vam_root, find_vam_processes
 from vampip.service import ManagerService
-from vampip.switching import manager_lock, rollback_switch
+from vampip.switching import inspect_switch, manager_lock, rollback_switch
 from vampip.operations import (
     MoveCandidate,
     candidates_from_duplicates,
@@ -700,12 +700,9 @@ def cmd_manager_deactivate(args: argparse.Namespace) -> int:
 
 def cmd_manager_rollback(args: argparse.Namespace) -> int:
     if not args.apply:
-        _print_json(
-            {
-                "dry_run": True,
-                "manifest": str(args.manifest.resolve()),
-            }
-        )
+        result = inspect_switch(args.manifest.resolve())
+        result["dry_run"] = True
+        _print_json(result)
         return 0
     _require_vam_closed("rolling back a manager package switch")
     service = _manager_service(args)

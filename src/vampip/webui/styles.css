@@ -692,6 +692,40 @@ button svg,
   line-height: 1.45;
 }
 
+.notice progress {
+  display: block;
+  width: min(460px, 100%);
+  height: 5px;
+  margin: 9px 0 1px;
+  overflow: hidden;
+  appearance: none;
+  color: var(--warning);
+  background: rgba(255, 255, 255, 0.09);
+  border: 0;
+  border-radius: 999px;
+}
+
+.notice progress[hidden] {
+  display: none;
+}
+
+.notice progress::-webkit-progress-bar {
+  background: rgba(255, 255, 255, 0.09);
+  border-radius: 999px;
+}
+
+.notice progress::-webkit-progress-value {
+  background: var(--warning);
+  border-radius: 999px;
+  transition: width 180ms ease;
+}
+
+.notice progress::-moz-progress-bar {
+  background: var(--warning);
+  border-radius: 999px;
+  transition: width 180ms ease;
+}
+
 .view-tabs {
   display: flex;
   gap: 3px;

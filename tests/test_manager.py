@@ -5,6 +5,7 @@ from pathlib import Path
 import sqlite3
 import stat
 import tempfile
+import threading
 import unittest
 from unittest import mock
 
@@ -171,6 +172,31 @@ class ManagerServiceTests(unittest.TestCase):
 
         offline.reconcile(apply=True)
         self.assertEqual(self.enabled_ids(), {"Core.Base.1"})
+
+    def test_deactivate_rechecks_vam_after_inventory_preparation(self) -> None:
+        offline = self.service()
+        offline.pin(["Core.Base"])
+        offline.reconcile(apply=True, activate=True)
+        probes = 0
+
+        def process_probe() -> list[int]:
+            nonlocal probes
+            probes += 1
+            return [] if probes == 1 else [9876]
+
+        service = ManagerService(
+            self.addons,
+            self.state,
+            process_probe=process_probe,
+        )
+        with self.assertRaisesRegex(
+            ValueError,
+            "started while the baseline restore was being prepared",
+        ):
+            service.deactivate(apply=True)
+
+        self.assertEqual(self.enabled_ids(), {"Core.Base.1"})
+        self.assertTrue(service.status()["managed_mode"])
 
     def test_offline_reconcile_removes_expired_lease_after_cleanup(self) -> None:
         service = self.service()
@@ -472,6 +498,12 @@ class ManagerServiceTests(unittest.TestCase):
         self.assertFalse(status["managed_mode"])
         self.assertEqual(status["pins"], [])
         self.assertGreater(status["baseline_count"], 0)
+        operation = service.activity()["operation"]
+        self.assertEqual(operation["status"], "failed")
+        self.assertFalse(operation["busy"])
+        self.assertEqual(operation["completed"], operation["total"])
+        self.assertEqual(operation["enabled"], 0)
+        self.assertEqual(operation["disabled"], 0)
 
     def test_manager_switch_manifest_rolls_back(self) -> None:
         service = self.service()
@@ -482,6 +514,118 @@ class ManagerServiceTests(unittest.TestCase):
         restored = rollback_switch(manifest)
         self.assertEqual(restored, 3)
         self.assertIn("Other.Unrelated.1", self.enabled_ids())
+
+    def test_activity_stays_live_during_reconcile_and_coalesces_auto_work(
+        self,
+    ) -> None:
+        service = self.service()
+        service.pin(["Core.Base"])
+        started = threading.Event()
+        release = threading.Event()
+        launch_entered = threading.Event()
+        popen_called = threading.Event()
+        errors: list[BaseException] = []
+        launch_errors: list[BaseException] = []
+        launch_results: list[dict[str, object]] = []
+        script = self.vam_root / "launch-vam-desktop-proton.sh"
+        script.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        script.chmod(0o755)
+
+        def slow_apply(*args, **kwargs):
+            callback = kwargs["progress_callback"]
+            callback(
+                {
+                    "phase": "applying",
+                    "total": 3,
+                    "completed": 1,
+                    "enable": 0,
+                    "disable": 3,
+                }
+            )
+            started.set()
+            release.wait(timeout=5)
+            callback(
+                {
+                    "phase": "final",
+                    "status": "complete",
+                    "total": 3,
+                    "completed": 3,
+                    "enable": 0,
+                    "disable": 3,
+                }
+            )
+            return None
+
+        def reconcile() -> None:
+            try:
+                service.reconcile(apply=True, activate=True)
+            except BaseException as exc:
+                errors.append(exc)
+
+        def launch() -> None:
+            launch_entered.set()
+            try:
+                launch_results.append(service.launch_vam(reconcile=False))
+            except BaseException as exc:
+                launch_errors.append(exc)
+
+        def fake_popen(*args, **kwargs):
+            popen_called.set()
+            return mock.Mock(pid=9876)
+
+        with (
+            mock.patch("vampip.service.apply_switch", side_effect=slow_apply),
+            mock.patch("vampip.service.subprocess.Popen", side_effect=fake_popen),
+        ):
+            worker = threading.Thread(target=reconcile)
+            worker.start()
+            self.assertTrue(started.wait(timeout=5))
+
+            activity = service.activity()
+            self.assertFalse(activity["vam"]["running"])
+            self.assertTrue(activity["operation"]["busy"])
+            self.assertEqual(activity["operation"]["status"], "applying")
+            self.assertEqual(activity["operation"]["completed"], 1)
+            self.assertEqual(activity["operation"]["disable_total"], 3)
+            self.assertEqual(activity["operation"]["disabled"], 1)
+            self.assertIsNone(service.reconcile_if_idle(apply=True))
+
+            launcher = threading.Thread(target=launch)
+            launcher.start()
+            self.assertTrue(launch_entered.wait(timeout=5))
+            self.assertFalse(popen_called.wait(timeout=0.05))
+
+            release.set()
+            worker.join(timeout=5)
+            launcher.join(timeout=5)
+
+        self.assertFalse(worker.is_alive())
+        self.assertFalse(launcher.is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual(launch_errors, [])
+        self.assertEqual(launch_results[0]["pid"], 9876)
+        self.assertTrue(popen_called.is_set())
+        completed = service.activity()["operation"]
+        self.assertFalse(completed["busy"])
+        self.assertEqual(completed["status"], "completed")
+        self.assertEqual(completed["disabled"], 3)
+
+    def test_activity_uses_current_process_probe_without_status_lock(self) -> None:
+        pids = [4321]
+        service = ManagerService(
+            self.addons,
+            self.state,
+            process_probe=lambda: list(pids),
+        )
+
+        first = service.activity()
+        self.assertTrue(first["vam"]["running"])
+        self.assertEqual(first["vam"]["pids"], [4321])
+
+        pids.clear()
+        second = service.activity()
+        self.assertFalse(second["vam"]["running"])
+        self.assertEqual(second["vam"]["pids"], [])
 
     def test_manager_rollback_refuses_a_replaced_package(self) -> None:
         service = self.service()

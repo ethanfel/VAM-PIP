@@ -1,13 +1,14 @@
 from __future__ import annotations
 
-from contextlib import nullcontext
 from dataclasses import asdict
 import json
 import os
 from pathlib import Path
 import sqlite3
 import subprocess
+import threading
 from typing import Callable
+import uuid
 
 from vampip.analysis import family_id, package_id
 from vampip.bridge import read_bridge_status, request_rescan
@@ -61,6 +62,21 @@ class ManagerService:
     advisory lock and journalled before the first rename.
     """
 
+    _TERMINAL_OPERATION_STATES = {
+        "idle",
+        "completed",
+        "failed",
+        "cancelled",
+    }
+    _OPERATION_COUNT_FIELDS = {
+        "total",
+        "completed",
+        "enable_total",
+        "disable_total",
+        "enabled",
+        "disabled",
+    }
+
     def __init__(
         self,
         addon_dir: Path,
@@ -77,6 +93,179 @@ class ManagerService:
             else derive_vam_root(self.addon_dir)
         )
         self._process_probe = process_probe or find_vam_processes
+        self._instance_id = uuid.uuid4().hex
+        # The file lock remains the cross-process safety boundary. This
+        # in-process gate also lets the web auto-reconciler coalesce duplicate
+        # requests and expose one canonical operation to the live UI.
+        self._operation_gate = threading.RLock()
+        self._activity_lock = threading.Lock()
+        self._operation_sequence = 0
+        self._operation: dict[str, object] = {
+            "id": 0,
+            "status": "idle",
+            "run_name": None,
+            "total": 0,
+            "completed": 0,
+            "enable_total": 0,
+            "disable_total": 0,
+            "enabled": 0,
+            "disabled": 0,
+            "manifest": None,
+            "error": None,
+        }
+
+    def _begin_operation(self, run_name: str) -> int:
+        with self._activity_lock:
+            self._operation_sequence += 1
+            operation_id = self._operation_sequence
+            self._operation = {
+                "id": operation_id,
+                "status": "preparing",
+                "run_name": run_name,
+                "total": 0,
+                "completed": 0,
+                "enable_total": 0,
+                "disable_total": 0,
+                "enabled": 0,
+                "disabled": 0,
+                "manifest": None,
+                "error": None,
+            }
+        return operation_id
+
+    def _update_operation(
+        self,
+        operation_id: int,
+        snapshot: dict[str, object],
+    ) -> None:
+        """Merge a best-effort switch callback into canonical live activity."""
+
+        if not isinstance(snapshot, dict):
+            return
+
+        with self._activity_lock:
+            if self._operation.get("id") != operation_id:
+                return
+            previous = dict(self._operation)
+
+        updates: dict[str, object] = {}
+        aliases = {
+            "enable_total": ("enable_total", "enable"),
+            "disable_total": ("disable_total", "disable"),
+        }
+        for key in self._OPERATION_COUNT_FIELDS:
+            candidates = aliases.get(key, (key,))
+            value = next(
+                (snapshot[name] for name in candidates if name in snapshot),
+                None,
+            )
+            if value is None:
+                continue
+            try:
+                updates[key] = max(0, int(value))
+            except (TypeError, ValueError):
+                continue
+
+        if "run_name" in snapshot:
+            updates["run_name"] = str(snapshot["run_name"])
+        if "manifest" in snapshot:
+            manifest = snapshot["manifest"]
+            updates["manifest"] = str(manifest) if manifest is not None else None
+        if "error" in snapshot:
+            updates["error"] = str(snapshot["error"])
+
+        phase = str(snapshot.get("phase", "")).casefold()
+        switch_status = str(snapshot.get("status", "")).casefold()
+        if phase in {"preparing", "applying"}:
+            updates["status"] = phase
+        elif phase == "rolling-back":
+            updates["status"] = "rolling-back"
+        elif phase == "error":
+            updates["status"] = "rolling-back"
+        elif phase == "final" or switch_status in {"complete", "completed"}:
+            # The filesystem work is followed by an inventory refresh. It is
+            # only terminal once the whole service operation returns.
+            updates["status"] = "finalizing"
+        elif switch_status:
+            updates["status"] = switch_status
+
+        enable_total = int(
+            updates.get(
+                "enable_total",
+                previous.get("enable_total", 0),
+            )
+        )
+        disable_total = int(
+            updates.get(
+                "disable_total",
+                previous.get("disable_total", 0),
+            )
+        )
+        completed = int(
+            updates.get(
+                "completed",
+                previous.get("completed", 0),
+            )
+        )
+        updates.setdefault("enabled", min(enable_total, completed))
+        updates.setdefault(
+            "disabled",
+            min(disable_total, max(0, completed - enable_total)),
+        )
+
+        with self._activity_lock:
+            if self._operation.get("id") != operation_id:
+                return
+            self._operation.update(updates)
+
+    def _finish_operation(
+        self,
+        operation_id: int,
+        *,
+        status: str,
+        result: dict[str, object] | None = None,
+        error: BaseException | None = None,
+    ) -> None:
+        with self._activity_lock:
+            if self._operation.get("id") != operation_id:
+                return
+            if result is not None:
+                enable = max(0, int(result.get("enable", 0)))
+                disable = max(0, int(result.get("disable", 0)))
+                self._operation.update(
+                    {
+                        "total": enable + disable,
+                        "completed": enable + disable,
+                        "enable_total": enable,
+                        "disable_total": disable,
+                        "enabled": enable,
+                        "disabled": disable,
+                        "manifest": result.get("manifest"),
+                    }
+                )
+            self._operation["status"] = status
+            self._operation["error"] = (
+                f"{type(error).__name__}: {error}" if error is not None else None
+            )
+
+    def activity(self) -> dict[str, object]:
+        """Report live VaM PIDs and switch progress without manager_lock()."""
+
+        pids = list(self._running_pids())
+        with self._activity_lock:
+            operation = dict(self._operation)
+        operation["busy"] = (
+            str(operation.get("status", "")).casefold()
+            not in self._TERMINAL_OPERATION_STATES
+        )
+        return {
+            "manager_instance": self._instance_id,
+            "vam": {
+                "running": bool(pids),
+                "pids": pids,
+            },
+            "operation": operation,
+        }
 
     def _rows(
         self, connection: sqlite3.Connection, *, refresh: bool
@@ -462,14 +651,11 @@ class ManagerService:
                 managed_mode = bool(
                     get_setting(connection, "managed_mode", False)
                 )
-            if apply and managed_mode and roots:
-                try:
-                    reconcile_result = self.reconcile(
-                        apply=True,
-                        _lock_held=True,
-                    )
-                except (OSError, ValueError, sqlite3.Error) as exc:
-                    reconcile_error = str(exc)
+        if apply and managed_mode and roots:
+            try:
+                reconcile_result = self.reconcile(apply=True)
+            except (OSError, ValueError, sqlite3.Error) as exc:
+                reconcile_error = str(exc)
 
         result: dict[str, object] = {
             "preset": str(preset.path),
@@ -779,10 +965,68 @@ class ManagerService:
         *,
         apply: bool,
         activate: bool = False,
-        _lock_held: bool = False,
     ) -> dict[str, object]:
-        lock = nullcontext() if _lock_held else manager_lock(self.state_dir)
-        with lock:
+        with self._operation_gate:
+            return self._run_reconcile(
+                apply=apply,
+                activate=activate,
+            )
+
+    def reconcile_if_idle(
+        self,
+        *,
+        apply: bool = True,
+        activate: bool = False,
+    ) -> dict[str, object] | None:
+        """Reconcile now, or coalesce the request into work already running."""
+
+        if not self._operation_gate.acquire(blocking=False):
+            return None
+        try:
+            return self._run_reconcile(
+                apply=apply,
+                activate=activate,
+            )
+        finally:
+            self._operation_gate.release()
+
+    def _run_reconcile(
+        self,
+        *,
+        apply: bool,
+        activate: bool,
+    ) -> dict[str, object]:
+        operation_id = self._begin_operation("managed-reconcile") if apply else None
+        try:
+            result = self._reconcile(
+                apply=apply,
+                activate=activate,
+                _operation_id=operation_id,
+            )
+        except BaseException as exc:
+            if operation_id is not None:
+                self._finish_operation(
+                    operation_id,
+                    status="failed",
+                    error=exc,
+                )
+            raise
+        if operation_id is not None:
+            self._finish_operation(
+                operation_id,
+                status="completed",
+                result=result,
+            )
+        return result
+
+    def _reconcile(
+        self,
+        *,
+        apply: bool,
+        activate: bool,
+        _operation_id: int | None,
+    ) -> dict[str, object]:
+        with manager_lock(self.state_dir):
             with connect(self.state_dir) as connection:
                 rows, _ = self._rows(connection, refresh=True)
                 root_text = str(self.addon_dir)
@@ -853,6 +1097,16 @@ class ManagerService:
                     run_name="managed-reconcile",
                     allow_disable=not running,
                     lock_held=True,
+                    progress_callback=(
+                        (
+                            lambda snapshot: self._update_operation(
+                                _operation_id,
+                                snapshot,
+                            )
+                        )
+                        if _operation_id is not None
+                        else None
+                    ),
                 )
                 session_defaults_pinned = 0
                 if activating:
@@ -872,7 +1126,19 @@ class ManagerService:
                             pass
                         if manifest is not None:
                             try:
-                                rollback_switch(manifest)
+                                rollback_switch(
+                                    manifest,
+                                    progress_callback=(
+                                        (
+                                            lambda snapshot: self._update_operation(
+                                                _operation_id,
+                                                snapshot,
+                                            )
+                                        )
+                                        if _operation_id is not None
+                                        else None
+                                    ),
+                                )
                             except BaseException as rollback_error:
                                 raise RuntimeError(
                                     "managed activation changed package "
@@ -910,6 +1176,37 @@ class ManagerService:
         )
 
     def deactivate(self, *, apply: bool) -> dict[str, object]:
+        with self._operation_gate:
+            operation_id = (
+                self._begin_operation("restore-baseline") if apply else None
+            )
+            try:
+                result = self._deactivate(
+                    apply=apply,
+                    _operation_id=operation_id,
+                )
+            except BaseException as exc:
+                if operation_id is not None:
+                    self._finish_operation(
+                        operation_id,
+                        status="failed",
+                        error=exc,
+                    )
+                raise
+            if operation_id is not None:
+                self._finish_operation(
+                    operation_id,
+                    status="completed",
+                    result=result,
+                )
+            return result
+
+    def _deactivate(
+        self,
+        *,
+        apply: bool,
+        _operation_id: int | None,
+    ) -> dict[str, object]:
         pids = self._running_pids()
         if pids and apply:
             raise ValueError("close VaM before restoring the pre-manager package set")
@@ -939,6 +1236,12 @@ class ManagerService:
                         "disable": len(plan.to_disable),
                         "manifest": None,
                     }
+                pids = self._running_pids()
+                if pids:
+                    raise ValueError(
+                        "VaM started while the baseline restore was being "
+                        "prepared; close it before restoring packages"
+                    )
                 manifest = apply_switch(
                     self.state_dir,
                     self.addon_dir,
@@ -946,6 +1249,16 @@ class ManagerService:
                     run_name="restore-baseline",
                     allow_disable=True,
                     lock_held=True,
+                    progress_callback=(
+                        (
+                            lambda snapshot: self._update_operation(
+                                _operation_id,
+                                snapshot,
+                            )
+                        )
+                        if _operation_id is not None
+                        else None
+                    ),
                 )
                 if manifest is not None:
                     scan(self.addon_dir, connection)
@@ -967,6 +1280,12 @@ class ManagerService:
             return bool(get_setting(connection, "auto_reconcile", True))
 
     def launch_vam(self, *, reconcile: bool = True) -> dict[str, object]:
+        # Keep launch inside the same in-process gate as package switches. The
+        # lock is reentrant because a managed launch reconciles before Popen.
+        with self._operation_gate:
+            return self._launch_vam_locked(reconcile=reconcile)
+
+    def _launch_vam_locked(self, *, reconcile: bool) -> dict[str, object]:
         pids = self._running_pids()
         if pids:
             raise ValueError(
@@ -995,6 +1314,12 @@ class ManagerService:
 
         log_path = self.vam_root / "logs" / "vampip-launch.log"
         log_path.parent.mkdir(parents=True, exist_ok=True)
+        pids = self._running_pids()
+        if pids:
+            raise ValueError(
+                "VaM started while its managed package set was being prepared; "
+                "detected process IDs " + ", ".join(map(str, pids))
+            )
         with log_path.open("ab") as log:
             process = subprocess.Popen(
                 [str(script)],

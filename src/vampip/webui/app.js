@@ -5,6 +5,7 @@ const TOKEN_KEY = "vampip-token";
 
 const app = {
   status: null,
+  activity: null,
   facets: null,
   view: "resources",
   items: [],
@@ -19,6 +20,13 @@ const app = {
   token: "",
   sessionPlugins: null,
   sessionPluginsError: null,
+  activityTimer: null,
+  activityInFlight: false,
+  activityPollFailed: false,
+  activityRefreshNeeded: false,
+  lastTerminalOperation: null,
+  refreshing: false,
+  refreshQueued: false,
 };
 
 const elements = {};
@@ -32,7 +40,21 @@ async function init() {
   bindEvents();
   configureStateFilter();
   setConnection("connecting", "Connecting");
-  await refreshAll();
+  let activityLoaded = false;
+  try {
+    await loadActivity({ refreshOnTerminal: false });
+    activityLoaded = true;
+  } catch (_error) {
+    // The full status request below will surface a useful connection error.
+  }
+  startActivityPolling();
+  if (!activityLoaded || !operationIsBusy()) {
+    await refreshAll();
+    const operation = app.activity && app.activity.operation;
+    if (operation && !operationIsBusy()) {
+      app.lastTerminalOperation = operationKey(operation);
+    }
+  }
 }
 
 function cacheElements() {
@@ -65,6 +87,7 @@ function cacheElements() {
     "pending-notice",
     "pending-title",
     "pending-message",
+    "pending-progress",
     "pending-action",
     "resources-tab-count",
     "packages-tab-count",
@@ -230,7 +253,115 @@ function closeMobileTools() {
   elements.mobileToolsButton.setAttribute("aria-expanded", "false");
 }
 
-async function refreshAll() {
+function operationIsBusy(activity = app.activity) {
+  const operation = activity && activity.operation;
+  if (!operation || typeof operation !== "object") return false;
+  if (operation.busy !== undefined) return Boolean(operation.busy);
+  return !["", "idle", "completed", "failed", "cancelled"].includes(
+    String(operation.status || "").toLowerCase(),
+  );
+}
+
+function operationKey(operation) {
+  if (!operation || typeof operation !== "object") return "";
+  if (numberOr(operation.id, 0) > 0) {
+    return [
+      String(operation.id),
+      operation.run_name,
+      operation.manifest,
+    ].filter(Boolean).join(":");
+  }
+  return [operation.run_name, operation.manifest, operation.status]
+    .filter(Boolean)
+    .join(":");
+}
+
+function startActivityPolling() {
+  if (app.activityTimer !== null) return;
+  const tick = async () => {
+    app.activityTimer = null;
+    try {
+      await loadActivity();
+    } catch (_error) {
+      app.activityPollFailed = true;
+      app.activityRefreshNeeded = true;
+      setConnection("error", "Unavailable");
+    } finally {
+      const delay = operationIsBusy() ? 650 : 1500;
+      app.activityTimer = window.setTimeout(tick, delay);
+    }
+  };
+  app.activityTimer = window.setTimeout(tick, 650);
+}
+
+async function loadActivity({ refreshOnTerminal = true } = {}) {
+  if (app.activityInFlight) return app.activity;
+  app.activityInFlight = true;
+  const previous = app.activity;
+  let scheduleRefresh = false;
+  try {
+    const activity = await api("/api/activity");
+    app.activity = activity || {};
+    const recovered = app.activityPollFailed;
+    const previousInstance = previous && previous.manager_instance;
+    const currentInstance = app.activity.manager_instance;
+    const instanceChanged =
+      Boolean(previousInstance) &&
+      Boolean(currentInstance) &&
+      previousInstance !== currentInstance;
+    app.activityPollFailed = false;
+    if (recovered || instanceChanged) {
+      app.activityRefreshNeeded = true;
+    }
+    renderLiveState(app.status || {});
+    setConnection("online", "Local manager");
+
+    const operation = app.activity.operation || {};
+    const key = operationKey(operation);
+    const terminalStatus = ["completed", "failed", "cancelled"].includes(
+      String(operation.status || "").toLowerCase(),
+    );
+    const busy = operationIsBusy(app.activity);
+    const terminal = terminalStatus && !busy;
+    const unhandledTerminal =
+      terminal && Boolean(key) && app.lastTerminalOperation !== key;
+    if (
+      refreshOnTerminal &&
+      !busy &&
+      (unhandledTerminal || app.activityRefreshNeeded)
+    ) {
+      if (terminal) app.lastTerminalOperation = key;
+      app.activityRefreshNeeded = false;
+      if (
+        unhandledTerminal &&
+        operation.status === "failed" &&
+        operation.error
+      ) {
+        toast("Package update failed", String(operation.error), "error");
+      }
+      scheduleRefresh = true;
+    }
+    return app.activity;
+  } finally {
+    app.activityInFlight = false;
+    if (scheduleRefresh) {
+      window.setTimeout(() => refreshAll({ force: true }), 0);
+    }
+  }
+}
+
+async function refreshAll(options = {}) {
+  const force = Boolean(options && options.force);
+  if (operationIsBusy() && !force) {
+    await loadActivity({ refreshOnTerminal: false });
+    return;
+  }
+  if (app.refreshing) {
+    app.refreshQueued = true;
+    return;
+  }
+
+  app.refreshing = true;
   setButtonBusy(elements.refreshButton, true);
   try {
     const [statusResult, facetResult, sessionPluginResult] = await Promise.allSettled([
@@ -271,6 +402,12 @@ async function refreshAll() {
     toast("Could not reach VAM-PIP", errorMessage(error), "error");
   } finally {
     setButtonBusy(elements.refreshButton, false);
+    app.refreshing = false;
+    const rerun = app.refreshQueued;
+    app.refreshQueued = false;
+    if (rerun && !operationIsBusy()) {
+      window.setTimeout(() => refreshAll(), 0);
+    }
   }
 }
 
@@ -367,6 +504,10 @@ async function ensureSessionPlugins({ refresh = false } = {}) {
 }
 
 async function loadStatus() {
+  if (operationIsBusy()) {
+    await loadActivity({ refreshOnTerminal: false });
+    return;
+  }
   app.status = await api("/api/status");
   renderStatus();
   renderAccess();
@@ -429,7 +570,6 @@ function renderStatus() {
   const status = app.status || {};
   const packages = status.packages || {};
   const managed = Boolean(status.managed_mode);
-  const gameRunning = Boolean(status.vam && status.vam.running);
   const pins = asArray(status.pins);
   const leases = asArray(status.leases);
   const pending = numberOr(status.pending_disable, 0);
@@ -443,6 +583,7 @@ function renderStatus() {
     : "Your existing package visibility is unchanged.";
   elements.activateButton.hidden = managed;
   elements.reconcileButton.hidden = !managed || pendingTotal < 1;
+  elements.reconcileButton.disabled = operationIsBusy();
   elements.reconcileButton.textContent =
     pendingTotal > 0
       ? `Apply ${formatNumber(pendingTotal)} pending`
@@ -459,6 +600,28 @@ function renderStatus() {
   elements.packagesTabCount.textContent = formatCompact(packages.total);
   elements.accessTabCount.textContent = formatCompact(pins.length + leases.length);
 
+  elements.addonPath.textContent = status.addon_dir || "—";
+  elements.statePath.textContent = status.state_dir || "—";
+  elements.autoReconcile.checked =
+    status.auto_reconcile === undefined ? true : Boolean(status.auto_reconcile);
+  renderLiveState(status);
+}
+
+function renderLiveState(status = app.status || {}) {
+  const managed = Boolean(status.managed_mode);
+  const liveVam =
+    app.activity && app.activity.vam
+      ? app.activity.vam
+      : status.vam || {};
+  const gameRunning = Boolean(liveVam.running);
+  const operation =
+    app.activity && app.activity.operation
+      ? app.activity.operation
+      : {};
+  const operationStatus = String(operation.status || "").toLowerCase();
+  const busy = operationIsBusy();
+  const pending = numberOr(status.pending_disable, 0);
+
   elements.gameStatus.classList.toggle("is-running", gameRunning);
   elements.gameStatus.replaceChildren();
   elements.gameStatus.append(createElement("span", "status-dot"));
@@ -467,7 +630,10 @@ function renderStatus() {
   );
 
   const bridge = status.bridge;
-  if (!gameRunning) {
+  if (busy && !gameRunning) {
+    elements.bridgeStatus.textContent =
+      "VaM is closed. VAM-PIP is updating package visibility.";
+  } else if (!gameRunning) {
     elements.bridgeStatus.textContent = bridge
       ? `Bridge ${bridge.state || "ready"} · waiting for VaM`
       : "The live-rescan bridge will connect when VaM starts.";
@@ -478,20 +644,80 @@ function renderStatus() {
     elements.bridgeStatus.textContent =
       "VaM is open, but the live-rescan bridge has not reported yet.";
   }
+
   const launchBusy = elements.launchVamButton.hasAttribute("aria-busy");
-  elements.launchVamButton.disabled = gameRunning || launchBusy;
-  elements.launchVamButton.title = gameRunning ? "VaM is already running" : "";
+  elements.launchVamButton.disabled = gameRunning || busy || launchBusy;
+  elements.launchVamButton.title = gameRunning
+    ? "VaM is already running"
+    : busy
+      ? "Wait for the package update to finish"
+      : "";
   if (!launchBusy) {
-    elements.launchVamLabel.textContent = gameRunning ? "VaM is running" : "Launch VaM";
+    elements.launchVamLabel.textContent = busy
+      ? "Updating packages…"
+      : gameRunning
+        ? "VaM is running"
+        : "Launch VaM";
   }
 
-  elements.addonPath.textContent = status.addon_dir || "—";
-  elements.statePath.textContent = status.state_dir || "—";
-  elements.autoReconcile.checked =
-    status.auto_reconcile === undefined ? true : Boolean(status.auto_reconcile);
+  if (busy) {
+    const total = numberOr(operation.total, 0);
+    const completed = Math.min(numberOr(operation.completed, 0), total || Infinity);
+    const enableTotal = numberOr(operation.enable_total, 0);
+    const disableTotal = numberOr(operation.disable_total, 0);
+    const enabled = Math.min(
+      numberOr(operation.enabled, Math.min(completed, enableTotal)),
+      enableTotal,
+    );
+    const disabled = Math.min(
+      numberOr(
+        operation.disabled,
+        Math.max(0, completed - enableTotal),
+      ),
+      disableTotal,
+    );
 
-  if (pending > 0) {
     elements.pendingNotice.hidden = false;
+    if (operationStatus === "rolling-back") {
+      elements.pendingTitle.textContent =
+        `Restoring ${formatNumber(completed)} of ${formatNumber(total)} package changes…`;
+      elements.pendingProgress.max = Math.max(total, 1);
+      elements.pendingProgress.value = completed;
+    } else if (enableTotal > enabled) {
+      elements.pendingTitle.textContent =
+        `Enabling ${formatNumber(enabled)} of ${formatNumber(enableTotal)} packages…`;
+      elements.pendingProgress.max = Math.max(enableTotal, 1);
+      elements.pendingProgress.value = enabled;
+    } else if (disableTotal > 0) {
+      elements.pendingTitle.textContent =
+        `Hiding ${formatNumber(disabled)} of ${formatNumber(disableTotal)} packages…`;
+      elements.pendingProgress.max = Math.max(disableTotal, 1);
+      elements.pendingProgress.value = disabled;
+    } else if (total > 0) {
+      elements.pendingTitle.textContent =
+        `Updating ${formatNumber(completed)} of ${formatNumber(total)} packages…`;
+      elements.pendingProgress.max = Math.max(total, 1);
+      elements.pendingProgress.value = completed;
+    } else {
+      elements.pendingTitle.textContent = "Preparing package changes…";
+      elements.pendingProgress.max = 1;
+      elements.pendingProgress.value = 0;
+    }
+    elements.pendingProgress.hidden = false;
+    const unsafeLiveDisable =
+      gameRunning &&
+      disableTotal > 0 &&
+      ["preparing", "applying", "finalizing"].includes(operationStatus);
+    elements.pendingMessage.textContent = unsafeLiveDisable
+      ? "VaM started while packages are being hidden. Close VaM now and let VAM-PIP finish safely."
+      : gameRunning
+        ? "VaM remains open; VAM-PIP is only making live-safe package changes."
+        : "VaM is closed. Keep it closed until this package update finishes.";
+    elements.pendingAction.hidden = true;
+  } else if (pending > 0) {
+    elements.pendingNotice.hidden = false;
+    elements.pendingProgress.hidden = true;
+    elements.pendingAction.hidden = false;
     elements.pendingTitle.textContent = `${formatNumber(pending)} package${
       pending === 1 ? "" : "s"
     } waiting to be hidden`;
@@ -508,11 +734,18 @@ function renderStatus() {
     }
   } else {
     elements.pendingNotice.hidden = true;
+    elements.pendingProgress.hidden = true;
+    elements.pendingAction.hidden = false;
   }
 
-  elements.deactivateButton.disabled = !managed || gameRunning;
+  elements.reconcileButton.disabled = busy;
+  elements.deactivateButton.disabled = !managed || gameRunning || busy;
   elements.deactivateButton.title =
-    managed && gameRunning ? "Close VaM before restoring the original set" : "";
+    managed && gameRunning
+      ? "Close VaM before restoring the original set"
+      : busy
+        ? "Wait for the package update to finish"
+        : "";
 }
 
 function renderFacets() {
@@ -933,8 +1166,19 @@ async function runPackageScan() {
 }
 
 async function launchVam() {
-  if (app.status && app.status.vam && app.status.vam.running) {
+  const liveVam =
+    app.activity && app.activity.vam
+      ? app.activity.vam
+      : app.status && app.status.vam;
+  if (liveVam && liveVam.running) {
     toast("VaM is already running", "The manager will keep monitoring it.");
+    return;
+  }
+  if (operationIsBusy()) {
+    toast(
+      "Package update in progress",
+      "Keep VaM closed until VAM-PIP finishes updating package visibility.",
+    );
     return;
   }
 
