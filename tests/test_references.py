@@ -13,7 +13,7 @@ from vampip.bridge import read_bridge_request, request_scene_load as write_scene
 from vampip.catalog import import_browserassist, search_resources
 from vampip.database import connect
 from vampip.inventory import scan
-from vampip.references import scan_package_references
+from vampip.references import resource_package_roots, scan_package_references
 from vampip.service import ManagerService
 
 from tests.test_vampip import make_var
@@ -127,6 +127,162 @@ class ReferenceTests(unittest.TestCase):
             self.assertEqual(
                 {item["id"] for item in active},
                 {"Core.Base.1", "Scene.Demo.1", "Asset.Extra.2"},
+            )
+
+    def test_explicit_resource_version_lease_and_apply_use_hidden_update(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            vam_root = base / "VaM"
+            addons = vam_root / "AddonPackages"
+            state = base / "state"
+            addons.mkdir(parents=True)
+            make_var(
+                addons / "Old.Asset.1.var",
+                creator="Old",
+                package="Asset",
+            )
+            make_var(
+                addons / "New.Asset.1.var",
+                creator="New",
+                package="Asset",
+            )
+            metadata = {
+                "creatorName": "Scene",
+                "packageName": "Demo",
+                "dependencies": {},
+            }
+            scene_member = "Saves/scene/Demo.json"
+            for version, reference in (
+                (2, "Old.Asset.1"),
+                (4, "New.Asset.1"),
+            ):
+                archive_path = addons / f"Scene.Demo.{version}.var"
+                with zipfile.ZipFile(
+                    archive_path,
+                    "w",
+                    compression=zipfile.ZIP_DEFLATED,
+                ) as archive:
+                    archive.writestr("meta.json", json.dumps(metadata))
+                    archive.writestr(
+                        scene_member,
+                        json.dumps(
+                            {
+                                "asset": (
+                                    f"{reference}:/Custom/data.vam"
+                                )
+                            }
+                        ),
+                    )
+                if version == 4:
+                    archive_path.rename(
+                        Path(f"{archive_path}.vampip-disabled")
+                    )
+
+            with connect(state) as connection:
+                scan(addons, connection)
+                cursor = connection.execute(
+                    """
+                    INSERT INTO catalog_resources (
+                        root, source, resource_key, creator, package_name,
+                        versions_json, resource_path, resource_type, atom_type,
+                        favorite, hidden, tags_json, imported_utc
+                    ) VALUES (?, 'browserassist', 'versioned-scene',
+                              'Scene', 'Demo', '["2"]', ?, 'Scene', '',
+                              0, 0, '[]', '2026-01-01T00:00:00+00:00')
+                    """,
+                    (str(vam_root), scene_member.replace("/", "\\")),
+                )
+                resource_id = int(cursor.lastrowid)
+                connection.execute(
+                    """
+                    INSERT INTO catalog_resource_versions(
+                        resource_id, version_text
+                    ) VALUES (?, '2')
+                    """,
+                    (resource_id,),
+                )
+                roots = resource_package_roots(
+                    connection,
+                    vam_root,
+                    resource_id,
+                    addon_root=addons,
+                    version_text="4",
+                )
+            self.assertEqual(
+                set(roots),
+                {"Scene.Demo.4", "New.Asset.1"},
+            )
+            self.assertNotIn("Scene.Demo.2", roots)
+            self.assertNotIn("Old.Asset.1", roots)
+
+            service = ManagerService(
+                addons,
+                state,
+                process_probe=lambda: [],
+            )
+            leased = service.lease_resource(
+                resource_id,
+                package_version=4,
+                apply=False,
+            )
+            self.assertEqual(leased["selected_version"], "4")
+            self.assertEqual(
+                set(leased["discovered_roots"]),
+                {"Scene.Demo.4", "New.Asset.1"},
+            )
+            self.assertTrue(
+                Path(
+                    f"{addons / 'Scene.Demo.4.var'}.vampip-disabled"
+                ).is_file()
+            )
+
+            lease_result = {"applied": False}
+            with (
+                mock.patch.object(
+                    service,
+                    "persons",
+                    return_value={
+                        "vam_running": True,
+                        "available": True,
+                        "capabilities": ["scene-load"],
+                    },
+                ),
+                mock.patch.object(
+                    service,
+                    "lease_resource",
+                    return_value=lease_result,
+                ) as lease,
+                mock.patch(
+                    "vampip.service.request_scene_load",
+                    return_value="versioned-request",
+                ) as request,
+            ):
+                applied = service.apply_resource(
+                    resource_id,
+                    package_version=4,
+                    confirm_replace=True,
+                )
+
+            self.assertEqual(applied["selected_version"], "4")
+            self.assertEqual(
+                applied["resource_ref"],
+                f"Scene.Demo.4:/{scene_member}",
+            )
+            lease.assert_called_once_with(
+                resource_id,
+                package_version=4,
+                days=3.0,
+                label="Scene: Demo",
+                apply=True,
+                bridge_rescan=False,
+            )
+            request.assert_called_once_with(
+                vam_root,
+                f"Scene.Demo.4:/{scene_member}",
+                rescan=True,
+                merge=False,
             )
 
     def test_active_packaged_scene_rescans_before_load_when_already_enabled(

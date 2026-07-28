@@ -69,12 +69,14 @@ def resource_package_roots(
     resource_id: int,
     *,
     addon_root: Path,
+    version_text: str | None = None,
 ) -> list[str]:
     location = resolve_resource_archive(
         connection,
         vam_root,
         resource_id,
         addon_root=addon_root,
+        version_text=version_text,
     )
     if location is None:
         raise ValueError("resource is missing from its installed package")

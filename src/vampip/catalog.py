@@ -1274,30 +1274,34 @@ def _normalized_member(name: str) -> str:
 def _member_indexes(
     archive: zipfile.ZipFile,
 ) -> tuple[
-    dict[str, zipfile.ZipInfo],
+    dict[str, list[zipfile.ZipInfo]],
     dict[str, list[zipfile.ZipInfo]],
 ]:
-    exact: dict[str, zipfile.ZipInfo] = {}
+    exact: dict[str, list[zipfile.ZipInfo]] = {}
     folded: dict[str, list[zipfile.ZipInfo]] = {}
     for info in archive.infolist():
         if info.is_dir():
             continue
-        normalized = _normalized_member(info.filename)
-        exact.setdefault(normalized, info)
+        original = info.orig_filename
+        if not original or "\0" in original:
+            continue
+        normalized = _normalized_member(original)
+        exact.setdefault(normalized, []).append(info)
         folded.setdefault(normalized.casefold(), []).append(info)
     return exact, folded
 
 
 def _find_member(
-    exact: dict[str, zipfile.ZipInfo],
+    exact: dict[str, list[zipfile.ZipInfo]],
     folded: dict[str, list[zipfile.ZipInfo]],
     candidates: Iterable[str],
 ) -> zipfile.ZipInfo | None:
     normalized_candidates = [_normalized_member(value) for value in candidates]
     for candidate in normalized_candidates:
-        info = exact.get(candidate)
-        if info is not None:
-            return info
+        matches = exact.get(candidate, [])
+        folded_matches = folded.get(candidate.casefold(), [])
+        if len(matches) == 1 and len(folded_matches) == 1:
+            return matches[0]
     for candidate in normalized_candidates:
         matches = folded.get(candidate.casefold(), [])
         if len(matches) == 1:
@@ -1322,6 +1326,20 @@ def _copy_sort_key(row: sqlite3.Row) -> tuple[object, ...]:
         0 if row["enabled"] else 1,
         numeric_group,
         numeric_order,
+        len(relative.parts),
+        0 if relative.name == row["canonical_filename"] else 1,
+        len(str(relative)),
+        str(relative).casefold(),
+    )
+
+
+def _latest_copy_sort_key(row: sqlite3.Row) -> tuple[object, ...]:
+    version = row["version"]
+    relative = Path(row["relative_path"])
+    return (
+        0 if version is not None else 1,
+        -int(version) if version is not None else 0,
+        0 if row["enabled"] else 1,
         len(relative.parts),
         0 if relative.name == row["canonical_filename"] else 1,
         len(str(relative)),
@@ -1361,7 +1379,7 @@ class _ResourceResolver:
         self.archive_indexes: dict[
             Path,
             tuple[
-                dict[str, zipfile.ZipInfo],
+                dict[str, list[zipfile.ZipInfo]],
                 dict[str, list[zipfile.ZipInfo]],
             ]
             | None,
@@ -1396,7 +1414,7 @@ class _ResourceResolver:
         self, archive_path: Path
     ) -> (
         tuple[
-            dict[str, zipfile.ZipInfo],
+            dict[str, list[zipfile.ZipInfo]],
             dict[str, list[zipfile.ZipInfo]],
         ]
         | None
@@ -1415,11 +1433,19 @@ class _ResourceResolver:
                 self.archive_indexes[archive_path] = None
         return self.archive_indexes[archive_path]
 
-    def resolve_row(self, row: sqlite3.Row) -> ResourceLocation | None:
+    def resolve_row(
+        self,
+        row: sqlite3.Row,
+        *,
+        version_text: str | None = None,
+        latest: bool = False,
+    ) -> ResourceLocation | None:
         creator = str(row["creator"])
         package_name = str(row["package_name"])
         resource_path = str(row["resource_path"])
         if not creator and not package_name:
+            if version_text is not None:
+                return None
             local_path = _safe_local_path(self.vam_root, resource_path)
             if local_path is None or not local_path.is_file():
                 return None
@@ -1437,7 +1463,16 @@ class _ResourceResolver:
             )
 
         wanted = _normalized_member(resource_path)
-        for package_row in self.candidates(row):
+        candidates = self.candidates(row)
+        if latest:
+            candidates = sorted(candidates, key=_latest_copy_sort_key)
+        for package_row in candidates:
+            if (
+                version_text is not None
+                and str(package_row["version_text"]).casefold()
+                != version_text.casefold()
+            ):
+                continue
             archive_path = Path(package_row["path"])
             indexes = self._archive_index(archive_path)
             if indexes is None:
@@ -1477,6 +1512,17 @@ class _ResourceResolver:
         package_name = str(row["package_name"])
         location = self.resolve_row(row)
         if location is not None:
+            latest_location = self.resolve_row(row, latest=True)
+            update_available = (
+                location.package_ref is not None
+                and location.version_text is not None
+                and location.version_text.isdecimal()
+                and latest_location is not None
+                and latest_location.package_ref is not None
+                and latest_location.version_text is not None
+                and latest_location.version_text.isdecimal()
+                and int(latest_location.version_text) > int(location.version_text)
+            )
             state: dict[str, object] = {
                 "package_ref": location.package_ref,
                 "selected_version": location.version_text,
@@ -1484,6 +1530,17 @@ class _ResourceResolver:
                 "missing": False,
                 "missing_reason": None,
                 "local": location.local_path is not None,
+                "update_available": update_available,
+                "update_version": (
+                    int(latest_location.version_text)
+                    if update_available and latest_location is not None
+                    else None
+                ),
+                "update_package_ref": (
+                    latest_location.package_ref
+                    if update_available and latest_location is not None
+                    else None
+                ),
             }
             if str(row["resource_type"]).casefold() in {
                 "clothing (female)",
@@ -1534,6 +1591,7 @@ def resolve_resource_archive(
     resource_id: int,
     *,
     addon_root: Path | str | None = None,
+    version_text: str | None = None,
 ) -> ResourceLocation | None:
     """Resolve a resource to a real loose file or matching archive member.
 
@@ -1557,7 +1615,7 @@ def resolve_resource_archive(
         connection,
         root,
         addon_root=addon_root,
-    ).resolve_row(row)
+    ).resolve_row(row, version_text=version_text)
 
 
 def _sibling_jpg_names(resource_name: str) -> tuple[str, str]:

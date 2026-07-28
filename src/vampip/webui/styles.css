@@ -1491,11 +1491,23 @@ button svg,
   font-size: 8px;
 }
 
+.meta-pill.version-update {
+  color: var(--blue);
+  background: var(--blue-wash);
+  border-color: rgba(128, 191, 255, 0.22);
+  letter-spacing: 0.02em;
+  text-transform: none;
+}
+
 .card-actions {
   display: flex;
   gap: 7px;
   align-items: center;
   margin-top: 12px;
+}
+
+.card-actions.has-resource-update {
+  flex-wrap: wrap;
 }
 
 .card-actions button {
@@ -1507,6 +1519,17 @@ button svg,
   font-size: 11px;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.card-actions .resource-update-button {
+  flex-basis: 100%;
+  color: var(--blue);
+  background: var(--blue-wash);
+  border-color: rgba(128, 191, 255, 0.22);
+}
+
+.card-actions .resource-update-button:hover:not(:disabled) {
+  border-color: rgba(128, 191, 255, 0.42);
 }
 
 .card-actions .pin-button {

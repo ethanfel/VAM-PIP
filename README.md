@@ -21,7 +21,7 @@ leaving managed mode restores that baseline.
 
 ## Current status
 
-Version 0.6.6 is functional but should still be treated as an early release.
+Version 0.6.7 is functional but should still be treated as an early release.
 Package switching is deliberately conservative:
 
 - entering managed mode requires explicit confirmation;
@@ -121,8 +121,12 @@ archive is already enabled, the bridge receives one core package rescan.
 For an already indexed BrowserAssist resource, VAM-PIP can resolve a newer
 installed package version even while BrowserAssist's version list is stale. It
 opens candidate archives and accepts the newer version only when the exact
-resource member is present. Entirely new resources still require BrowserAssist
-to rebuild its manifest before VAM-PIP can import their metadata.
+resource member is present. The resource card then shows the selected and newer
+versions, such as **v2 → v4**, and provides an explicit **Update to v4**
+action. Ordinary Load continues to use the displayed current version; Update
+pins dependency discovery, the lease, and any live bridge action to the exact
+newer version. Entirely new resources still require BrowserAssist to rebuild
+its manifest before VAM-PIP can import their metadata.
 
 No dependency scanner can identify packages loaded dynamically by every
 third-party script. Pin known runtime plugins that a collection always needs.

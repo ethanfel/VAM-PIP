@@ -169,6 +169,22 @@ class ManagerRequestHandler(BaseHTTPRequestHandler):
             raise ValueError(f"{key} must be a boolean")
         return value
 
+    @staticmethod
+    def _package_version(document: dict[str, Any]) -> int | None:
+        value = document.get("package_version")
+        if value is None:
+            return None
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, int)
+            or value < 0
+            or value > 2_147_483_647
+        ):
+            raise ValueError(
+                "package_version must be an integer from 0 to 2147483647"
+            )
+        return value
+
     def _serve_static(self, path: str) -> None:
         names = {
             "/": "index.html",
@@ -395,17 +411,23 @@ class ManagerRequestHandler(BaseHTTPRequestHandler):
             resource_lease = _RESOURCE_LEASE.fullmatch(parsed.path)
             if method == "POST" and resource_lease:
                 apply = self._boolean(document, "apply", True)
+                package_version = self._package_version(document)
+                lease_kwargs: dict[str, object] = {
+                    "days": float(document.get("days", 3)),
+                    "label": (
+                        str(document["label"])
+                        if document.get("label") is not None
+                        else None
+                    ),
+                    "apply": apply,
+                }
+                if package_version is not None:
+                    lease_kwargs["package_version"] = package_version
                 self._json(
                     HTTPStatus.OK,
                     service.lease_resource(
                         int(resource_lease.group(1)),
-                        days=float(document.get("days", 3)),
-                        label=(
-                            str(document["label"])
-                            if document.get("label") is not None
-                            else None
-                        ),
-                        apply=apply,
+                        **lease_kwargs,
                     ),
                 )
                 return
@@ -467,6 +489,7 @@ class ManagerRequestHandler(BaseHTTPRequestHandler):
             if method == "POST" and parsed.path == "/api/vam/resource/apply":
                 resource_id = document.get("resource_id")
                 target_uid = document.get("target_uid")
+                package_version = self._package_version(document)
                 if (
                     isinstance(resource_id, bool)
                     or not isinstance(resource_id, int)
@@ -490,16 +513,21 @@ class ManagerRequestHandler(BaseHTTPRequestHandler):
                 confirm_critical = document.get("confirm_critical", False)
                 if not isinstance(confirm_critical, bool):
                     raise ValueError("confirm_critical must be a boolean")
+                apply_kwargs: dict[str, object] = {
+                    "target_uid": target_uid,
+                    "days": float(days),
+                    "merge": merge,
+                    "create_if_missing": create_if_missing,
+                    "confirm_replace": confirm_replace,
+                    "confirm_critical": confirm_critical,
+                }
+                if package_version is not None:
+                    apply_kwargs["package_version"] = package_version
                 self._json(
                     HTTPStatus.OK,
                     service.apply_resource(
                         resource_id,
-                        target_uid=target_uid,
-                        days=float(days),
-                        merge=merge,
-                        create_if_missing=create_if_missing,
-                        confirm_replace=confirm_replace,
-                        confirm_critical=confirm_critical,
+                        **apply_kwargs,
                     ),
                 )
                 return
@@ -547,6 +575,7 @@ class ManagerRequestHandler(BaseHTTPRequestHandler):
                     "active",
                     "revision",
                     "days",
+                    "package_version",
                 }
                 unexpected_fields = sorted(set(document) - allowed_fields)
                 if unexpected_fields:
@@ -559,6 +588,7 @@ class ManagerRequestHandler(BaseHTTPRequestHandler):
                 active = document.get("active")
                 revision = document.get("revision")
                 days = document.get("days", 3)
+                package_version = self._package_version(document)
                 if (
                     isinstance(resource_id, bool)
                     or not isinstance(resource_id, int)
@@ -573,20 +603,26 @@ class ManagerRequestHandler(BaseHTTPRequestHandler):
                     raise ValueError("revision must be a string")
                 if isinstance(days, bool) or not isinstance(days, (int, float)):
                     raise ValueError("days must be a number")
+                clothing_kwargs: dict[str, object] = {
+                    "target_uid": target_uid,
+                    "active": active,
+                    "revision": revision,
+                    "days": float(days),
+                }
+                if package_version is not None:
+                    clothing_kwargs["package_version"] = package_version
                 self._json(
                     HTTPStatus.OK,
                     service.set_person_clothing(
                         resource_id,
-                        target_uid=target_uid,
-                        active=active,
-                        revision=revision,
-                        days=float(days),
+                        **clothing_kwargs,
                     ),
                 )
                 return
             if method == "POST" and parsed.path == "/api/vam/person/apply":
                 resource_id = document.get("resource_id")
                 target_uid = document.get("target_uid")
+                package_version = self._package_version(document)
                 if (
                     isinstance(resource_id, bool)
                     or not isinstance(resource_id, int)
@@ -604,14 +640,19 @@ class ManagerRequestHandler(BaseHTTPRequestHandler):
                 confirm_critical = document.get("confirm_critical", False)
                 if not isinstance(confirm_critical, bool):
                     raise ValueError("confirm_critical must be a boolean")
+                person_kwargs: dict[str, object] = {
+                    "target_uid": target_uid,
+                    "days": float(days),
+                    "merge": merge,
+                    "confirm_critical": confirm_critical,
+                }
+                if package_version is not None:
+                    person_kwargs["package_version"] = package_version
                 self._json(
                     HTTPStatus.OK,
                     service.apply_person_resource(
                         resource_id,
-                        target_uid=target_uid,
-                        days=float(days),
-                        merge=merge,
-                        confirm_critical=confirm_critical,
+                        **person_kwargs,
                     ),
                 )
                 return

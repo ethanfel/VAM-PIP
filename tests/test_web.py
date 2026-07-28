@@ -156,8 +156,8 @@ class WebSecurityTests(unittest.TestCase):
             "frame-ancestors 'none'", response.getheader("Content-Security-Policy")
         )
         document = response.read().decode("utf-8")
-        self.assertIn("/styles.css?v=0.6.6", document)
-        self.assertIn("/app.js?v=0.6.6", document)
+        self.assertIn("/styles.css?v=0.6.7", document)
+        self.assertIn("/app.js?v=0.6.7", document)
 
     def test_session_plugin_endpoints_report_and_import_defaults(self) -> None:
         preset_path = write_web_session_defaults(self.vam_root)
@@ -524,6 +524,127 @@ class WebSecurityTests(unittest.TestCase):
             confirm_replace=True,
             confirm_critical=False,
         )
+
+    def test_resource_routes_forward_exact_package_version(self) -> None:
+        headers = {
+            "X-VAMPIP-Token": self.token,
+            "Content-Type": "application/json",
+        }
+        lease_result = {
+            "resource_id": 42,
+            "selected_version": "4",
+            "lease_id": "lease-id",
+        }
+        self.server.service.lease_resource = mock.Mock(
+            return_value=lease_result
+        )
+        lease_body = json.dumps(
+            {
+                "package_version": 4,
+                "days": 2,
+                "apply": False,
+            }
+        ).encode("utf-8")
+        self.connection.request(
+            "POST",
+            "/api/resources/42/lease",
+            body=lease_body,
+            headers={
+                **headers,
+                "Content-Length": str(len(lease_body)),
+            },
+        )
+        response = self.connection.getresponse()
+        self.assertEqual(response.status, 200)
+        self.assertEqual(self.response_json(response), lease_result)
+        self.server.service.lease_resource.assert_called_once_with(
+            42,
+            package_version=4,
+            days=2.0,
+            label=None,
+            apply=False,
+        )
+
+        apply_result = {
+            "resource_id": 42,
+            "selected_version": "4",
+            "bridge_request": "scene-request",
+        }
+        self.server.service.apply_resource = mock.Mock(
+            return_value=apply_result
+        )
+        apply_body = json.dumps(
+            {
+                "resource_id": 42,
+                "package_version": 4,
+                "confirm_replace": True,
+            }
+        ).encode("utf-8")
+        self.connection.request(
+            "POST",
+            "/api/vam/resource/apply",
+            body=apply_body,
+            headers={
+                **headers,
+                "Content-Length": str(len(apply_body)),
+            },
+        )
+        response = self.connection.getresponse()
+        self.assertEqual(response.status, 200)
+        self.assertEqual(self.response_json(response), apply_result)
+        self.server.service.apply_resource.assert_called_once_with(
+            42,
+            package_version=4,
+            target_uid=None,
+            days=3.0,
+            merge=False,
+            create_if_missing=False,
+            confirm_replace=True,
+            confirm_critical=False,
+        )
+
+    def test_resource_routes_reject_non_integer_package_version(self) -> None:
+        headers = {
+            "X-VAMPIP-Token": self.token,
+            "Content-Type": "application/json",
+        }
+        cases = (
+            (
+                "/api/resources/42/lease",
+                {"package_version": True},
+                "lease_resource",
+            ),
+            (
+                "/api/vam/resource/apply",
+                {"resource_id": 42, "package_version": "4"},
+                "apply_resource",
+            ),
+        )
+        for route, document, service_method in cases:
+            with self.subTest(route=route):
+                body = json.dumps(document).encode("utf-8")
+                with mock.patch.object(
+                    self.server.service,
+                    service_method,
+                    return_value={},
+                ) as operation:
+                    self.connection.request(
+                        "POST",
+                        route,
+                        body=body,
+                        headers={
+                            **headers,
+                            "Content-Length": str(len(body)),
+                        },
+                    )
+                    response = self.connection.getresponse()
+                    self.assertEqual(response.status, 400)
+                    payload = self.response_json(response)
+                    self.assertIn(
+                        "package_version must be an integer",
+                        payload["error"],
+                    )
+                    operation.assert_not_called()
 
     def test_custom_unity_asset_choice_route_is_strict_and_opaque(self) -> None:
         token = "a" * 32

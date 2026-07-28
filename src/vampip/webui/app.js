@@ -3037,6 +3037,15 @@ function createResourceCard(item) {
   body.append(subtitle);
 
   const metadata = createElement("div", "card-meta");
+  const updateVersion = resourceUpdateVersion(item);
+  if (updateVersion !== null) {
+    metadata.append(
+      badge(
+        `v${resourceSelectedVersion(item)} → v${updateVersion}`,
+        "meta-pill version-update",
+      ),
+    );
+  }
   const tags = normalizeTags(
     item.clothing?.tags || item.tags || item.tags_json,
   );
@@ -3068,6 +3077,17 @@ function createResourceCard(item) {
         setPersonClothing(item, workspaceCategory, clothingButton),
       );
       actions.append(clothingButton);
+      appendResourceUpdateAction(actions, item, {
+        disabled: !availability.allowed,
+        reason: availability.reason,
+        onUpdate: (updateButton, packageVersion) =>
+          setPersonClothing(
+            item,
+            workspaceCategory,
+            updateButton,
+            packageVersion,
+          ),
+      });
     }
     if (!availability.allowed) {
       appendPackageAccessActions(actions, item, {
@@ -3076,6 +3096,7 @@ function createResourceCard(item) {
         root,
         title,
         pinned,
+        includeUpdate: !workspaceCategory.liveAction,
       });
     }
     body.append(actions);
@@ -3094,6 +3115,17 @@ function createResourceCard(item) {
       applyWorkspaceResource(item, workspaceCategory, applyButton),
     );
     actions.append(applyButton);
+    appendResourceUpdateAction(actions, item, {
+      disabled: !availability.allowed,
+      reason: availability.reason,
+      onUpdate: (updateButton, packageVersion) =>
+        applyWorkspaceResource(
+          item,
+          workspaceCategory,
+          updateButton,
+          packageVersion,
+        ),
+    });
     body.append(actions);
     card.append(preview, body);
     return card;
@@ -3115,7 +3147,7 @@ function createResourceCard(item) {
 function appendPackageAccessActions(
   actions,
   item,
-  { active, state, root, title, pinned },
+  { active, state, root, title, pinned, includeUpdate = true },
 ) {
   const leaseButton = button(
     active ? "Keep for 3 days" : "Enable for 3 days",
@@ -3154,6 +3186,74 @@ function appendPackageAccessActions(
     pinned ? removePin(root, pinButton) : addPin(root, title, pinButton),
   );
   actions.append(pinButton);
+
+  if (includeUpdate) {
+    appendResourceUpdateAction(actions, item, {
+      disabled:
+        isLocal ||
+        isMissing ||
+        (!item.id && !root) ||
+        !itemIsValid(item),
+      reason: isMissing
+        ? "The newer package version is not installed"
+        : "Temporarily enable this exact newer version and its dependencies",
+      onUpdate: (updateButton, packageVersion) =>
+        createThreeDayLease(
+          root,
+          title,
+          updateButton,
+          item.id,
+          packageVersion,
+        ),
+    });
+  }
+}
+
+function resourceUpdateVersion(item) {
+  if (!item || item.update_available !== true) return null;
+  const version = item.update_version;
+  if (
+    !Number.isInteger(version) ||
+    version < 0 ||
+    version > 2_147_483_647
+  ) {
+    return null;
+  }
+  return version;
+}
+
+function resourceSelectedVersion(item) {
+  const selected = item && item.selected_version;
+  if (selected !== null && selected !== undefined) {
+    const normalized = String(selected).trim();
+    if (normalized) return normalized;
+  }
+  const match = packageRoot(item || {}).match(/\.([0-9]+)$/);
+  return match ? match[1] : "?";
+}
+
+function appendResourceUpdateAction(
+  actions,
+  item,
+  { onUpdate, disabled = false, reason = "" },
+) {
+  const packageVersion = resourceUpdateVersion(item);
+  if (packageVersion === null || typeof onUpdate !== "function") return null;
+
+  actions.classList.add("has-resource-update");
+  const updateButton = button(
+    `Update to v${packageVersion}`,
+    "secondary-button resource-update-button",
+  );
+  updateButton.disabled = disabled;
+  updateButton.title =
+    reason ||
+    `Use installed v${packageVersion}; the current version remains available while another lease still needs it`;
+  updateButton.addEventListener("click", () =>
+    onUpdate(updateButton, packageVersion),
+  );
+  actions.append(updateButton);
+  return updateButton;
 }
 
 function isIndividualClothingCategory(
@@ -3260,7 +3360,12 @@ function clothingActionAvailability(
   };
 }
 
-async function setPersonClothing(item, category, sourceButton) {
+async function setPersonClothing(
+  item,
+  category,
+  sourceButton,
+  packageVersion = null,
+) {
   const availability = clothingActionAvailability(item, category);
   if (!availability.allowed) {
     if (availability.reason) {
@@ -3275,24 +3380,39 @@ async function setPersonClothing(item, category, sourceButton) {
   setButtonBusy(
     sourceButton,
     true,
-    availability.desiredActive ? "Wearing…" : "Removing…",
+    packageVersion !== null
+      ? `Updating to v${packageVersion}…`
+      : availability.desiredActive
+        ? "Wearing…"
+        : "Removing…",
   );
   try {
+    const requestBody = {
+      resource_id: resourceId,
+      target_uid: targetUid,
+      active: availability.desiredActive,
+      revision: availability.revision,
+      days: 3,
+    };
+    if (packageVersion !== null) {
+      requestBody.active = true;
+      requestBody.package_version = packageVersion;
+    }
     const result = await api("/api/vam/person/clothing", {
       method: "POST",
-      body: {
-        resource_id: resourceId,
-        target_uid: targetUid,
-        active: availability.desiredActive,
-        revision: availability.revision,
-        days: 3,
-      },
+      body: requestBody,
     });
     requireBridgeQueue(result, "Clothing change");
+    const desiredActive =
+      packageVersion !== null ? true : availability.desiredActive;
     toast(
-      availability.desiredActive ? "Clothing queued" : "Removal queued",
+      packageVersion !== null
+        ? `Clothing v${packageVersion} queued`
+        : desiredActive
+          ? "Clothing queued"
+          : "Removal queued",
       `${
-        availability.desiredActive ? "Wear" : "Remove"
+        desiredActive ? "Wear" : "Remove"
       } “${resourceTitle(item)}” for ${targetUid}.`,
     );
     await refreshAll({ force: true });
@@ -3334,6 +3454,7 @@ function startWorkspaceActionFeedback(item, category, key, state) {
     operation: category.operation,
     title,
     noun,
+    packageVersion: null,
     needsPackageEnable,
     requestId: "",
     stage: "preparing",
@@ -3800,7 +3921,12 @@ async function confirmRiskyAssetLoad(item, category, merge) {
   });
 }
 
-async function applyWorkspaceResource(item, category, sourceButton) {
+async function applyWorkspaceResource(
+  item,
+  category,
+  sourceButton,
+  packageVersion = null,
+) {
   const resourceId = Number(item.id);
   if (!Number.isInteger(resourceId) || resourceId < 1 || !category) return;
 
@@ -3841,6 +3967,18 @@ async function applyWorkspaceResource(item, category, sourceButton) {
       item.state || (itemIsActive(item) ? "active" : "hidden"),
     ).toLowerCase();
     action = startWorkspaceActionFeedback(item, category, key, state);
+    if (packageVersion !== null) {
+      action.packageVersion = packageVersion;
+      action.needsPackageEnable = true;
+      action.message =
+        `Resolving dependencies and enabling v${packageVersion} of “${action.title}”.`;
+      updateToast(
+        action.toast,
+        `Preparing ${action.noun.toLowerCase()}`,
+        action.message,
+        "busy",
+      );
+    }
     if (managedTarget) renderAtomContext();
     setButtonBusy(
       sourceButton,
@@ -3861,6 +3999,9 @@ async function applyWorkspaceResource(item, category, sourceButton) {
       confirm_replace: confirmedReplace,
       create_if_missing: createIfMissing,
     };
+    if (packageVersion !== null) {
+      body.package_version = packageVersion;
+    }
     if (category.targetKind === "person") {
       body.target_uid = app.selectedPersonUid;
     } else if (managedTarget) {
@@ -3906,7 +4047,9 @@ async function applyWorkspaceResource(item, category, sourceButton) {
       finishWorkspaceActionFeedback(action, false, errorMessage(error));
     } else {
       toast(
-        `Could not refresh ${resourceTitle(item)}`,
+        packageVersion !== null
+          ? `Could not update ${resourceTitle(item)} to v${packageVersion}`
+          : `Could not refresh ${resourceTitle(item)}`,
         errorMessage(error),
         "error",
       );
@@ -4510,7 +4653,13 @@ async function deactivateManagedMode() {
   }
 }
 
-async function createThreeDayLease(root, label, sourceButton, resourceId = null) {
+async function createThreeDayLease(
+  root,
+  label,
+  sourceButton,
+  resourceId = null,
+  packageVersion = null,
+) {
   if (!root && !resourceId) return;
   if (!app.status || !app.status.managed_mode) {
     const shouldActivate = await showDialog({
@@ -4525,12 +4674,20 @@ async function createThreeDayLease(root, label, sourceButton, resourceId = null)
     return;
   }
 
-  setButtonBusy(sourceButton, true, "Resolving…");
+  setButtonBusy(
+    sourceButton,
+    true,
+    packageVersion === null ? "Resolving…" : `Updating to v${packageVersion}…`,
+  );
   try {
+    const resourceLeaseBody = { days: 3, label, apply: true };
+    if (packageVersion !== null) {
+      resourceLeaseBody.package_version = packageVersion;
+    }
     const result = resourceId
       ? await api(`/api/resources/${encodeURIComponent(resourceId)}/lease`, {
           method: "POST",
-          body: { days: 3, label, apply: true },
+          body: resourceLeaseBody,
         })
       : await api("/api/leases", {
           method: "POST",
@@ -4544,14 +4701,22 @@ async function createThreeDayLease(root, label, sourceButton, resourceId = null)
     const reconcile = result.reconcile || {};
     const pending = numberOr(reconcile.pending_disable, 0);
     toast(
-      "Available for 3 days",
+      packageVersion === null
+        ? "Available for 3 days"
+        : `v${packageVersion} available for 3 days`,
       `${formatNumber(resolved)} ${plural("package", resolved)} resolved${
         reconcile.bridge_request ? " · live rescan requested" : ""
       }${pending ? ` · ${pending} future disables deferred` : ""}.`,
     );
     await refreshAll();
   } catch (error) {
-    toast(`Could not enable ${label}`, errorMessage(error), "error");
+    toast(
+      packageVersion === null
+        ? `Could not enable ${label}`
+        : `Could not update ${label} to v${packageVersion}`,
+      errorMessage(error),
+      "error",
+    );
   } finally {
     setButtonBusy(sourceButton, false);
   }

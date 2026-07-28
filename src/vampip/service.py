@@ -1013,11 +1013,13 @@ class ManagerService:
         self,
         resource_id: int,
         *,
+        package_version: int | None = None,
         days: float = 3,
         label: str | None = None,
         apply: bool = True,
         bridge_rescan: bool = True,
     ) -> dict[str, object]:
+        version_text = self._validate_package_version(package_version)
         with connect(self.state_dir) as connection:
             self._rows(connection, refresh=False)
             roots = resource_package_roots(
@@ -1025,6 +1027,7 @@ class ManagerService:
                 self.vam_root,
                 int(resource_id),
                 addon_root=self.addon_dir,
+                version_text=version_text,
             )
             row = connection.execute(
                 """
@@ -1054,6 +1057,8 @@ class ManagerService:
             bridge_rescan=bridge_rescan,
         )
         result["resource_id"] = int(resource_id)
+        if version_text is not None:
+            result["selected_version"] = version_text
         result["discovered_roots"] = roots
         return result
 
@@ -1133,6 +1138,21 @@ class ManagerService:
         ):
             raise ValueError("target_uid must contain 1 to 200 printable characters")
         return uid
+
+    @staticmethod
+    def _validate_package_version(package_version: object) -> str | None:
+        if package_version is None:
+            return None
+        if (
+            isinstance(package_version, bool)
+            or not isinstance(package_version, int)
+            or package_version < 0
+            or package_version > 2_147_483_647
+        ):
+            raise ValueError(
+                "package_version must be an integer from 0 to 2147483647"
+            )
+        return str(package_version)
 
     @staticmethod
     def _validate_category_id(category_id: object) -> str:
@@ -1371,6 +1391,7 @@ class ManagerService:
         self,
         resource_id: int,
         *,
+        package_version: int | None = None,
         target_uid: str | None = None,
         days: float = 3,
         merge: bool = False,
@@ -1383,6 +1404,7 @@ class ManagerService:
         with self._bridge_mailbox_transaction():
             return self._apply_resource_locked(
                 resource_id,
+                package_version=package_version,
                 target_uid=target_uid,
                 days=days,
                 merge=merge,
@@ -1395,6 +1417,7 @@ class ManagerService:
         self,
         resource_id: int,
         *,
+        package_version: int | None = None,
         target_uid: str,
         active: bool,
         revision: str,
@@ -1408,9 +1431,14 @@ class ManagerService:
             or resource_id < 1
         ):
             raise ValueError("resource_id must be a positive integer")
+        version_text = self._validate_package_version(package_version)
         uid = self._validate_target_uid(target_uid)
         if not isinstance(active, bool):
             raise TypeError("active must be a boolean")
+        if version_text is not None and not active:
+            raise ValueError(
+                "package_version is only supported when wearing clothing"
+            )
         if not isinstance(revision, str) or re.fullmatch(
             r"[0-9a-fA-F]{32}",
             revision,
@@ -1455,6 +1483,7 @@ class ManagerService:
                     self.vam_root,
                     resource_id,
                     addon_root=self.addon_dir,
+                    version_text=version_text,
                 )
             if location is None:
                 raise ValueError(
@@ -1530,6 +1559,11 @@ class ManagerService:
                     label=f"Clothing: {label}",
                     apply=True,
                     bridge_rescan=False,
+                    **(
+                        {"package_version": package_version}
+                        if package_version is not None
+                        else {}
+                    ),
                 )
                 rescan = self._lease_requires_bridge_rescan(lease)
 
@@ -1545,6 +1579,7 @@ class ManagerService:
             )
             return {
                 "resource_id": resource_id,
+                "selected_version": location.version_text,
                 "category": (
                     "clothing-items-female"
                     if resource_type == "clothing (female)"
@@ -1564,6 +1599,7 @@ class ManagerService:
         self,
         resource_id: int,
         *,
+        package_version: int | None = None,
         target_uid: str,
         days: float = 3,
         merge: bool = False,
@@ -1574,6 +1610,7 @@ class ManagerService:
         with self._bridge_mailbox_transaction():
             return self._apply_resource_locked(
                 resource_id,
+                package_version=package_version,
                 target_uid=target_uid,
                 days=days,
                 merge=merge,
@@ -1587,6 +1624,7 @@ class ManagerService:
         self,
         resource_id: int,
         *,
+        package_version: int | None,
         target_uid: str | None,
         days: float,
         merge: bool,
@@ -1601,6 +1639,7 @@ class ManagerService:
             or resource_id < 1
         ):
             raise ValueError("resource_id must be a positive integer")
+        version_text = self._validate_package_version(package_version)
         if isinstance(days, bool) or not isinstance(days, (int, float)):
             raise TypeError("days must be a number")
         if not isinstance(merge, bool):
@@ -1628,6 +1667,7 @@ class ManagerService:
                 self.vam_root,
                 int(resource_id),
                 addon_root=self.addon_dir,
+                version_text=version_text,
             )
         if location is None:
             raise ValueError("the selected catalog resource file is not installed")
@@ -1703,6 +1743,11 @@ class ManagerService:
                 label=f"{person_spec['label']}: {label}",
                 apply=True,
                 bridge_rescan=False,
+                **(
+                    {"package_version": package_version}
+                    if package_version is not None
+                    else {}
+                ),
             )
             rescan = self._lease_requires_bridge_rescan(lease)
             request_id, bridge_message = self._try_queue_bridge_request(
@@ -1717,6 +1762,7 @@ class ManagerService:
             )
             return {
                 "resource_id": resource_id,
+                "selected_version": location.version_text,
                 "category": category_id,
                 "operation": operation,
                 "target_uid": uid,
@@ -1770,6 +1816,11 @@ class ManagerService:
                 label=f"{atom_type} preset: {label}",
                 apply=True,
                 bridge_rescan=False,
+                **(
+                    {"package_version": package_version}
+                    if package_version is not None
+                    else {}
+                ),
             )
             rescan = self._lease_requires_bridge_rescan(lease)
             request_id, bridge_message = self._try_queue_bridge_request(
@@ -1785,6 +1836,7 @@ class ManagerService:
             )
             return {
                 "resource_id": resource_id,
+                "selected_version": location.version_text,
                 "category": category_id,
                 "operation": operation,
                 "target_uid": uid,
@@ -1843,6 +1895,11 @@ class ManagerService:
                 label=f"Custom Unity Asset: {label}",
                 apply=True,
                 bridge_rescan=False,
+                **(
+                    {"package_version": package_version}
+                    if package_version is not None
+                    else {}
+                ),
             )
             rescan = self._lease_requires_bridge_rescan(lease)
             request_id, bridge_message = self._try_queue_bridge_request(
@@ -1856,6 +1913,7 @@ class ManagerService:
             )
             return {
                 "resource_id": resource_id,
+                "selected_version": location.version_text,
                 "category": category_id,
                 "operation": operation,
                 "target_uid": uid,
@@ -1913,6 +1971,11 @@ class ManagerService:
                 label=f"SubScene: {label}",
                 apply=True,
                 bridge_rescan=False,
+                **(
+                    {"package_version": package_version}
+                    if package_version is not None
+                    else {}
+                ),
             )
             rescan = self._lease_requires_bridge_rescan(lease)
             request_id, bridge_message = self._try_queue_bridge_request(
@@ -1926,6 +1989,7 @@ class ManagerService:
             )
             return {
                 "resource_id": resource_id,
+                "selected_version": location.version_text,
                 "category": category_id,
                 "operation": operation,
                 "target_uid": uid,
@@ -1965,6 +2029,11 @@ class ManagerService:
             label=f"Scene: {label}",
             apply=True,
             bridge_rescan=False,
+            **(
+                {"package_version": package_version}
+                if package_version is not None
+                else {}
+            ),
         )
         rescan = self._lease_requires_bridge_rescan(lease)
         request_id, bridge_message = self._try_queue_bridge_request(
@@ -1977,6 +2046,7 @@ class ManagerService:
         )
         return {
             "resource_id": resource_id,
+            "selected_version": location.version_text,
             "category": category_id,
             "operation": operation,
             "target_uid": None,

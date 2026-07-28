@@ -531,6 +531,18 @@ class PersonWorkspaceTests(unittest.TestCase):
         )
         resource_ref = f"Creator.HairPack.1:/{CLOTHING_MEMBER}"
 
+        with self.assertRaisesRegex(
+            ValueError,
+            "only supported when wearing clothing",
+        ):
+            self.service.set_person_clothing(
+                resource_id,
+                package_version=1,
+                target_uid="Person",
+                active=False,
+                revision="a" * 32,
+            )
+
         with mock.patch.object(
             self.service,
             "_scene_snapshot",

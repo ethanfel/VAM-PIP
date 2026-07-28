@@ -11,7 +11,7 @@ from unittest import mock
 import zipfile
 
 from vampip.database import SCHEMA_VERSION, connect
-from vampip.bridge import install_bridge, read_bridge_status
+from vampip.bridge import install_bridge, read_bridge_request, read_bridge_status
 from vampip.inventory import rows_for_root, scan
 from vampip.manager_state import add_pin, list_leases
 from vampip.session_plugins import SessionPluginPresetError
@@ -174,6 +174,91 @@ class ManagerServiceTests(unittest.TestCase):
 
         offline.reconcile(apply=True)
         self.assertEqual(self.enabled_ids(), {"Core.Base.1"})
+
+    def test_running_vam_resource_version_lease_only_enables_hidden_update(
+        self,
+    ) -> None:
+        member = "Saves/scene/Versioned.json"
+        metadata = {
+            "creatorName": "Creator",
+            "packageName": "Bundle",
+            "dependencies": {},
+        }
+        for version in (2, 4):
+            archive_path = self.addons / f"Creator.Bundle.{version}.var"
+            with zipfile.ZipFile(
+                archive_path,
+                "w",
+                compression=zipfile.ZIP_DEFLATED,
+            ) as archive:
+                archive.writestr("meta.json", json.dumps(metadata))
+                archive.writestr(
+                    member,
+                    json.dumps({"version": version}),
+                )
+            if version == 4:
+                archive_path.rename(
+                    Path(f"{archive_path}.vampip-disabled")
+                )
+
+        with connect(self.state) as connection:
+            cursor = connection.execute(
+                """
+                INSERT INTO catalog_resources (
+                    root, source, resource_key, creator, package_name,
+                    versions_json, resource_path, resource_type, atom_type,
+                    favorite, hidden, tags_json, imported_utc
+                ) VALUES (?, 'browserassist', 'versioned-scene',
+                          'Creator', 'Bundle', '["2"]', ?, 'Scene', '',
+                          0, 0, '[]', '2026-01-01T00:00:00+00:00')
+                """,
+                (str(self.vam_root), member.replace("/", "\\")),
+            )
+            resource_id = int(cursor.lastrowid)
+            connection.execute(
+                """
+                INSERT INTO catalog_resource_versions(
+                    resource_id, version_text
+                ) VALUES (?, '2')
+                """,
+                (resource_id,),
+            )
+
+        offline = self.service()
+        offline.pin(["Creator.Bundle.2"])
+        offline.reconcile(apply=True, activate=True)
+        self.assertEqual(self.enabled_ids(), {"Creator.Bundle.2"})
+        offline.unpin("Creator.Bundle.2", apply=False)
+
+        running = self.service([4321])
+        leased = running.lease_resource(
+            resource_id,
+            package_version=4,
+            apply=True,
+        )
+
+        self.assertEqual(leased["selected_version"], "4")
+        self.assertEqual(
+            leased["discovered_roots"],
+            ["Creator.Bundle.4"],
+        )
+        self.assertEqual(leased["reconcile"]["enable"], 1)
+        self.assertEqual(leased["reconcile"]["disable"], 0)
+        self.assertEqual(leased["reconcile"]["pending_disable"], 1)
+        self.assertTrue(leased["reconcile"]["vam_running"])
+        self.assertEqual(
+            self.enabled_ids(),
+            {"Creator.Bundle.2", "Creator.Bundle.4"},
+        )
+        request = read_bridge_request(self.vam_root)
+        self.assertIsNotNone(request)
+        assert request is not None
+        self.assertEqual(request["command"], "rescan")
+
+        listed = running.search_resources()["items"]
+        resource = next(item for item in listed if item["id"] == resource_id)
+        self.assertEqual(resource["selected_version"], "4")
+        self.assertFalse(resource["update_available"])
 
     def test_deactivate_rechecks_vam_after_inventory_preparation(self) -> None:
         offline = self.service()

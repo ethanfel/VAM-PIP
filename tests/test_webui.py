@@ -206,6 +206,47 @@ class WorkspaceWebUITests(unittest.TestCase):
         self.assertIn("createThreeDayLease(", access)
         self.assertIn("addPin(root, title, pinButton)", access)
 
+    def test_resource_updates_are_visible_and_exact_version_actions(self) -> None:
+        card_start = self.javascript.index("function createResourceCard(")
+        card_end = self.javascript.index(
+            "function isIndividualClothingCategory(", card_start
+        )
+        card = self.javascript[card_start:card_end]
+        self.assertIn("resourceUpdateVersion(item)", card)
+        self.assertIn("v${resourceSelectedVersion(item)} → v${updateVersion}", card)
+        self.assertIn("`Update to v${packageVersion}`", card)
+        self.assertIn("item.update_available !== true", card)
+        self.assertIn("Number.isInteger(version)", card)
+
+        clothing_start = self.javascript.index(
+            "async function setPersonClothing("
+        )
+        clothing_end = self.javascript.index(
+            "function workspaceApplyAvailability(", clothing_start
+        )
+        clothing = self.javascript[clothing_start:clothing_end]
+        self.assertIn("requestBody.package_version = packageVersion", clothing)
+        self.assertIn("requestBody.active = true", clothing)
+
+        apply_start = self.javascript.index(
+            "async function applyWorkspaceResource("
+        )
+        apply_end = self.javascript.index("function createPackageCard(", apply_start)
+        apply = self.javascript[apply_start:apply_end]
+        self.assertIn("body.package_version = packageVersion", apply)
+
+        lease_start = self.javascript.index(
+            "async function createThreeDayLease("
+        )
+        lease_end = self.javascript.index("async function addPin(", lease_start)
+        lease = self.javascript[lease_start:lease_end]
+        self.assertIn(
+            "resourceLeaseBody.package_version = packageVersion",
+            lease,
+        )
+        self.assertIn(".meta-pill.version-update", self.styles)
+        self.assertIn(".resource-update-button", self.styles)
+
     def test_workspace_category_failures_retry_automatically(self) -> None:
         self.assertIn("workspaceCategoriesRetryAt: 0", self.javascript)
         activity_start = self.javascript.index("async function loadActivity(")
@@ -587,8 +628,8 @@ class WorkspaceWebUITests(unittest.TestCase):
                 self.assertIn(selector, self.styles)
 
     def test_static_assets_use_the_current_cache_version(self) -> None:
-        self.assertIn("/styles.css?v=0.6.6", self.html)
-        self.assertIn("/app.js?v=0.6.6", self.html)
+        self.assertIn("/styles.css?v=0.6.7", self.html)
+        self.assertIn("/app.js?v=0.6.7", self.html)
 
 
 if __name__ == "__main__":

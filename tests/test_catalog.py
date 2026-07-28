@@ -6,6 +6,7 @@ import sqlite3
 import tempfile
 import unittest
 from unittest import mock
+import warnings
 import zipfile
 
 from vampip.catalog import (
@@ -1108,6 +1109,179 @@ class CatalogTests(unittest.TestCase):
                 ],
                 ["1"],
             )
+
+    def test_active_resource_advertises_hidden_newer_exact_member_update(
+        self,
+    ) -> None:
+        resource_path = "Saves\\scene\\Versioned.json"
+        self.write_catalogue(
+            [
+                {
+                    "creatorName": "Creator",
+                    "packageName": "Bundle",
+                    "resourceFullFileName": resource_path,
+                    "resourceType": "Scene",
+                    "presetAtomType": "",
+                    "varVersions": ["2"],
+                }
+            ]
+        )
+        make_var(
+            self.addons / "Creator.Bundle.2.var",
+            creator="Creator",
+            package="Bundle",
+            members={"Saves/scene/Versioned.json": b'{"version":2}'},
+        )
+        update = self.addons / "Creator.Bundle.4.var"
+        make_var(
+            update,
+            creator="Creator",
+            package="Bundle",
+            members={"Saves/scene/Versioned.json": b'{"version":4}'},
+        )
+        update.rename(Path(f"{update}.vampip-disabled"))
+
+        with connect(self.state) as database:
+            scan(self.addons, database)
+            import_browserassist(database, self.vam_root)
+
+            listed = search_resources(database, self.vam_root)["items"][0]
+            self.assertEqual(listed["selected_version"], "2")
+            self.assertEqual(listed["package_ref"], "Creator.Bundle.2")
+            self.assertTrue(listed["enabled"])
+            self.assertFalse(listed["missing"])
+            self.assertTrue(listed["update_available"])
+            self.assertEqual(listed["update_version"], 4)
+            self.assertEqual(
+                listed["update_package_ref"],
+                "Creator.Bundle.4",
+            )
+
+            exact_update = resolve_resource_archive(
+                database,
+                self.vam_root,
+                listed["id"],
+                version_text="4",
+            )
+            self.assertIsNotNone(exact_update)
+            assert exact_update is not None
+            self.assertEqual(exact_update.version_text, "4")
+            self.assertEqual(
+                exact_update.archive_member,
+                "Saves/scene/Versioned.json",
+            )
+            self.assertFalse(exact_update.enabled)
+
+    def test_newer_package_without_member_is_not_a_resource_update(self) -> None:
+        resource_path = "Saves\\scene\\Versioned.json"
+        self.write_catalogue(
+            [
+                {
+                    "creatorName": "Creator",
+                    "packageName": "Bundle",
+                    "resourceFullFileName": resource_path,
+                    "resourceType": "Scene",
+                    "presetAtomType": "",
+                    "varVersions": ["2"],
+                }
+            ]
+        )
+        make_var(
+            self.addons / "Creator.Bundle.2.var",
+            creator="Creator",
+            package="Bundle",
+            members={"Saves/scene/Versioned.json": b'{"version":2}'},
+        )
+        update = self.addons / "Creator.Bundle.4.var"
+        make_var(
+            update,
+            creator="Creator",
+            package="Bundle",
+            members={"Saves/scene/Other.json": b'{"version":4}'},
+        )
+        update.rename(Path(f"{update}.vampip-disabled"))
+
+        with connect(self.state) as database:
+            scan(self.addons, database)
+            import_browserassist(database, self.vam_root)
+
+            listed = search_resources(database, self.vam_root)["items"][0]
+            self.assertEqual(listed["selected_version"], "2")
+            self.assertFalse(listed["missing"])
+            self.assertFalse(listed["update_available"])
+            self.assertIsNone(listed["update_version"])
+            self.assertIsNone(listed["update_package_ref"])
+            self.assertIsNone(
+                resolve_resource_archive(
+                    database,
+                    self.vam_root,
+                    listed["id"],
+                    version_text="4",
+                )
+            )
+
+    def test_ambiguous_newer_archive_member_is_not_offered_as_update(
+        self,
+    ) -> None:
+        member = "Saves/scene/Versioned.json"
+        collisions = {
+            "ExactCollision": member,
+            "CaseCollision": "Saves/scene/versioned.json",
+            "DotCollision": f"./{member}",
+        }
+        self.write_catalogue(
+            [
+                {
+                    "creatorName": "Creator",
+                    "packageName": package,
+                    "resourceFullFileName": member.replace("/", "\\"),
+                    "resourceType": "Scene",
+                    "presetAtomType": "",
+                    "varVersions": ["2"],
+                }
+                for package in collisions
+            ]
+        )
+        for package, collision in collisions.items():
+            make_var(
+                self.addons / f"Creator.{package}.2.var",
+                creator="Creator",
+                package=package,
+                members={member: b'{"version":2}'},
+            )
+            update = self.addons / f"Creator.{package}.4.var"
+            metadata = {
+                "creatorName": "Creator",
+                "packageName": package,
+                "dependencies": {},
+            }
+            with (
+                warnings.catch_warnings(),
+                zipfile.ZipFile(update, "w", zipfile.ZIP_DEFLATED) as archive,
+            ):
+                warnings.simplefilter("ignore", UserWarning)
+                archive.writestr("meta.json", json.dumps(metadata))
+                archive.writestr(member, b'{"copy":1}')
+                archive.writestr(collision, b'{"copy":2}')
+            update.rename(Path(f"{update}.vampip-disabled"))
+
+        with connect(self.state) as database:
+            scan(self.addons, database)
+            import_browserassist(database, self.vam_root)
+            listed = search_resources(database, self.vam_root)["items"]
+            self.assertEqual(len(listed), len(collisions))
+            for item in listed:
+                with self.subTest(package=item["package"]):
+                    self.assertEqual(item["selected_version"], "2")
+                    self.assertFalse(item["update_available"])
+                    self.assertIsNone(
+                        resolve_resource_archive(
+                            database,
+                            self.vam_root,
+                            item["id"],
+                            version_text="4",
+                        )
+                    )
 
 
 if __name__ == "__main__":
