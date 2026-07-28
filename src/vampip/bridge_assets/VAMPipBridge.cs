@@ -15,7 +15,7 @@ namespace VAMPip
     public class VAMPipBridge : MVRScript
     {
         private const int ProtocolVersion = 1;
-        private const string BridgeVersion = "0.1.0";
+        private const string BridgeVersion = "0.1.1";
 
         private const string PluginDataRoot = "Saves\\PluginData";
         private const string DataRoot = "Saves\\PluginData\\VAMPip";
@@ -436,7 +436,10 @@ namespace VAMPip
                 }
 
                 Assembly assembly = browserAssist.GetType().Assembly;
-                Type manifestType =
+                // MVRScript inherits JSONStorable.Type, which shadows
+                // System.Type in VaM's legacy compiler. Keep reflection types
+                // fully qualified throughout this class.
+                System.Type manifestType =
                     assembly.GetType("JayJayWon.VARPackageManifest", false);
                 if (manifestType == null)
                 {
@@ -448,7 +451,7 @@ namespace VAMPip
                     "RescanPackages",
                     BindingFlags.Public | BindingFlags.Static,
                     null,
-                    Type.EmptyTypes,
+                    System.Type.EmptyTypes,
                     null);
                 if (rescanMethod == null)
                 {
@@ -530,7 +533,7 @@ namespace VAMPip
 
             try
             {
-                Type browserAssistType =
+                System.Type browserAssistType =
                     assembly.GetType("JayJayWon.BrowserAssist", false);
                 if (browserAssistType == null)
                 {
@@ -553,7 +556,7 @@ namespace VAMPip
                     return false;
                 }
 
-                Type mainBrowserType = mainBrowser.GetType();
+                System.Type mainBrowserType = mainBrowser.GetType();
                 PropertyInfo isActiveProperty = mainBrowserType.GetProperty(
                     "isActive",
                     BindingFlags.Public | BindingFlags.Instance);
@@ -570,7 +573,7 @@ namespace VAMPip
                     "RefreshFilterResults",
                     BindingFlags.Public | BindingFlags.Instance,
                     null,
-                    new Type[] { typeof(bool) },
+                    new System.Type[] { typeof(bool) },
                     null);
                 if (refreshMethod == null)
                 {

@@ -57,7 +57,7 @@ The bridge writes `status.json`:
 ```json
 {
   "protocol": 1,
-  "bridgeVersion": "0.1.0",
+  "bridgeVersion": "0.1.1",
   "instanceId": "id-created-when-the-plugin-started",
   "requestId": "a-new-unique-id",
   "lastCompletedRequestId": "a-new-unique-id",
