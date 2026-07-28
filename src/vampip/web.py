@@ -9,7 +9,7 @@ import mimetypes
 import re
 import threading
 from typing import Any
-from urllib.parse import parse_qs, unquote, urlsplit
+from urllib.parse import parse_qs, quote, unquote, urlsplit
 import webbrowser
 
 from vampip.database import connect
@@ -180,9 +180,7 @@ class ManagerRequestHandler(BaseHTTPRequestHandler):
             or value < 0
             or value > 2_147_483_647
         ):
-            raise ValueError(
-                "package_version must be an integer from 0 to 2147483647"
-            )
+            raise ValueError("package_version must be an integer from 0 to 2147483647")
         return value
 
     def _serve_static(self, path: str) -> None:
@@ -248,6 +246,33 @@ class ManagerRequestHandler(BaseHTTPRequestHandler):
                 return
             if parsed.path == "/api/vam/persons":
                 self._json(HTTPStatus.OK, self.server.service.persons())
+                return
+            if parsed.path == "/api/vam/person/equipment":
+                unexpected_fields = sorted(set(query) - {"target_uid", "token"})
+                if unexpected_fields:
+                    raise ValueError(
+                        "unsupported Person equipment query field(s): "
+                        + ", ".join(unexpected_fields)
+                    )
+                target_values = query.get("target_uid", [])
+                if len(target_values) != 1 or not target_values[0]:
+                    raise ValueError("target_uid must be supplied exactly once")
+                result = self.server.service.person_equipment(target_values[0])
+                thumbnail_token = quote(self.server.api_token, safe="")
+                for item in result.get("items", []):
+                    if not isinstance(item, dict):
+                        continue
+                    resource_id = item.get("id")
+                    if (
+                        isinstance(resource_id, int)
+                        and not isinstance(resource_id, bool)
+                        and resource_id > 0
+                    ):
+                        item["thumbnail_url"] = (
+                            f"/api/resources/{resource_id}/thumbnail"
+                            f"?token={thumbnail_token}"
+                        )
+                self._json(HTTPStatus.OK, result)
                 return
             if parsed.path in {
                 "/api/workspace/categories",
@@ -531,10 +556,7 @@ class ManagerRequestHandler(BaseHTTPRequestHandler):
                     ),
                 )
                 return
-            if (
-                method == "POST"
-                and parsed.path == "/api/vam/custom-unity-asset/choice"
-            ):
+            if method == "POST" and parsed.path == "/api/vam/custom-unity-asset/choice":
                 allowed_fields = {
                     "target_uid",
                     "choice_index",

@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 from pathlib import Path, PurePosixPath
+import re
 import sqlite3
 import tempfile
 from typing import Any, Iterable
@@ -18,6 +19,8 @@ BROWSERASSIST_SOURCE = "browserassist"
 _SUPPORTED_STORE_FORMAT = 3
 _MAX_MANIFEST_BYTES = 64 * 1024 * 1024
 DEFAULT_MAX_THUMBNAIL_BYTES = 16 * 1024 * 1024
+MAX_RELATED_RESOURCE_VARIANTS = 12
+_MAX_RELATED_QUERY_KEYS = 200
 
 _REQUIRED_RESOURCE_COLUMNS = {
     "id",
@@ -879,6 +882,217 @@ def _select_clothing_metadata(
     return None
 
 
+def _resource_parent_and_stem(resource_path: object) -> tuple[str, str]:
+    normalized = str(resource_path or "").replace("/", "\\").strip("\\")
+    if not normalized:
+        return "", ""
+    parent, _, filename = normalized.rpartition("\\")
+    stem = filename.rsplit(".", 1)[0]
+    return parent, stem
+
+
+def _variant_label(owner_stem: str, variant_stem: str) -> str:
+    suffix = variant_stem[len(owner_stem) :].strip(" _-.")
+    if not suffix:
+        return "Default"
+    spaced = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", suffix)
+    return re.sub(r"[_-]+", " ", spaced).strip() or suffix
+
+
+def _catalog_version_identities(value: object) -> frozenset[str]:
+    identities: set[str] = set()
+    for raw_version in _json_list(value):
+        if isinstance(raw_version, bool) or isinstance(raw_version, (dict, list)):
+            continue
+        version = str(raw_version).strip().casefold()
+        if version:
+            identities.add(version)
+    return frozenset(identities)
+
+
+def _attach_clothing_style_variants(
+    connection: sqlite3.Connection,
+    rows: list[sqlite3.Row],
+    items: list[dict[str, object]],
+) -> None:
+    """Attach bounded, presentational sibling-style relationships.
+
+    BrowserAssist does not publish a trustworthy target-clothing identity for
+    ``Clothing Item Presets``. Same-folder presets whose basename begins with
+    the clothing item's basename are still useful as a conservative browsing
+    hint. The relationship is deliberately not an action identity.
+    """
+
+    returned_owners: dict[int, tuple[str, dict[str, object]]] = {}
+    query_keys: dict[tuple[str, str, str, str], tuple[str, str, str, str]] = {}
+    for row, item in zip(rows, items):
+        if str(row["resource_type"]).casefold() not in {
+            "clothing (female)",
+            "clothing (male)",
+        }:
+            continue
+        parent, stem = _resource_parent_and_stem(row["resource_path"])
+        if not parent or not stem:
+            continue
+        key = (
+            str(row["source"]),
+            str(row["creator"]),
+            str(row["package_name"]),
+            parent.casefold(),
+        )
+        versions = _catalog_version_identities(row["versions_json"])
+        if not versions:
+            continue
+        returned_owners[int(row["id"])] = (stem, item)
+        path_prefix = _escape_like(parent + "\\") + "%"
+        query_keys.setdefault(
+            key,
+            (
+                str(row["source"]),
+                str(row["creator"]),
+                str(row["package_name"]),
+                path_prefix,
+            ),
+        )
+    if not query_keys:
+        return
+
+    variant_rows: list[sqlite3.Row] = []
+    query_values = list(query_keys.values())
+    for start in range(0, len(query_values), _MAX_RELATED_QUERY_KEYS):
+        batch = query_values[start : start + _MAX_RELATED_QUERY_KEYS]
+        values_sql = ", ".join("(?, ?, ?, ?)" for _ in batch)
+        parameters: list[object] = []
+        for source, creator, package_name, prefix in batch:
+            parameters.extend((source, creator, package_name, prefix))
+        parameters.append(str(rows[0]["root"]))
+        variant_rows.extend(
+            connection.execute(
+                f"""
+                WITH wanted(source, creator, package_name, path_prefix) AS (
+                    VALUES {values_sql}
+                )
+                SELECT resource.id, resource.source, resource.creator,
+                       resource.package_name, resource.versions_json,
+                       resource.resource_path, resource.resource_type,
+                       resource.favorite
+                FROM wanted
+                CROSS JOIN catalog_resources AS resource
+                    INDEXED BY idx_catalog_root_family
+                WHERE resource.root = ?
+                  AND resource.creator = wanted.creator
+                  AND resource.package_name = wanted.package_name
+                  AND resource.source = wanted.source
+                  AND resource.resource_path COLLATE NOCASE LIKE
+                      wanted.path_prefix ESCAPE '\\'
+                  AND resource.resource_type COLLATE NOCASE IN (
+                      'Clothing Item Presets',
+                      'Clothing (Female)',
+                      'Clothing (Male)'
+                  )
+                """,
+                parameters,
+            )
+        )
+
+    resource_rows_by_id: dict[int, sqlite3.Row] = {}
+    for row in variant_rows:
+        resource_rows_by_id.setdefault(int(row["id"]), row)
+    resource_rows = sorted(
+        resource_rows_by_id.values(),
+        key=lambda row: (
+            str(row["resource_path"]).casefold(),
+            int(row["id"]),
+        ),
+    )
+
+    owners: dict[
+        tuple[str, str, str, str],
+        list[tuple[str, frozenset[str], int]],
+    ] = {}
+    for row in resource_rows:
+        if str(row["resource_type"]).casefold() not in {
+            "clothing (female)",
+            "clothing (male)",
+        }:
+            continue
+        parent, stem = _resource_parent_and_stem(row["resource_path"])
+        versions = _catalog_version_identities(row["versions_json"])
+        if not parent or not stem or not versions:
+            continue
+        key = (
+            str(row["source"]),
+            str(row["creator"]),
+            str(row["package_name"]),
+            parent.casefold(),
+        )
+        owners.setdefault(key, []).append((stem, versions, int(row["id"])))
+
+    related: dict[int, dict[str, dict[str, object]]] = {}
+    for row in resource_rows:
+        if str(row["resource_type"]).casefold() != "clothing item presets":
+            continue
+        parent, variant_stem = _resource_parent_and_stem(row["resource_path"])
+        key = (
+            str(row["source"]),
+            str(row["creator"]),
+            str(row["package_name"]),
+            parent.casefold(),
+        )
+        variant_versions = _catalog_version_identities(row["versions_json"])
+        candidates = [
+            (owner_stem, owner_id)
+            for owner_stem, owner_versions, owner_id in owners.get(key, ())
+            if (
+                owner_versions & variant_versions
+                and (
+                    variant_stem.casefold() == owner_stem.casefold()
+                    or any(
+                        variant_stem.casefold().startswith(
+                            f"{owner_stem.casefold()}{separator}"
+                        )
+                        for separator in ("_", "-", " ")
+                    )
+                )
+            )
+        ]
+        if not candidates:
+            continue
+        owner_stem, owner_id = min(
+            candidates,
+            key=lambda candidate: (-len(candidate[0]), candidate[1]),
+        )
+        returned_owner = returned_owners.get(owner_id)
+        if returned_owner is None:
+            continue
+        _, owner_item = returned_owner
+        logical_path = str(row["resource_path"]).replace("/", "\\").casefold()
+        related.setdefault(id(owner_item), {}).setdefault(
+            logical_path,
+            {
+                "id": int(row["id"]),
+                "display_name": _display_name(str(row["resource_path"])),
+                "label": _variant_label(owner_stem, variant_stem),
+                "favorite": bool(row["favorite"]),
+            },
+        )
+
+    for owner_stem, item in returned_owners.values():
+        variants = list(related.get(id(item), {}).values())
+        if not variants:
+            continue
+        variants.sort(
+            key=lambda variant: (
+                str(variant["label"]).casefold(),
+                int(variant["id"]),
+            )
+        )
+        item["variant_group"] = "related-clothing-styles"
+        item["variant_count"] = len(variants)
+        item["variants"] = variants[:MAX_RELATED_RESOURCE_VARIANTS]
+        item["variant_search"] = owner_stem
+
+
 def _escape_like(value: str) -> str:
     return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
@@ -1066,9 +1280,7 @@ def search_resources(
             # An enabled and a hidden allowed version can disagree about whether
             # this exact resource exists. Verify only those ambiguous rows
             # against the archives; the normal all-catalog path remains SQL-only.
-            ambiguous_where = " AND ".join(
-                [*where, packaged, active, inactive]
-            )
+            ambiguous_where = " AND ".join([*where, packaged, active, inactive])
             ambiguous_rows = list(
                 connection.execute(
                     f"""
@@ -1175,6 +1387,8 @@ def search_resources(
             clothing = _select_clothing_metadata(item)
             if clothing is not None:
                 item["clothing"] = clothing
+    if rows:
+        _attach_clothing_style_variants(connection, rows, items)
     for item in items:
         item.pop("clothing_versions", None)
     return {
@@ -1389,9 +1603,7 @@ class _ResourceResolver:
         allowed = _allowed_versions(row)
         if not allowed:
             return []
-        numeric_allowed = {
-            int(value) for value in allowed if value.isdecimal()
-        }
+        numeric_allowed = {int(value) for value in allowed if value.isdecimal()}
         newest_declared = max(numeric_allowed) if numeric_allowed else None
         key = (
             str(row["creator"]).casefold(),

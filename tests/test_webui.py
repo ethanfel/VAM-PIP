@@ -39,7 +39,11 @@ class WorkspaceWebUITests(unittest.TestCase):
         self.assertIn('id="cua-choice-select"', self.html)
         self.assertIn('id="cua-choice-button"', self.html)
         self.assertIn('id="cua-dll-state"', self.html)
-        self.assertIn('category.targetKind !== "person"', self.javascript)
+        self.assertIn(
+            'const PERSON_TARGET_KINDS = new Set(["person", "person-clothing-item"])',
+            self.javascript,
+        )
+        self.assertIn("categoryUsesPersonContext(category)", self.javascript)
         self.assertIn('api("/api/vam/person/add"', self.javascript)
         self.assertIn('api("/api/vam/person/select"', self.javascript)
         self.assertIn('api("/api/vam/atom/select"', self.javascript)
@@ -70,9 +74,7 @@ class WorkspaceWebUITests(unittest.TestCase):
             'params.set("target_uid", app.selectedPersonUid)',
             self.javascript,
         )
-        block_start = self.javascript.index(
-            "async function setPersonClothing("
-        )
+        block_start = self.javascript.index("async function setPersonClothing(")
         block_end = self.javascript.index(
             "function workspaceApplyAvailability(", block_start
         )
@@ -99,9 +101,7 @@ class WorkspaceWebUITests(unittest.TestCase):
         availability_end = self.javascript.index(
             "async function setPersonClothing(", availability_start
         )
-        availability = self.javascript[
-            availability_start:availability_end
-        ]
+        availability = self.javascript[availability_start:availability_end]
         for guard in (
             "category.requiredCapability",
             "!snapshot.available",
@@ -131,12 +131,8 @@ class WorkspaceWebUITests(unittest.TestCase):
             "const sceneRequestGeneration = beginPersonSnapshotRequest();",
             self.javascript,
         )
-        accept_start = self.javascript.index(
-            "function acceptPersonSnapshot("
-        )
-        accept_end = self.javascript.index(
-            "async function loadPersons(", accept_start
-        )
+        accept_start = self.javascript.index("function acceptPersonSnapshot(")
+        accept_end = self.javascript.index("async function loadPersons(", accept_start)
         accept = self.javascript[accept_start:accept_end]
         self.assertIn(
             "!personSnapshotRequestIsCurrent(generation)",
@@ -145,9 +141,7 @@ class WorkspaceWebUITests(unittest.TestCase):
         self.assertGreaterEqual(accept.count("return false;"), 2)
 
         load_start = self.javascript.index("async function loadPersons(")
-        load_end = self.javascript.index(
-            "function renderPersonContext()", load_start
-        )
+        load_end = self.javascript.index("function renderPersonContext()", load_start)
         load = self.javascript[load_start:load_end]
         self.assertIn(
             "const requestGeneration = beginPersonSnapshotRequest();",
@@ -165,20 +159,21 @@ class WorkspaceWebUITests(unittest.TestCase):
 
     def test_live_scene_poll_updates_global_bridge_feedback(self) -> None:
         load_start = self.javascript.index("async function loadPersons(")
-        load_end = self.javascript.index(
-            "function renderPersonContext()", load_start
-        )
+        load_end = self.javascript.index("function renderPersonContext()", load_start)
         load = self.javascript[load_start:load_end]
+        self.assertIn("if (responseAccepted) {", load)
         self.assertIn(
-            "if (responseAccepted) {\n"
-            "      renderLiveState(app.status || {});",
+            "await syncPersonEquipment({ quiet: true });",
             load,
+        )
+        self.assertIn("renderLiveState(app.status || {});", load)
+        self.assertLess(
+            load.index("await syncPersonEquipment({ quiet: true });"),
+            load.index("renderLiveState(app.status || {});"),
         )
 
         render_start = self.javascript.index("function renderLiveState(")
-        render_end = self.javascript.index(
-            "function renderAccess()", render_start
-        )
+        render_end = self.javascript.index("function renderAccess()", render_start)
         render = self.javascript[render_start:render_end]
         self.assertIn(
             "const bridge = app.person?.bridge || status.bridge;",
@@ -218,9 +213,7 @@ class WorkspaceWebUITests(unittest.TestCase):
         self.assertIn("item.update_available !== true", card)
         self.assertIn("Number.isInteger(version)", card)
 
-        clothing_start = self.javascript.index(
-            "async function setPersonClothing("
-        )
+        clothing_start = self.javascript.index("async function setPersonClothing(")
         clothing_end = self.javascript.index(
             "function workspaceApplyAvailability(", clothing_start
         )
@@ -228,16 +221,12 @@ class WorkspaceWebUITests(unittest.TestCase):
         self.assertIn("requestBody.package_version = packageVersion", clothing)
         self.assertIn("requestBody.active = true", clothing)
 
-        apply_start = self.javascript.index(
-            "async function applyWorkspaceResource("
-        )
+        apply_start = self.javascript.index("async function applyWorkspaceResource(")
         apply_end = self.javascript.index("function createPackageCard(", apply_start)
         apply = self.javascript[apply_start:apply_end]
         self.assertIn("body.package_version = packageVersion", apply)
 
-        lease_start = self.javascript.index(
-            "async function createThreeDayLease("
-        )
+        lease_start = self.javascript.index("async function createThreeDayLease(")
         lease_end = self.javascript.index("async function addPin(", lease_start)
         lease = self.javascript[lease_start:lease_end]
         self.assertIn(
@@ -266,9 +255,7 @@ class WorkspaceWebUITests(unittest.TestCase):
         )
 
     def test_clothing_action_keeps_original_target_and_loaded_page_count(self) -> None:
-        action_start = self.javascript.index(
-            "async function setPersonClothing("
-        )
+        action_start = self.javascript.index("async function setPersonClothing(")
         action_end = self.javascript.index(
             "function workspaceApplyAvailability(", action_start
         )
@@ -279,9 +266,7 @@ class WorkspaceWebUITests(unittest.TestCase):
         self.assertNotIn("for ${app.selectedPersonUid}.", action)
 
         library_start = self.javascript.index("async function loadLibrary(")
-        library_end = self.javascript.index(
-            "function renderStatus()", library_start
-        )
+        library_end = self.javascript.index("function renderStatus()", library_start)
         library = self.javascript[library_start:library_end]
         self.assertIn("preserveCount = false", library)
         self.assertIn(
@@ -308,9 +293,7 @@ class WorkspaceWebUITests(unittest.TestCase):
     def test_scene_load_claims_action_and_shows_feedback_before_request(
         self,
     ) -> None:
-        start = self.javascript.index(
-            "async function applyWorkspaceResource("
-        )
+        start = self.javascript.index("async function applyWorkspaceResource(")
         end = self.javascript.index("function createPackageCard(", start)
         action = self.javascript[start:end]
 
@@ -345,9 +328,7 @@ class WorkspaceWebUITests(unittest.TestCase):
         self,
     ) -> None:
         self.assertIn("workspaceAction: null", self.javascript)
-        sync_start = self.javascript.index(
-            "function syncWorkspaceActionSnapshot("
-        )
+        sync_start = self.javascript.index("function syncWorkspaceActionSnapshot(")
         sync_end = self.javascript.index(
             "function finishWorkspaceActionFeedback(", sync_start
         )
@@ -364,9 +345,7 @@ class WorkspaceWebUITests(unittest.TestCase):
         )
         self.assertIn('!["ok", "error"].includes(stage)', sync)
 
-        render_start = self.javascript.index(
-            "function renderWorkspaceActionFeedback("
-        )
+        render_start = self.javascript.index("function renderWorkspaceActionFeedback(")
         render_end = self.javascript.index(
             "function workspaceApplyAvailability(", render_start
         )
@@ -383,9 +362,7 @@ class WorkspaceWebUITests(unittest.TestCase):
             with self.subTest(stage=stage):
                 self.assertIn(f'action.stage === "{stage}"', render)
 
-        activity_start = self.javascript.index(
-            "async function loadActivity("
-        )
+        activity_start = self.javascript.index("async function loadActivity(")
         activity_end = self.javascript.index(
             "async function fetchLiveSceneSnapshot()", activity_start
         )
@@ -408,9 +385,7 @@ class WorkspaceWebUITests(unittest.TestCase):
         sync_activity_end = self.javascript.index(
             "function recoverWorkspaceActionFeedback(", sync_activity_start
         )
-        sync_activity = self.javascript[
-            sync_activity_start:sync_activity_end
-        ]
+        sync_activity = self.javascript[sync_activity_start:sync_activity_end]
         self.assertIn("WORKSPACE_ACTION_STALL_MS", sync_activity)
         self.assertIn('operation.run_name !== "managed-reconcile"', sync_activity)
         self.assertIn(
@@ -436,9 +411,7 @@ class WorkspaceWebUITests(unittest.TestCase):
 
     def test_workspace_action_toast_is_persistent_and_visibly_busy(self) -> None:
         toast_start = self.javascript.index("function updateToast(")
-        toast_end = self.javascript.index(
-            "function setButtonBusy(", toast_start
-        )
+        toast_end = self.javascript.index("function setButtonBusy(", toast_start)
         toast_block = self.javascript[toast_start:toast_end]
         self.assertIn("options = {}", toast_block)
         self.assertIn("if (!options.persistent)", toast_block)
@@ -489,9 +462,7 @@ class WorkspaceWebUITests(unittest.TestCase):
         )
 
     def test_cua_choice_uses_only_live_token_and_numeric_index(self) -> None:
-        block_start = self.javascript.index(
-            "async function selectCuaChoiceInVam()"
-        )
+        block_start = self.javascript.index("async function selectCuaChoiceInVam()")
         block_end = self.javascript.index(
             "async function selectPersonInVam()", block_start
         )
@@ -529,7 +500,7 @@ class WorkspaceWebUITests(unittest.TestCase):
                 self.assertIn(field, self.javascript)
         self.assertIn("choice.index", self.javascript)
         self.assertIn("choice.label", self.javascript)
-        self.assertIn('new Option(choice.label, String(choice.index))', self.javascript)
+        self.assertIn("new Option(choice.label, String(choice.index))", self.javascript)
         self.assertIn('"custom-unity-asset-choice"', self.javascript)
         self.assertIn("state.loadDll !== false", self.javascript)
         self.assertIn("!state.choiceToken", self.javascript)
@@ -538,9 +509,7 @@ class WorkspaceWebUITests(unittest.TestCase):
         self.assertNotIn(".innerHTML", self.javascript)
 
     def test_cua_choice_requires_server_owned_fresh_live_context(self) -> None:
-        helper_start = self.javascript.index(
-            "function cuaChoiceLiveContextReason("
-        )
+        helper_start = self.javascript.index("function cuaChoiceLiveContextReason(")
         helper_end = self.javascript.index(
             "function updateCuaChoiceButton()", helper_start
         )
@@ -556,9 +525,7 @@ class WorkspaceWebUITests(unittest.TestCase):
             with self.subTest(guard=guard):
                 self.assertIn(guard, helper)
 
-        action_start = self.javascript.index(
-            "async function selectCuaChoiceInVam()"
-        )
+        action_start = self.javascript.index("async function selectCuaChoiceInVam()")
         action_end = self.javascript.index(
             "async function selectPersonInVam()", action_start
         )
@@ -627,9 +594,264 @@ class WorkspaceWebUITests(unittest.TestCase):
             with self.subTest(selector=selector):
                 self.assertIn(selector, self.styles)
 
+    def test_character_sheet_has_identity_shortcuts_and_multi_item_regions(
+        self,
+    ) -> None:
+        for element_id in (
+            "character-sheet",
+            "character-shortcuts",
+            "character-identity-name",
+            "character-identity-gender",
+            "character-identity-counts",
+            "equipment-slots-left",
+            "equipment-slots-right",
+            "equipment-slots-extra",
+            "equipment-warning",
+        ):
+            with self.subTest(element_id=element_id):
+                self.assertIn(f'id="{element_id}"', self.html)
+        self.assertIn('class="character-silhouette"', self.html)
+        self.assertIn('aria-label="Person customization shortcuts"', self.html)
+        for group in (
+            "Appearance",
+            "Wardrobe",
+            "Motion",
+            "Body",
+            "Extensions",
+        ):
+            with self.subTest(group=group):
+                self.assertIn(f'label: "{group}"', self.javascript)
+        for category_id in (
+            "preset-appearance",
+            "preset-hair",
+            "preset-skin",
+            "preset-morphs",
+            "preset-clothing",
+            "clothing-item-presets",
+            "preset-pose",
+            "preset-animation",
+            "preset-breast-physics",
+            "preset-glute-physics",
+            "preset-general",
+            "preset-plugins",
+        ):
+            with self.subTest(category_id=category_id):
+                self.assertIn(f'["{category_id}",', self.javascript)
+
+        render_start = self.javascript.index("function renderCharacterSheet()")
+        render_end = self.javascript.index(
+            "async function removeEquippedItem(", render_start
+        )
+        render = self.javascript[render_start:render_end]
+        self.assertIn(
+            "grouped.get(equipmentSlotForItem(item))?.push(item)",
+            render,
+        )
+        self.assertIn("activeCount", render)
+        self.assertIn("lockedCount", render)
+        self.assertIn("unidentifiedCount", render)
+        self.assertIn("equipment?.truncated", render)
+        self.assertIn('"Unsorted"', self.javascript)
+        slot_start = self.javascript.index("function equipmentSlotForItem(")
+        slot_end = self.javascript.index("function resourceThumbnailUrl(", slot_start)
+        slot = self.javascript[slot_start:slot_end]
+        self.assertIn("resourceTitle(item)", slot)
+        self.assertIn("normalizeTags(", slot)
+        self.assertIn('return explicitEquipmentSlot(item) || "unsorted"', slot)
+
+    def test_character_sheet_equipment_fetch_is_revision_keyed_and_stale_safe(
+        self,
+    ) -> None:
+        start = self.javascript.index("async function syncPersonEquipment(")
+        end = self.javascript.index("function characterGender()", start)
+        block = self.javascript[start:end]
+        self.assertIn("new AbortController()", block)
+        self.assertIn(
+            "api(`/api/vam/person/equipment?${params.toString()}`",
+            block,
+        )
+        self.assertIn(
+            "app.personEquipmentAttemptedKey === identity.key",
+            block,
+        )
+        self.assertIn("personEquipmentRequestIsCurrent(", block)
+        self.assertIn("responseTarget !== identity.targetUid", block)
+        self.assertIn("responseRevision !== identity.revision", block)
+        self.assertIn(
+            "app.personEquipmentAttemptedKey = identity.key",
+            block,
+        )
+        self.assertIn(
+            "refreshAll({ force: true, retryEquipment: true })",
+            self.javascript,
+        )
+        refresh_start = self.javascript.index("async function refreshAll(")
+        refresh_end = self.javascript.index(
+            "function renderSessionPlugins()", refresh_start
+        )
+        refresh = self.javascript[refresh_start:refresh_end]
+        self.assertIn(
+            "retry: Boolean(options.retryEquipment)",
+            refresh,
+        )
+        identity_start = self.javascript.index("function personEquipmentIdentity(")
+        identity_end = self.javascript.index(
+            "function personEquipmentRequestIsCurrent(", identity_start
+        )
+        identity = self.javascript[identity_start:identity_end]
+        self.assertIn("clothing?.ready !== true", identity)
+        self.assertIn("`${targetUid}\\u0000${revision}`", identity)
+
+    def test_equipment_removal_keeps_exact_version_and_serializes_mutations(
+        self,
+    ) -> None:
+        remove_start = self.javascript.index("async function removeEquippedItem(")
+        remove_end = self.javascript.index("async function loadPersons(", remove_start)
+        removal = self.javascript[remove_start:remove_end]
+        self.assertIn("equipmentPackageVersion(item)", removal)
+        self.assertIn(
+            "setPersonClothing(\n"
+            "    item,\n"
+            "    category,\n"
+            "    sourceButton,\n"
+            "    packageVersion,\n"
+            "    false,",
+            removal,
+        )
+        self.assertIn("item.clothing_locked", self.javascript)
+        self.assertIn(
+            "equipmentItemKey(candidate) === itemKey",
+            removal,
+        )
+        self.assertNotIn("Number(candidate.id)", removal)
+
+        normalize_start = self.javascript.index("function normalizePersonEquipment(")
+        normalize_end = self.javascript.index(
+            "async function syncPersonEquipment(", normalize_start
+        )
+        normalize = self.javascript[normalize_start:normalize_end]
+        self.assertIn("equipmentItemKey(normalizedItem)", normalize)
+        self.assertNotIn("seen.has(resourceId)", normalize)
+
+        key_start = self.javascript.index("function equipmentItemKey(")
+        key_end = self.javascript.index("function createEquippedItem(", key_start)
+        key_block = self.javascript[key_start:key_end]
+        self.assertIn("equipmentPackageVersion(item)", key_block)
+        self.assertIn("`resource:${resourceId}:local`", key_block)
+        self.assertIn("`resource:${resourceId}:package:${", key_block)
+        for forbidden in ("resource_ref", "resource_path", ".uid"):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, key_block)
+        self.assertIn(
+            "remove.dataset.equipmentRemove = equipmentItemKey(item)",
+            self.javascript,
+        )
+        row_start = self.javascript.index("function createEquippedItem(")
+        row_end = self.javascript.index("function createEquipmentSlot(", row_start)
+        row = self.javascript[row_start:row_end]
+        self.assertIn(
+            "!local && packageVersion !== null ? ` v${packageVersion}`",
+            row,
+        )
+        self.assertIn("item.package || item.package_name", row)
+        self.assertIn('details.textContent = detailParts.join(" · ")', row)
+        self.assertIn(
+            "`${resourceTitle(item)}${versionLabel} is locked in VaM`",
+            row,
+        )
+        self.assertIn(
+            "`Remove ${resourceTitle(item)}${versionLabel} from ${app.selectedPersonUid}`",
+            row,
+        )
+
+        availability_start = self.javascript.index(
+            "function clothingActionAvailability("
+        )
+        action_start = self.javascript.index(
+            "async function setPersonClothing(", availability_start
+        )
+        availability = self.javascript[availability_start:action_start]
+        self.assertIn("app.clothingMutationInFlight", availability)
+
+        action_end = self.javascript.index(
+            "function workspaceApplyAvailability(", action_start
+        )
+        action = self.javascript[action_start:action_end]
+        self.assertIn("desiredActive = null", action)
+        self.assertIn("if (app.clothingMutationInFlight) return;", action)
+        self.assertIn("app.clothingMutationInFlight = true", action)
+        self.assertIn("app.clothingMutationInFlight = false", action)
+        self.assertIn(
+            'if (typeof desiredActive === "boolean")',
+            action,
+        )
+        self.assertIn("requestBody.active = desiredActive", action)
+        self.assertIn("requestBody.package_version = packageVersion", action)
+        self.assertIn("revision: availability.revision", action)
+
+    def test_related_clothing_styles_only_navigate_to_style_search(self) -> None:
+        start = self.javascript.index("function relatedClothingStyleVariants(")
+        end = self.javascript.index("function clothingCategoryForItem(", start)
+        block = self.javascript[start:end]
+        for field in (
+            'item.variant_group !== "related-clothing-styles"',
+            "item.variant_count",
+            "rawVariant.id",
+            "rawVariant.display_name",
+            "rawVariant.label",
+            "rawVariant.favorite",
+            "item.variant_search",
+        ):
+            with self.subTest(field=field):
+                self.assertIn(field, block)
+        self.assertIn('"clothing-item-presets"', block)
+        self.assertIn("resourceThumbnailUrl(variant.id)", block)
+        self.assertIn(
+            "browseRelatedClothingStyles(variant.displayName)",
+            block,
+        )
+        self.assertIn("browseRelatedClothingStyles(ownerSearch)", block)
+        for forbidden in (
+            '"/api/vam',
+            "setPersonClothing(",
+            "applyWorkspaceResource(",
+            "createThreeDayLease(",
+        ):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, block)
+        self.assertIn("appendRelatedClothingStyles(body, item)", self.javascript)
+        for selector in (
+            ".related-styles",
+            ".related-styles-strip",
+            ".related-style-tile",
+            ".related-style-favorite",
+        ):
+            with self.subTest(selector=selector):
+                self.assertIn(selector, self.styles)
+
+    def test_character_sheet_is_responsive_and_accessible(self) -> None:
+        for selector in (
+            ".character-sheet",
+            ".character-shortcuts",
+            ".character-sheet-layout",
+            ".character-identity",
+            ".equipment-slot",
+            ".equipped-item",
+            ".equipment-warning",
+        ):
+            with self.subTest(selector=selector):
+                self.assertIn(selector, self.styles)
+        self.assertIn("@media (max-width: 1180px)", self.styles)
+        self.assertIn("@media (max-width: 720px)", self.styles)
+        self.assertIn("@media (max-width: 500px)", self.styles)
+        self.assertIn('aria-busy="false"', self.html)
+        self.assertIn('role="status"', self.html)
+        self.assertIn('aria-live="polite"', self.html)
+        self.assertIn('aria-hidden="true"', self.html)
+
     def test_static_assets_use_the_current_cache_version(self) -> None:
-        self.assertIn("/styles.css?v=0.6.7", self.html)
-        self.assertIn("/app.js?v=0.6.7", self.html)
+        self.assertIn("/styles.css?v=0.7.0", self.html)
+        self.assertIn("/app.js?v=0.7.0", self.html)
 
 
 if __name__ == "__main__":

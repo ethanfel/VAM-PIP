@@ -29,8 +29,8 @@ every resource can be applied in the same way.
 | Pose | `Preset Pose` | Replace or merge through `PosePresets` | Generic preset pipeline |
 | Skin | `Preset Skin` | Replace or merge through `SkinPresets` | Generic preset pipeline |
 | Individual clothing | `Clothing (Female)` and `Clothing (Male)` | Set `geometry`'s exact `clothing:<resource>` boolean to worn or removed | Implemented with catalogue-derived package-qualified resource identity and revisioned live state |
-| Clothing item styles | `Clothing Item Presets` | Load an active item's own preset manager | Requires a reliable clothing-item relationship and separate material/physics options |
-| Worn clothing | Not represented reliably by the offline catalogue | Publish bounded worn and locked resource references from the target Person's `geometry` | Implemented for individual clothing actions |
+| Clothing item styles | `Clothing Item Presets` | Load an active item's own preset manager | Conservative same-folder style suggestions are browseable; live apply still requires a reliable exact clothing-item relationship |
+| Worn clothing | Not represented reliably by the offline catalogue | Publish bounded worn and locked resource references from the target Person's `geometry` | Implemented as a safe character-sheet projection and for individual clothing actions |
 | Worn hair | Not represented reliably by the offline catalogue | Publish bounded state from the target Person's `geometry` | Later live-state schema |
 | Individual morph sliders | Preset files only | Publish UID, label, region, current value, and min/max; set a bounded numeric value | Later revisioned live-control schema |
 | Materials, pose, and physics controls | Preset files only | Publish an allowlisted typed control schema | Later; do not expose arbitrary storables |
@@ -59,6 +59,28 @@ bridge validate the revision against the same target Person and native
 with the current gender. Any state-changing request for a locked item fails.
 When publication is truncated, the browser treats an absent item as unknown
 rather than incorrectly presenting it as not worn.
+
+## Character-sheet presentation
+
+The browser projects the selected Person's bounded live clothing roster into a
+character sheet. Body regions are organizational trays, not exclusive
+equipment sockets: every region may contain zero, one, or many worn items.
+Items that cannot be classified safely remain visible under **Unsorted**.
+Locked items are labelled and cannot be removed, and unmatched or truncated
+live references are counted explicitly instead of disappearing from the
+display.
+
+Appearance, outfit, hair, skin, morph, pose, animation, physics, general, and
+Person-plugin presets appear as collection shortcuts around the live
+wardrobe. They are recipes that can change overlapping state, not authoritative
+current slots, so the sheet does not claim that one of them is “equipped.”
+
+For clothing cards, VAM-PIP may present same-package, same-folder item presets
+whose filenames clearly share the clothing item's basename as **Related
+styles**. This bounded relationship helps find color and material choices but
+is deliberately navigation-only. BrowserAssist does not publish a trustworthy
+target-clothing identity for these presets, and filename conventions are not
+sufficient authority for a live action.
 
 ## Why there is no generic “call VaM” endpoint
 

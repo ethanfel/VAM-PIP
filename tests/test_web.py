@@ -156,8 +156,8 @@ class WebSecurityTests(unittest.TestCase):
             "frame-ancestors 'none'", response.getheader("Content-Security-Policy")
         )
         document = response.read().decode("utf-8")
-        self.assertIn("/styles.css?v=0.6.7", document)
-        self.assertIn("/app.js?v=0.6.7", document)
+        self.assertIn("/styles.css?v=0.7.0", document)
+        self.assertIn("/app.js?v=0.7.0", document)
 
     def test_session_plugin_endpoints_report_and_import_defaults(self) -> None:
         preset_path = write_web_session_defaults(self.vam_root)
@@ -370,6 +370,89 @@ class WebSecurityTests(unittest.TestCase):
             confirm_critical=False,
         )
 
+    def test_person_equipment_route_authenticates_validates_and_adds_thumbnails(
+        self,
+    ) -> None:
+        equipment = {
+            "available": True,
+            "target_uid": "Person 2",
+            "revision": "a" * 32,
+            "ready": True,
+            "gender": "Female",
+            "active_count": 1,
+            "locked_count": 0,
+            "identified_count": 1,
+            "unidentified_count": 0,
+            "truncated": False,
+            "complete": True,
+            "items": [
+                {
+                    "id": 42,
+                    "display_name": "Shirt",
+                    "creator": "Creator",
+                    "package": "Clothes",
+                    "resource_type": "Clothing (Female)",
+                    "tags": ["Tops"],
+                    "slot": "upper-body",
+                    "locked": False,
+                    "package_version": 2,
+                    "local": False,
+                    "state": "active",
+                }
+            ],
+        }
+        self.server.service.person_equipment = mock.Mock(return_value=equipment)
+
+        self.connection.request(
+            "GET",
+            "/api/vam/person/equipment?target_uid=Person%202",
+        )
+        response = self.connection.getresponse()
+        self.assertEqual(response.status, 401)
+        response.read()
+        self.server.service.person_equipment.assert_not_called()
+
+        headers = {"X-VAMPIP-Token": self.token}
+        self.connection.request(
+            "GET",
+            "/api/vam/person/equipment",
+            headers=headers,
+        )
+        response = self.connection.getresponse()
+        self.assertEqual(response.status, 400)
+        missing = self.response_json(response)
+        self.assertIn("target_uid must be supplied exactly once", missing["error"])
+        self.server.service.person_equipment.assert_not_called()
+
+        self.connection.request(
+            "GET",
+            "/api/vam/person/equipment?target_uid=Person%202&path=%2Ftmp",
+            headers=headers,
+        )
+        response = self.connection.getresponse()
+        self.assertEqual(response.status, 400)
+        unsupported = self.response_json(response)
+        self.assertIn(
+            "unsupported Person equipment query field",
+            unsupported["error"],
+        )
+        self.server.service.person_equipment.assert_not_called()
+
+        self.connection.request(
+            "GET",
+            "/api/vam/person/equipment?target_uid=Person%202",
+            headers=headers,
+        )
+        response = self.connection.getresponse()
+        self.assertEqual(response.status, 200)
+        document = self.response_json(response)
+        self.assertEqual(document["target_uid"], "Person 2")
+        self.assertEqual(
+            document["items"][0]["thumbnail_url"],
+            f"/api/resources/42/thumbnail?token={self.token}",
+        )
+        self.server.service.person_equipment.assert_called_once_with("Person 2")
+
     def test_clothing_route_accepts_only_opaque_catalog_state(self) -> None:
         result = {
             "resource_id": 42,
@@ -416,8 +499,7 @@ class WebSecurityTests(unittest.TestCase):
                 "active": False,
                 "revision": revision,
                 "resource_ref": (
-                    "Attacker.Package.1:/Custom/Clothing/Female/"
-                    "Attacker/Injected.vam"
+                    "Attacker.Package.1:/Custom/Clothing/Female/Attacker/Injected.vam"
                 ),
                 "clothing_uid": "Attacker:Injected",
             }
@@ -535,9 +617,7 @@ class WebSecurityTests(unittest.TestCase):
             "selected_version": "4",
             "lease_id": "lease-id",
         }
-        self.server.service.lease_resource = mock.Mock(
-            return_value=lease_result
-        )
+        self.server.service.lease_resource = mock.Mock(return_value=lease_result)
         lease_body = json.dumps(
             {
                 "package_version": 4,
@@ -570,9 +650,7 @@ class WebSecurityTests(unittest.TestCase):
             "selected_version": "4",
             "bridge_request": "scene-request",
         }
-        self.server.service.apply_resource = mock.Mock(
-            return_value=apply_result
-        )
+        self.server.service.apply_resource = mock.Mock(return_value=apply_result)
         apply_body = json.dumps(
             {
                 "resource_id": 42,

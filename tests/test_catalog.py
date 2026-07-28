@@ -312,9 +312,7 @@ class CatalogTests(unittest.TestCase):
     def test_search_uses_json_scalar_values_without_exposing_internal_metadata(
         self,
     ) -> None:
-        resource_path = (
-            "Custom\\Clothing\\Female\\Creator\\Gala Dress\\Gala Dress.vam"
-        )
+        resource_path = "Custom\\Clothing\\Female\\Creator\\Gala Dress\\Gala Dress.vam"
         resource = {
             "creatorName": "Creator",
             "packageName": "Wardrobe",
@@ -733,6 +731,336 @@ class CatalogTests(unittest.TestCase):
             )
             self.assertEqual(stored[0]["uid"], "Creator:Jacket v1")
 
+    def test_clothing_cards_include_bounded_related_style_choices(self) -> None:
+        parent = "Custom\\Clothing\\Female\\Creator\\Shared"
+
+        def resource(
+            path: str,
+            resource_type: str,
+        ) -> dict[str, object]:
+            return {
+                "creatorName": "Creator",
+                "packageName": "Wardrobe",
+                "resourceFullFileName": path,
+                "resourceType": resource_type,
+                "presetAtomType": "Person",
+                "varVersions": ["1"],
+            }
+
+        resources = [
+            resource(f"{parent}\\Dress.vam", "Clothing (Female)"),
+            resource(f"{parent}\\Dress Long.vam", "Clothing (Female)"),
+            *[
+                resource(
+                    f"{parent}\\Dress_Color{index:02d}.vap",
+                    "Clothing Item Presets",
+                )
+                for index in range(14)
+            ],
+            resource(
+                f"{parent}\\Dress Long_BlackLeather.vap",
+                "Clothing Item Presets",
+            ),
+            resource(
+                f"{parent}\\Unrelated_Blue.vap",
+                "Clothing Item Presets",
+            ),
+        ]
+        self.write_catalogue(resources)
+
+        with connect(self.state) as database:
+            import_browserassist(database, self.vam_root)
+            result = search_resources(
+                database,
+                self.vam_root,
+                resource_type="Clothing (Female)",
+                include_package_state=False,
+            )
+
+        by_name = {item["display_name"]: item for item in result["items"]}
+        dress = by_name["Dress"]
+        self.assertEqual(dress["variant_group"], "related-clothing-styles")
+        self.assertEqual(dress["variant_count"], 14)
+        self.assertEqual(len(dress["variants"]), 12)
+        self.assertEqual(dress["variants"][0]["label"], "Color00")
+        self.assertEqual(dress["variant_search"], "Dress")
+        self.assertNotIn("path", dress["variants"][0])
+
+        long_dress = by_name["Dress Long"]
+        self.assertEqual(long_dress["variant_count"], 1)
+        self.assertEqual(long_dress["variant_search"], "Dress Long")
+        self.assertEqual(
+            long_dress["variants"][0]["label"],
+            "Black Leather",
+        )
+        self.assertNotIn(
+            "Unrelated_Blue",
+            {
+                variant["display_name"]
+                for item in result["items"]
+                for variant in item.get("variants", [])
+            },
+        )
+
+    def test_related_styles_keep_case_only_package_families_separate(
+        self,
+    ) -> None:
+        parent = "Custom\\Clothing\\Female\\Creator\\Dress"
+
+        def resource(
+            package: str,
+            path: str,
+            resource_type: str,
+            version: str,
+        ) -> dict[str, object]:
+            return {
+                "creatorName": "Creator",
+                "packageName": package,
+                "resourceFullFileName": path,
+                "resourceType": resource_type,
+                "presetAtomType": "Person",
+                "varVersions": [version],
+            }
+
+        self.write_catalogue(
+            [
+                resource(
+                    "Wardrobe",
+                    f"{parent}\\Dress.vam",
+                    "Clothing (Female)",
+                    "2",
+                ),
+                resource(
+                    "Wardrobe",
+                    f"{parent}\\Dress_Black.vap",
+                    "Clothing Item Presets",
+                    "2",
+                ),
+                resource(
+                    "wardrobe",
+                    f"{parent}\\Dress.vam",
+                    "Clothing (Female)",
+                    "1",
+                ),
+                resource(
+                    "wardrobe",
+                    f"{parent}\\Dress_Red.vap",
+                    "Clothing Item Presets",
+                    "1",
+                ),
+            ]
+        )
+
+        with connect(self.state) as database:
+            import_browserassist(database, self.vam_root)
+            result = search_resources(
+                database,
+                self.vam_root,
+                resource_type="Clothing (Female)",
+                include_package_state=False,
+            )
+
+        by_package = {item["package"]: item for item in result["items"]}
+        self.assertEqual(
+            [variant["label"] for variant in by_package["Wardrobe"]["variants"]],
+            ["Black"],
+        )
+        self.assertEqual(
+            [variant["label"] for variant in by_package["wardrobe"]["variants"]],
+            ["Red"],
+        )
+
+    def test_related_styles_require_version_overlap_and_deduplicate_path(
+        self,
+    ) -> None:
+        parent = "Custom\\Clothing\\Female\\Creator\\Dress"
+
+        def resource(
+            path: str,
+            resource_type: str,
+            version: str,
+        ) -> dict[str, object]:
+            return {
+                "creatorName": "Creator",
+                "packageName": "Wardrobe",
+                "resourceFullFileName": path,
+                "resourceType": resource_type,
+                "presetAtomType": "Person",
+                "varVersions": [version],
+            }
+
+        self.write_catalogue(
+            [
+                resource(
+                    f"{parent}\\Dress.vam",
+                    "Clothing (Female)",
+                    "2",
+                ),
+                resource(
+                    f"{parent}\\Dress_Black.vap",
+                    "Clothing Item Presets",
+                    "2",
+                ),
+                resource(
+                    f"{parent}\\dress_black.VAP",
+                    "Clothing Item Presets",
+                    "2",
+                ),
+                resource(
+                    f"{parent}\\Dress_Old.vap",
+                    "Clothing Item Presets",
+                    "1",
+                ),
+            ]
+        )
+
+        with connect(self.state) as database:
+            import_browserassist(database, self.vam_root)
+            result = search_resources(
+                database,
+                self.vam_root,
+                resource_type="Clothing (Female)",
+                include_package_state=False,
+            )
+
+        dress = result["items"][0]
+        self.assertEqual(dress["variant_count"], 1)
+        self.assertEqual(
+            [variant["label"] for variant in dress["variants"]],
+            ["Black"],
+        )
+
+    def test_related_style_owner_is_independent_of_current_page(self) -> None:
+        parent = "Custom\\Clothing\\Female\\Creator\\Shared"
+
+        def resource(
+            path: str,
+            resource_type: str,
+        ) -> dict[str, object]:
+            return {
+                "creatorName": "Creator",
+                "packageName": "Wardrobe",
+                "resourceFullFileName": path,
+                "resourceType": resource_type,
+                "presetAtomType": "Person",
+                "varVersions": ["1"],
+            }
+
+        self.write_catalogue(
+            [
+                resource(
+                    f"{parent}\\Dress.vam",
+                    "Clothing (Female)",
+                ),
+                resource(
+                    f"{parent}\\Dress Long.vam",
+                    "Clothing (Female)",
+                ),
+                resource(
+                    f"{parent}\\Dress_Black.vap",
+                    "Clothing Item Presets",
+                ),
+                resource(
+                    f"{parent}\\Dress Long_Black.vap",
+                    "Clothing Item Presets",
+                ),
+            ]
+        )
+
+        with connect(self.state) as database:
+            import_browserassist(database, self.vam_root)
+            result = search_resources(
+                database,
+                self.vam_root,
+                resource_type="Clothing (Female)",
+                include_package_state=False,
+                limit=1,
+                offset=1,
+            )
+
+        self.assertEqual(len(result["items"]), 1)
+        dress = result["items"][0]
+        self.assertEqual(dress["display_name"], "Dress")
+        self.assertEqual(dress["variant_count"], 1)
+        self.assertEqual(
+            [variant["display_name"] for variant in dress["variants"]],
+            ["Dress_Black"],
+        )
+
+    def test_related_style_query_is_batched_and_uses_family_index(self) -> None:
+        resources: list[dict[str, object]] = []
+        for index in range(205):
+            parent = f"Custom\\Clothing\\Female\\Creator\\Indexed{index:03d}"
+            common = {
+                "creatorName": "Creator",
+                "packageName": f"Wardrobe{index:03d}",
+                "presetAtomType": "Person",
+                "varVersions": ["1"],
+            }
+            resources.extend(
+                [
+                    {
+                        **common,
+                        "resourceFullFileName": (f"{parent}\\Dress{index:03d}.vam"),
+                        "resourceType": "Clothing (Female)",
+                    },
+                    {
+                        **common,
+                        "resourceFullFileName": (
+                            f"{parent}\\Dress{index:03d}_Black.vap"
+                        ),
+                        "resourceType": "Clothing Item Presets",
+                    },
+                ]
+            )
+        self.write_catalogue(resources)
+
+        class RecordingConnection:
+            def __init__(self, wrapped: sqlite3.Connection) -> None:
+                self.wrapped = wrapped
+                self.related_calls: list[tuple[str, tuple[object, ...]]] = []
+
+            def execute(
+                self,
+                sql: str,
+                parameters: tuple[object, ...] | list[object] = (),
+            ) -> sqlite3.Cursor:
+                if "WITH wanted(source, creator, package_name" in sql:
+                    self.related_calls.append((sql, tuple(parameters)))
+                return self.wrapped.execute(sql, parameters)
+
+        with connect(self.state) as database:
+            import_browserassist(database, self.vam_root)
+            recording = RecordingConnection(database)
+            result = search_resources(
+                recording,
+                self.vam_root,
+                resource_type="Clothing (Female)",
+                include_package_state=False,
+                limit=500,
+            )
+
+            self.assertEqual(len(recording.related_calls), 2)
+            for sql, parameters in recording.related_calls:
+                self.assertLessEqual(len(parameters), 801)
+                self.assertIn(
+                    "CROSS JOIN catalog_resources AS resource",
+                    sql,
+                )
+                plan = database.execute(
+                    f"EXPLAIN QUERY PLAN {sql}",
+                    parameters,
+                )
+                self.assertTrue(
+                    any(
+                        "USING INDEX idx_catalog_root_family" in str(row[3])
+                        for row in plan
+                    )
+                )
+
+        self.assertEqual(len(result["items"]), 205)
+        self.assertTrue(all(item.get("variant_count") == 1 for item in result["items"]))
+
     def test_connect_migrates_legacy_catalog_clothing_metadata_column(
         self,
     ) -> None:
@@ -799,9 +1127,7 @@ class CatalogTests(unittest.TestCase):
         with connect(self.state) as database:
             columns = {
                 row["name"]
-                for row in database.execute(
-                    "PRAGMA table_info(catalog_resources)"
-                )
+                for row in database.execute("PRAGMA table_info(catalog_resources)")
             }
             self.assertIn("clothing_versions_json", columns)
             self.assertEqual(

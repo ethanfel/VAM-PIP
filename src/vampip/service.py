@@ -324,6 +324,286 @@ _PERSON_PRESET_BY_RESOURCE_TYPE = {
 }
 
 
+_EQUIPMENT_SLOT_KEYWORDS: tuple[tuple[str, frozenset[str]], ...] = (
+    (
+        "full-body",
+        frozenset(
+            {
+                "bodysuit",
+                "catsuit",
+                "dress",
+                "dresses",
+                "gown",
+                "jumpsuit",
+                "outfit",
+                "robe",
+                "romper",
+            }
+        ),
+    ),
+    (
+        "underwear",
+        frozenset(
+            {
+                "bra",
+                "bras",
+                "briefs",
+                "lingerie",
+                "panties",
+                "thong",
+                "underwear",
+            }
+        ),
+    ),
+    (
+        "upper-body",
+        frozenset(
+            {
+                "blouse",
+                "coat",
+                "corset",
+                "hoodie",
+                "jacket",
+                "shirt",
+                "shirts",
+                "sweater",
+                "top",
+                "tops",
+                "vest",
+            }
+        ),
+    ),
+    (
+        "lower-body",
+        frozenset(
+            {
+                "bottom",
+                "bottoms",
+                "jeans",
+                "pants",
+                "shorts",
+                "skirt",
+                "skirts",
+                "trousers",
+            }
+        ),
+    ),
+    (
+        "legwear",
+        frozenset(
+            {
+                "garter",
+                "garters",
+                "hosiery",
+                "pantyhose",
+                "sock",
+                "socks",
+                "stocking",
+                "stockings",
+                "tights",
+            }
+        ),
+    ),
+    (
+        "footwear",
+        frozenset(
+            {
+                "boot",
+                "boots",
+                "footwear",
+                "heel",
+                "heels",
+                "sandal",
+                "sandals",
+                "shoe",
+                "shoes",
+                "sneaker",
+                "sneakers",
+            }
+        ),
+    ),
+    ("hands", frozenset({"glove", "gloves", "mittens"})),
+    (
+        "headwear",
+        frozenset(
+            {
+                "cap",
+                "caps",
+                "crown",
+                "hat",
+                "hats",
+                "headwear",
+                "mask",
+                "masks",
+                "veil",
+            }
+        ),
+    ),
+    (
+        "accessories",
+        frozenset(
+            {
+                "accessories",
+                "accessory",
+                "belt",
+                "bracelet",
+                "choker",
+                "collar",
+                "earring",
+                "earrings",
+                "glasses",
+                "jewelry",
+                "necklace",
+                "scarf",
+            }
+        ),
+    ),
+)
+
+
+def _equipment_text(value: object, *, maximum: int = 500) -> str:
+    if not isinstance(value, str):
+        return ""
+    text = value.strip()
+    if (
+        not text
+        or len(text) > maximum
+        or any(ord(character) < 32 or ord(character) == 127 for character in text)
+    ):
+        return ""
+    return text
+
+
+def _equipment_member(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    member = value.replace("\\", "/")
+    while member.startswith("./"):
+        member = member[2:]
+    if (
+        not member
+        or member != member.strip()
+        or member.startswith("/")
+        or ":" in member
+        or any(ord(character) < 32 or ord(character) == 127 for character in member)
+    ):
+        return None
+    parts = member.split("/")
+    if any(part in {"", ".", ".."} for part in parts):
+        return None
+    return member
+
+
+def _equipment_resource_type(member: str) -> str | None:
+    folded = member.casefold()
+    if not folded.endswith(".vam"):
+        return None
+    if folded.startswith("custom/clothing/female/"):
+        return "Clothing (Female)"
+    if folded.startswith("custom/clothing/male/"):
+        return "Clothing (Male)"
+    return None
+
+
+def _equipment_version(value: object) -> int | None:
+    if isinstance(value, bool):
+        return None
+    text = str(value or "").strip()
+    if not text.isdecimal():
+        return None
+    version = int(text)
+    return version if version <= 2_147_483_647 else None
+
+
+def _equipment_json_list(value: object) -> list[object]:
+    if not isinstance(value, str):
+        return []
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError:
+        return []
+    return parsed if isinstance(parsed, list) else []
+
+
+def _equipment_version_is_eligible(
+    row: sqlite3.Row,
+    version_text: str,
+) -> bool:
+    allowed = {
+        str(value).strip().casefold()
+        for value in _equipment_json_list(row["versions_json"])
+        if str(value).strip()
+    }
+    identity = version_text.casefold()
+    if identity in allowed:
+        return True
+    numeric_allowed = [int(value) for value in allowed if value.isdecimal()]
+    return (
+        version_text.isdecimal()
+        and bool(numeric_allowed)
+        and int(version_text) > max(numeric_allowed)
+    )
+
+
+def _equipment_metadata(
+    row: sqlite3.Row,
+    package_version: int | None,
+) -> tuple[str, list[str]]:
+    selected: dict[str, object] | None = None
+    if package_version is not None:
+        for entry in _equipment_json_list(row["clothing_versions_json"]):
+            if (
+                isinstance(entry, dict)
+                and _equipment_version(entry.get("version")) == package_version
+            ):
+                selected = entry
+                break
+
+    display_name = (
+        _equipment_text(selected.get("display_name"), maximum=500)
+        if selected is not None
+        else ""
+    )
+    if not display_name:
+        filename = str(row["resource_path"]).replace("\\", "/").rsplit("/", 1)[-1]
+        display_name = _equipment_text(filename.rsplit(".", 1)[0], maximum=500)
+    if not display_name:
+        display_name = "Unnamed clothing item"
+
+    tags: list[str] = []
+    seen: set[str] = set()
+
+    def add_tag(value: object) -> None:
+        tag = _equipment_text(value, maximum=100)
+        identity = tag.casefold()
+        if not tag or identity in seen or len(tags) >= 128:
+            return
+        seen.add(identity)
+        tags.append(tag)
+
+    for entry in _equipment_json_list(row["tags_json"]):
+        if isinstance(entry, dict):
+            add_tag(entry.get("tagName"))
+    if selected is not None:
+        selected_tags = selected.get("tags")
+        if isinstance(selected_tags, list):
+            for tag in selected_tags:
+                add_tag(tag)
+    return display_name, tags
+
+
+def _equipment_slot(display_name: str, tags: list[str]) -> str:
+    tag_words = {
+        word for tag in tags for word in re.findall(r"[a-z0-9]+", tag.casefold())
+    }
+    name_words = set(re.findall(r"[a-z0-9]+", display_name.casefold()))
+    for words in (tag_words, name_words):
+        for slot, keywords in _EQUIPMENT_SLOT_KEYWORDS:
+            if words & keywords:
+                return slot
+    return "unsorted"
+
+
 def _atom_preset_category_id(atom_type: str) -> str:
     slug = re.sub(r"[^a-z0-9]+", "-", atom_type.casefold()).strip("-") or "atom"
     digest = hashlib.sha256(atom_type.casefold().encode("utf-8")).hexdigest()[:8]
@@ -947,8 +1227,7 @@ class ManagerService:
             (
                 value
                 for value in scene.get("persons", [])
-                if isinstance(value, dict)
-                and str(value.get("uid") or "") == uid
+                if isinstance(value, dict) and str(value.get("uid") or "") == uid
             ),
             None,
         )
@@ -961,17 +1240,25 @@ class ManagerService:
         if re.fullmatch(r"[0-9a-fA-F]{32}", revision) is None:
             return
         raw_active = clothing.get("activeResourceRefs")
-        active_refs = {
-            str(value).replace("\\", "/").casefold()
-            for value in raw_active
-            if isinstance(value, str) and value
-        } if isinstance(raw_active, list) else set()
+        active_refs = (
+            {
+                str(value).replace("\\", "/").casefold()
+                for value in raw_active
+                if isinstance(value, str) and value
+            }
+            if isinstance(raw_active, list)
+            else set()
+        )
         raw_locked = clothing.get("lockedResourceRefs")
-        locked_refs = {
-            str(value).replace("\\", "/").casefold()
-            for value in raw_locked
-            if isinstance(value, str) and value
-        } if isinstance(raw_locked, list) else set()
+        locked_refs = (
+            {
+                str(value).replace("\\", "/").casefold()
+                for value in raw_locked
+                if isinstance(value, str) and value
+            }
+            if isinstance(raw_locked, list)
+            else set()
+        )
         gender = str(clothing.get("gender") or "").casefold()
         truncated = bool(clothing.get("truncated"))
         for item in items:
@@ -991,6 +1278,253 @@ class ManagerService:
                 resource_ref.replace("\\", "/").casefold() in locked_refs
             )
             item["clothing_compatible"] = compatible
+
+    def person_equipment(self, target_uid: str) -> dict[str, object]:
+        """Return a bounded public projection of one Person's worn clothing.
+
+        Exact VaM resource references stay inside this method. They are joined
+        to catalogue rows and reduced to opaque numeric IDs plus presentation
+        metadata before the result leaves the service boundary.
+        """
+
+        uid = self._validate_target_uid(target_uid)
+        result: dict[str, object] = {
+            "available": False,
+            "target_uid": uid,
+            "revision": "",
+            "ready": False,
+            "gender": "Unknown",
+            "active_count": 0,
+            "locked_count": 0,
+            "identified_count": 0,
+            "unidentified_count": 0,
+            "truncated": False,
+            "complete": False,
+            "items": [],
+        }
+        scene = self._scene_snapshot(include_clothing_refs=True)
+        if not bool(scene.get("available")):
+            return result
+
+        person = next(
+            (
+                value
+                for value in scene.get("persons", [])
+                if isinstance(value, dict) and str(value.get("uid") or "") == uid
+            ),
+            None,
+        )
+        if person is None:
+            raise ValueError(f"Person atom is no longer available: {uid}")
+
+        result["available"] = True
+        clothing = person.get("clothing")
+        if not isinstance(clothing, dict):
+            return result
+
+        ready = clothing.get("ready") is True
+        raw_gender = str(clothing.get("gender") or "").casefold()
+        gender = {
+            "female": "Female",
+            "male": "Male",
+            "both": "Both",
+            "none": "None",
+        }.get(raw_gender, "Unknown")
+
+        def count(value: object) -> int:
+            return (
+                value
+                if isinstance(value, int) and not isinstance(value, bool) and value >= 0
+                else 0
+            )
+
+        revision = str(clothing.get("revision") or "")
+        active_count = count(clothing.get("activeCount"))
+        locked_count = count(clothing.get("lockedCount"))
+        truncated = clothing.get("truncated") is True
+        result.update(
+            {
+                "revision": revision,
+                "ready": ready,
+                "gender": gender,
+                "active_count": active_count,
+                "locked_count": locked_count,
+                "truncated": truncated,
+            }
+        )
+        if not ready:
+            return result
+        if re.fullmatch(r"[0-9a-fA-F]{32}", revision) is None:
+            raise ValueError(
+                "the selected Person has an invalid live clothing revision"
+            )
+
+        active_refs: list[str] = []
+        active_identities: set[str] = set()
+        raw_active = clothing.get("activeResourceRefs")
+        if isinstance(raw_active, list):
+            for value in raw_active:
+                if not isinstance(value, str) or not value:
+                    continue
+                identity = value.replace("\\", "/").casefold()
+                if identity in active_identities:
+                    continue
+                active_identities.add(identity)
+                active_refs.append(value)
+        raw_locked = clothing.get("lockedResourceRefs")
+        locked_refs = (
+            {
+                str(value).replace("\\", "/").casefold()
+                for value in raw_locked
+                if isinstance(value, str) and value
+            }
+            if isinstance(raw_locked, list)
+            else set()
+        )
+        active_count = max(active_count, len(active_refs))
+        locked_count = max(locked_count, len(locked_refs))
+        result["active_count"] = active_count
+        result["locked_count"] = locked_count
+
+        with connect(self.state_dir) as connection:
+            rows = list(
+                connection.execute(
+                    """
+                    SELECT id, creator, package_name, resource_path,
+                           versions_json, tags_json,
+                           clothing_versions_json
+                    FROM catalog_resources
+                    WHERE root = ?
+                      AND (
+                          LOWER(REPLACE(resource_path, CHAR(92), '/'))
+                              LIKE 'custom/clothing/female/%.vam'
+                          OR LOWER(REPLACE(resource_path, CHAR(92), '/'))
+                              LIKE 'custom/clothing/male/%.vam'
+                      )
+                    ORDER BY id
+                    """,
+                    (str(self.vam_root),),
+                )
+            )
+            package_states: dict[
+                tuple[str, str],
+                dict[str, bool],
+            ] = {}
+            for package_row in connection.execute(
+                """
+                SELECT creator, package_name, version_text, enabled
+                FROM package_files
+                WHERE root = ? AND valid = 1 AND version_text IS NOT NULL
+                """,
+                (str(self.addon_dir),),
+            ):
+                family = (
+                    str(package_row["creator"] or "").casefold(),
+                    str(package_row["package_name"] or "").casefold(),
+                )
+                version_text = str(package_row["version_text"] or "")
+                versions = package_states.setdefault(family, {})
+                versions[version_text] = versions.get(version_text, False) or bool(
+                    package_row["enabled"]
+                )
+
+        local_rows: dict[str, list[sqlite3.Row]] = {}
+        packaged_rows: dict[
+            tuple[str, str],
+            list[tuple[sqlite3.Row, int | None, str]],
+        ] = {}
+        for row in rows:
+            member = _equipment_member(row["resource_path"])
+            if member is None or _equipment_resource_type(member) is None:
+                continue
+            member_identity = member.casefold()
+            creator = str(row["creator"] or "")
+            package_name = str(row["package_name"] or "")
+            if not creator and not package_name:
+                local_rows.setdefault(member_identity, []).append(row)
+                continue
+            if not creator or not package_name:
+                continue
+            family = (creator.casefold(), package_name.casefold())
+            for version_text, enabled in package_states.get(family, {}).items():
+                if not _equipment_version_is_eligible(row, version_text):
+                    continue
+                package_ref = f"{creator}.{package_name}.{version_text}".casefold()
+                packaged_rows.setdefault(
+                    (package_ref, member_identity),
+                    [],
+                ).append(
+                    (
+                        row,
+                        _equipment_version(version_text),
+                        "active" if enabled else "hidden",
+                    )
+                )
+
+        items: list[dict[str, object]] = []
+        for raw_ref in active_refs:
+            normalized_ref = raw_ref.replace("\\", "/")
+            package_ref, separator, raw_member = normalized_ref.partition(":/")
+            member = _equipment_member(raw_member if separator else normalized_ref)
+            if member is None:
+                continue
+            resource_type = _equipment_resource_type(member)
+            if resource_type is None:
+                continue
+
+            row: sqlite3.Row | None = None
+            package_version: int | None = None
+            local = not bool(separator)
+            state = "local"
+            if separator:
+                matches = packaged_rows.get(
+                    (package_ref.casefold(), member.casefold()),
+                    [],
+                )
+                if matches:
+                    row, package_version, state = matches[0]
+            else:
+                matches = local_rows.get(member.casefold(), [])
+                if matches:
+                    row = matches[0]
+            if row is None:
+                continue
+
+            display_name, tags = _equipment_metadata(row, package_version)
+            items.append(
+                {
+                    "id": int(row["id"]),
+                    "display_name": display_name,
+                    "creator": _equipment_text(row["creator"], maximum=500),
+                    "package": _equipment_text(
+                        row["package_name"],
+                        maximum=500,
+                    ),
+                    "resource_type": resource_type,
+                    "tags": tags,
+                    "slot": _equipment_slot(display_name, tags),
+                    "locked": normalized_ref.casefold() in locked_refs,
+                    "package_version": package_version,
+                    "local": local,
+                    "state": state,
+                }
+            )
+
+        identified_count = len(items)
+        unidentified_count = max(active_count - identified_count, 0)
+        result.update(
+            {
+                "identified_count": identified_count,
+                "unidentified_count": unidentified_count,
+                "complete": (
+                    not truncated
+                    and unidentified_count == 0
+                    and identified_count == active_count
+                ),
+                "items": items,
+            }
+        )
+        return result
 
     def catalog_facets(self) -> dict[str, object]:
         with connect(self.state_dir) as connection:
@@ -1149,9 +1683,7 @@ class ManagerService:
             or package_version < 0
             or package_version > 2_147_483_647
         ):
-            raise ValueError(
-                "package_version must be an integer from 0 to 2147483647"
-            )
+            raise ValueError("package_version must be an integer from 0 to 2147483647")
         return str(package_version)
 
     @staticmethod
@@ -1164,9 +1696,7 @@ class ManagerService:
             or len(value) > 200
             or any(ord(character) < 32 or ord(character) == 127 for character in value)
         ):
-            raise ValueError(
-                "category_id must contain 1 to 200 printable characters"
-            )
+            raise ValueError("category_id must contain 1 to 200 printable characters")
         return value
 
     def _workspace_category(self, category_id: object) -> dict[str, object]:
@@ -1204,9 +1734,7 @@ class ManagerService:
         )
         if existing is not None:
             if create_if_missing:
-                raise ValueError(
-                    "create_if_missing requires target_uid to be absent"
-                )
+                raise ValueError("create_if_missing requires target_uid to be absent")
             actual_type = str(existing.get("type") or "")
             if actual_type != expected_atom_type:
                 raise ValueError(
@@ -1293,9 +1821,7 @@ class ManagerService:
         """Publish one core VaM rescan for externally changed active archives."""
 
         with connect(self.state_dir) as connection:
-            pending = bool(
-                get_setting(connection, _LIVE_PACKAGE_RESCAN_SETTING, False)
-            )
+            pending = bool(get_setting(connection, _LIVE_PACKAGE_RESCAN_SETTING, False))
         if not pending:
             return None
         if not self._running_pids():
@@ -1305,9 +1831,10 @@ class ManagerService:
 
         try:
             with self._bridge_mailbox_transaction(blocking=False):
-                with manager_lock(self.state_dir), connect(
-                    self.state_dir
-                ) as connection:
+                with (
+                    manager_lock(self.state_dir),
+                    connect(self.state_dir) as connection,
+                ):
                     if not bool(
                         get_setting(
                             connection,
@@ -1435,17 +1962,15 @@ class ManagerService:
         uid = self._validate_target_uid(target_uid)
         if not isinstance(active, bool):
             raise TypeError("active must be a boolean")
-        if version_text is not None and not active:
-            raise ValueError(
-                "package_version is only supported when wearing clothing"
+        if (
+            not isinstance(revision, str)
+            or re.fullmatch(
+                r"[0-9a-fA-F]{32}",
+                revision,
             )
-        if not isinstance(revision, str) or re.fullmatch(
-            r"[0-9a-fA-F]{32}",
-            revision,
-        ) is None:
-            raise ValueError(
-                "revision must contain exactly 32 hexadecimal characters"
-            )
+            is None
+        ):
+            raise ValueError("revision must contain exactly 32 hexadecimal characters")
         if isinstance(days, bool) or not isinstance(days, (int, float)):
             raise TypeError("days must be a number")
 
@@ -1499,8 +2024,7 @@ class ManagerService:
                 (
                     value
                     for value in scene.get("persons", [])
-                    if isinstance(value, dict)
-                    and str(value.get("uid") or "") == uid
+                    if isinstance(value, dict) and str(value.get("uid") or "") == uid
                 ),
                 None,
             )
@@ -1508,9 +2032,7 @@ class ManagerService:
                 raise ValueError(f"Person atom is no longer available: {uid}")
             clothing = person.get("clothing")
             if not isinstance(clothing, dict):
-                raise ValueError(
-                    "the selected Person has no live clothing snapshot"
-                )
+                raise ValueError("the selected Person has no live clothing snapshot")
             live_revision = str(clothing.get("revision") or "")
             if live_revision != revision:
                 raise ValueError(
@@ -1534,15 +2056,36 @@ class ManagerService:
                     "the selected clothing item is incompatible with the "
                     "Person's current gender"
                 )
-            locked_refs = {
-                str(value).replace("\\", "/").casefold()
-                for value in clothing.get("lockedResourceRefs", [])
-                if isinstance(value, str) and value
-            }
+            raw_active_refs = clothing.get("activeResourceRefs")
+            active_refs = (
+                {
+                    str(value).replace("\\", "/").casefold()
+                    for value in raw_active_refs
+                    if isinstance(value, str) and value
+                }
+                if isinstance(raw_active_refs, list)
+                else set()
+            )
+            normalized_resource_ref = resource_ref.replace("\\", "/").casefold()
             if (
                 not active
-                and resource_ref.replace("\\", "/").casefold() in locked_refs
+                and version_text is not None
+                and normalized_resource_ref not in active_refs
             ):
+                raise ValueError(
+                    "the selected exact clothing package version is not currently worn"
+                )
+            raw_locked_refs = clothing.get("lockedResourceRefs")
+            locked_refs = (
+                {
+                    str(value).replace("\\", "/").casefold()
+                    for value in raw_locked_refs
+                    if isinstance(value, str) and value
+                }
+                if isinstance(raw_locked_refs, list)
+                else set()
+            )
+            if not active and normalized_resource_ref in locked_refs:
                 raise ValueError(
                     "the selected clothing item is locked in VaM and cannot "
                     "be removed externally"
@@ -1550,9 +2093,7 @@ class ManagerService:
             lease: dict[str, object] | None = None
             rescan = False
             if active:
-                label = Path(
-                    str(row["resource_path"]).replace("\\", "/")
-                ).stem
+                label = Path(str(row["resource_path"]).replace("\\", "/")).stem
                 lease = self.lease_resource(
                     resource_id,
                     days=float(days),
@@ -1865,8 +2406,7 @@ class ManagerService:
                 )
             if not confirm_critical:
                 raise ValueError(
-                    "confirm_critical must be true before loading a "
-                    "Custom Unity Asset"
+                    "confirm_critical must be true before loading a Custom Unity Asset"
                 )
             scene = self._require_live_capability(
                 "custom-unity-asset-load",
@@ -2089,8 +2629,7 @@ class ManagerService:
                 (
                     value
                     for value in scene.get("atoms", [])
-                    if isinstance(value, dict)
-                    and str(value.get("uid") or "") == uid
+                    if isinstance(value, dict) and str(value.get("uid") or "") == uid
                 ),
                 None,
             )
@@ -2217,10 +2756,7 @@ class ManagerService:
                 raise ValueError(
                     "the SubScene category has an invalid or unsupported atom type"
                 )
-        elif (
-            atom_type != "CustomUnityAsset"
-            or atom_type not in ATOM_TYPE_ALLOWLIST
-        ):
+        elif atom_type != "CustomUnityAsset" or atom_type not in ATOM_TYPE_ALLOWLIST:
             raise ValueError(
                 "the Custom Unity Asset category has an invalid or unsupported "
                 "atom type"
@@ -2237,8 +2773,7 @@ class ManagerService:
                 (
                     atom
                     for atom in scene.get("atoms", [])
-                    if isinstance(atom, dict)
-                    and str(atom.get("uid") or "") == uid
+                    if isinstance(atom, dict) and str(atom.get("uid") or "") == uid
                 ),
                 None,
             )
@@ -2380,9 +2915,7 @@ class ManagerService:
         for group in grouped.values():
             if len(group) < 2:
                 continue
-            signatures = {
-                str(row["content_sha256"] or "") for row in group
-            }
+            signatures = {str(row["content_sha256"] or "") for row in group}
             if (
                 any(not is_archive_content_sha256(value) for value in signatures)
                 or len(signatures) > 1
@@ -2607,10 +3140,7 @@ class ManagerService:
             rows, scan_result = self._rows(
                 connection,
                 refresh=refresh_if_empty
-                and (
-                    not existing
-                    or inventory_changed(connection, self.addon_dir)
-                ),
+                and (not existing or inventory_changed(connection, self.addon_dir)),
             )
             managed_mode = bool(get_setting(connection, "managed_mode", False))
             auto_reconcile = bool(get_setting(connection, "auto_reconcile", True))

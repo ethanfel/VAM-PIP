@@ -23,12 +23,8 @@ SUBSCENE_MEMBER = "Custom/SubScene/Example/Room.json"
 CUA_BUNDLE_MEMBER = "Custom/Assets/Example/Props.assetbundle"
 CUA_SCENE_MEMBER = "Custom/Assets/Example/Environment.scene"
 CUA_WRONG_SUFFIX_MEMBER = "Custom/Assets/Example/NotABundle.json"
-CLOTHING_MEMBER = (
-    "Custom/Clothing/Female/Example/Everyday/Everyday Shirt.vam"
-)
-UNSUPPORTED_ATOM_PRESET_MEMBER = (
-    "Custom/Atom/PackageDefinedWidget/Preset_Unsafe.vap"
-)
+CLOTHING_MEMBER = "Custom/Clothing/Female/Example/Everyday/Everyday Shirt.vam"
+UNSUPPORTED_ATOM_PRESET_MEMBER = "Custom/Atom/PackageDefinedWidget/Preset_Unsafe.vap"
 PERSON_PRESET_MEMBERS = {
     "Preset Appearance": (
         "appearance",
@@ -244,6 +240,8 @@ class PersonWorkspaceTests(unittest.TestCase):
         gender: str = "Female",
         active_refs: list[str] | None = None,
         locked_refs: list[str] | None = None,
+        active_count: int | None = None,
+        locked_count: int | None = None,
         revision: str = "a" * 32,
         truncated: bool = False,
     ) -> dict[str, object]:
@@ -255,8 +253,12 @@ class PersonWorkspaceTests(unittest.TestCase):
                 "gender": gender,
                 "activeResourceRefs": list(active_refs or []),
                 "lockedResourceRefs": list(locked_refs or []),
-                "activeCount": len(active_refs or []),
-                "lockedCount": len(locked_refs or []),
+                "activeCount": (
+                    len(active_refs or []) if active_count is None else active_count
+                ),
+                "lockedCount": (
+                    len(locked_refs or []) if locked_count is None else locked_count
+                ),
                 "truncated": truncated,
                 "revision": revision,
             }
@@ -322,6 +324,207 @@ class PersonWorkspaceTests(unittest.TestCase):
         self.assertNotIn("activeResourceRefs", clothing)
         self.assertNotIn("lockedResourceRefs", clothing)
         self.assertEqual(clothing["revision"], "a" * 32)
+
+    def test_person_equipment_is_allowlisted_and_accounts_for_unknown_items(
+        self,
+    ) -> None:
+        resource_id = self.insert_resource(
+            "Clothing (Female)",
+            CLOTHING_MEMBER,
+            key="equipment-female-clothing",
+        )
+        with connect(self.state) as connection:
+            connection.execute(
+                """
+                UPDATE catalog_resources
+                SET tags_json = ?, clothing_versions_json = ?
+                WHERE id = ?
+                """,
+                (
+                    json.dumps(
+                        [
+                            {
+                                "tagName": "Casual",
+                                "tagCategory": "Style",
+                            }
+                        ]
+                    ),
+                    json.dumps(
+                        [
+                            {
+                                "version": "1",
+                                "item_type": "ClothingFemale",
+                                "uid": "private-clothing-uid",
+                                "display_name": "Silk Shirt",
+                                "creator": "Private clothing creator",
+                                "tags": ["Tops"],
+                                "is_real_item": True,
+                            }
+                        ]
+                    ),
+                    resource_id,
+                ),
+            )
+        identified_ref = f"Creator.HairPack.1:/{CLOTHING_MEMBER}"
+        unidentified_ref = "Other.Unknown.7:/Custom/Clothing/Female/Other/Unknown.vam"
+        roster = self.clothing_roster(
+            active_refs=[identified_ref, unidentified_ref],
+            locked_refs=[identified_ref],
+            active_count=3,
+            locked_count=2,
+            truncated=True,
+        )
+
+        with mock.patch.object(
+            self.service,
+            "_scene_snapshot",
+            return_value=roster,
+        ) as snapshot:
+            result = self.service.person_equipment("Person")
+
+        snapshot.assert_called_once_with(include_clothing_refs=True)
+        self.assertEqual(
+            set(result),
+            {
+                "available",
+                "target_uid",
+                "revision",
+                "ready",
+                "gender",
+                "active_count",
+                "locked_count",
+                "identified_count",
+                "unidentified_count",
+                "truncated",
+                "complete",
+                "items",
+            },
+        )
+        self.assertTrue(result["available"])
+        self.assertTrue(result["ready"])
+        self.assertEqual(result["target_uid"], "Person")
+        self.assertEqual(result["revision"], "a" * 32)
+        self.assertEqual(result["gender"], "Female")
+        self.assertEqual(result["active_count"], 3)
+        self.assertEqual(result["locked_count"], 2)
+        self.assertEqual(result["identified_count"], 1)
+        self.assertEqual(result["unidentified_count"], 2)
+        self.assertTrue(result["truncated"])
+        self.assertFalse(result["complete"])
+        items = result["items"]
+        assert isinstance(items, list)
+        self.assertEqual(len(items), 1)
+        item = items[0]
+        self.assertEqual(
+            set(item),
+            {
+                "id",
+                "display_name",
+                "creator",
+                "package",
+                "resource_type",
+                "tags",
+                "slot",
+                "locked",
+                "package_version",
+                "local",
+                "state",
+            },
+        )
+        self.assertEqual(item["id"], resource_id)
+        self.assertEqual(item["display_name"], "Silk Shirt")
+        self.assertEqual(item["creator"], "Creator")
+        self.assertEqual(item["package"], "HairPack")
+        self.assertEqual(item["resource_type"], "Clothing (Female)")
+        self.assertEqual(item["tags"], ["Casual", "Tops"])
+        self.assertEqual(item["slot"], "upper-body")
+        self.assertTrue(item["locked"])
+        self.assertEqual(item["package_version"], 1)
+        self.assertFalse(item["local"])
+        self.assertEqual(item["state"], "active")
+        serialized = json.dumps(result)
+        for private_value in (
+            "activeResourceRefs",
+            "lockedResourceRefs",
+            "resolved_resource_ref",
+            "private-clothing-uid",
+            "Private clothing creator",
+            CLOTHING_MEMBER,
+            identified_ref,
+            unidentified_ref,
+        ):
+            self.assertNotIn(private_value, serialized)
+
+    def test_person_equipment_complete_empty_set_uses_unsorted_fallback(self) -> None:
+        local_member = "Custom/Clothing/Female/Example/Mystery/Mystery.vam"
+        local_path = self.vam_root / local_member
+        local_path.parent.mkdir(parents=True, exist_ok=True)
+        local_path.write_text("{}", encoding="utf-8")
+        with connect(self.state) as connection:
+            cursor = connection.execute(
+                """
+                INSERT INTO catalog_resources (
+                    root, source, resource_key, creator, package_name,
+                    versions_json, resource_path, resource_type, atom_type,
+                    favorite, hidden, tags_json, imported_utc
+                ) VALUES (?, 'browserassist', ?, '', '', '[]', ?,
+                          'Untrusted BrowserAssist name', 'Person',
+                          0, 0, '[]', '2026-01-01T00:00:00+00:00')
+                """,
+                (
+                    str(self.vam_root),
+                    "local-equipment",
+                    local_member,
+                ),
+            )
+            resource_id = int(cursor.lastrowid)
+        with mock.patch.object(
+            self.service,
+            "_scene_snapshot",
+            return_value=self.clothing_roster(active_refs=[local_member]),
+        ):
+            result = self.service.person_equipment("Person")
+
+        self.assertTrue(result["complete"])
+        self.assertEqual(result["identified_count"], 1)
+        self.assertEqual(result["unidentified_count"], 0)
+        item = result["items"][0]
+        self.assertEqual(item["id"], resource_id)
+        self.assertEqual(item["resource_type"], "Clothing (Female)")
+        self.assertEqual(item["slot"], "unsorted")
+        self.assertIsNone(item["package_version"])
+        self.assertTrue(item["local"])
+        self.assertEqual(item["state"], "local")
+
+    def test_person_equipment_validates_live_target_and_revision(self) -> None:
+        unavailable = self.roster()
+        unavailable["available"] = False
+        unavailable["persons"] = []
+        with mock.patch.object(
+            self.service,
+            "_scene_snapshot",
+            return_value=unavailable,
+        ):
+            result = self.service.person_equipment("Person")
+        self.assertFalse(result["available"])
+        self.assertEqual(result["items"], [])
+
+        with mock.patch.object(
+            self.service,
+            "_scene_snapshot",
+            return_value=self.clothing_roster(),
+        ):
+            with self.assertRaisesRegex(ValueError, "no longer available"):
+                self.service.person_equipment("Missing Person")
+
+        invalid_revision = self.clothing_roster(revision="not-a-revision")
+        with mock.patch.object(
+            self.service,
+            "_scene_snapshot",
+            return_value=invalid_revision,
+        ):
+            with self.assertRaisesRegex(ValueError, "invalid live clothing revision"):
+                self.service.person_equipment("Person")
 
     def test_clothing_wear_and_remove_are_desired_state_actions(self) -> None:
         resource_id = self.insert_resource(
@@ -410,6 +613,74 @@ class PersonWorkspaceTests(unittest.TestCase):
             revision="a" * 32,
             rescan=False,
         )
+
+    def test_exact_clothing_version_can_remove_older_worn_copy(self) -> None:
+        make_hair_var(self.addons / "Creator.HairPack.2.var")
+        make_hair_var(self.addons / "Creator.HairPack.4.var")
+        with connect(self.state) as connection:
+            scan(self.addons, connection)
+        resource_id = self.insert_resource(
+            "Clothing (Female)",
+            CLOTHING_MEMBER,
+            key="versioned-remove-clothing",
+        )
+        search = self.service.search_resources(
+            category="clothing-items-female",
+        )
+        selected = next(item for item in search["items"] if item["id"] == resource_id)
+        self.assertEqual(selected["selected_version"], "4")
+
+        version_two_ref = f"Creator.HairPack.2:/{CLOTHING_MEMBER}"
+        with (
+            mock.patch.object(
+                self.service,
+                "_scene_snapshot",
+                return_value=self.clothing_roster(
+                    active_refs=[version_two_ref],
+                ),
+            ),
+            mock.patch(
+                "vampip.service.request_person_clothing",
+                return_value="remove-v2-request",
+            ) as request,
+        ):
+            removed = self.service.set_person_clothing(
+                resource_id,
+                package_version=2,
+                target_uid="Person",
+                active=False,
+                revision="a" * 32,
+            )
+
+        self.assertEqual(removed["selected_version"], "2")
+        self.assertEqual(removed["bridge_request"], "remove-v2-request")
+        request.assert_called_once_with(
+            self.vam_root,
+            target_uid="Person",
+            resource_ref=version_two_ref,
+            active=False,
+            revision="a" * 32,
+            rescan=False,
+        )
+
+        with mock.patch.object(
+            self.service,
+            "_scene_snapshot",
+            return_value=self.clothing_roster(
+                active_refs=[version_two_ref],
+            ),
+        ):
+            with self.assertRaisesRegex(
+                ValueError,
+                "exact clothing package version is not currently worn",
+            ):
+                self.service.set_person_clothing(
+                    resource_id,
+                    package_version=4,
+                    target_uid="Person",
+                    active=False,
+                    revision="a" * 32,
+                )
 
     def test_clothing_enable_reserves_cross_process_mailbox_until_publish(
         self,
@@ -531,17 +802,22 @@ class PersonWorkspaceTests(unittest.TestCase):
         )
         resource_ref = f"Creator.HairPack.1:/{CLOTHING_MEMBER}"
 
-        with self.assertRaisesRegex(
-            ValueError,
-            "only supported when wearing clothing",
+        with mock.patch.object(
+            self.service,
+            "_scene_snapshot",
+            return_value=self.clothing_roster(),
         ):
-            self.service.set_person_clothing(
-                resource_id,
-                package_version=1,
-                target_uid="Person",
-                active=False,
-                revision="a" * 32,
-            )
+            with self.assertRaisesRegex(
+                ValueError,
+                "exact clothing package version is not currently worn",
+            ):
+                self.service.set_person_clothing(
+                    resource_id,
+                    package_version=1,
+                    target_uid="Person",
+                    active=False,
+                    revision="a" * 32,
+                )
 
         with mock.patch.object(
             self.service,
@@ -766,7 +1042,9 @@ class PersonWorkspaceTests(unittest.TestCase):
         self.assertEqual(plugins["bridge_request"], "plugins-request")
         self.assertEqual(lease.call_count, 2)
         self.assertEqual(request.call_count, 2)
-        self.assertTrue(all(not call.kwargs["rescan"] for call in request.call_args_list))
+        self.assertTrue(
+            all(not call.kwargs["rescan"] for call in request.call_args_list)
+        )
 
     def test_each_person_preset_requires_its_kind_specific_capability(self) -> None:
         old_bridge_roster = self.roster()
@@ -814,9 +1092,7 @@ class PersonWorkspaceTests(unittest.TestCase):
         self.assertTrue(request.call_args.kwargs["rescan"])
 
         # A loose preset has no package visibility state to refresh at all.
-        local_member = (
-            "Custom/Atom/Person/Hair/Local/Preset_Local Hair.vap"
-        )
+        local_member = "Custom/Atom/Person/Hair/Local/Preset_Local Hair.vap"
         local_path = self.vam_root / local_member
         local_path.parent.mkdir(parents=True, exist_ok=True)
         local_path.write_text('{"storables": []}', encoding="utf-8")
@@ -924,7 +1200,9 @@ class PersonWorkspaceTests(unittest.TestCase):
             "CustomUnityAsset",
         )
         self.assertIn("DLL loading is forced off", custom_assets["risk_reason"])
-        self.assertIn("already-running code is not unloaded", custom_assets["risk_reason"])
+        self.assertIn(
+            "already-running code is not unloaded", custom_assets["risk_reason"]
+        )
 
         search = self.service.search_resources(category="preset-appearance")
         self.assertEqual(search["category"], "preset-appearance")
@@ -1883,9 +2161,7 @@ class PersonWorkspaceTests(unittest.TestCase):
         def run_second() -> None:
             second_started.set()
             try:
-                results["second"] = second_service._queue_bridge_request(
-                    second_writer
-                )
+                results["second"] = second_service._queue_bridge_request(second_writer)
             except BaseException as error:
                 errors["second"] = error
 

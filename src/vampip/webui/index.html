@@ -6,8 +6,8 @@
     <meta name="color-scheme" content="dark">
     <meta name="theme-color" content="#111316">
     <title>VAM-PIP Manager</title>
-    <link rel="stylesheet" href="/styles.css?v=0.6.7">
-    <script src="/app.js?v=0.6.7" defer></script>
+    <link rel="stylesheet" href="/styles.css?v=0.7.0">
+    <script src="/app.js?v=0.7.0" defer></script>
   </head>
   <body>
     <a class="skip-link" href="#main-content">Skip to library</a>
@@ -280,6 +280,71 @@
                   <p id="person-live-detail">Catalogue browsing remains available while the live connection is checked.</p>
                 </div>
               </div>
+
+              <section
+                class="character-sheet"
+                id="character-sheet"
+                aria-labelledby="character-sheet-title"
+                aria-busy="false"
+              >
+                <header class="character-sheet-heading">
+                  <div>
+                    <p class="eyebrow">Character sheet</p>
+                    <h3 id="character-sheet-title">Character loadout</h3>
+                  </div>
+                  <p id="character-sheet-summary">
+                    Live clothing is organized into regions; every region can contain multiple items.
+                  </p>
+                </header>
+
+                <nav
+                  class="character-shortcuts"
+                  id="character-shortcuts"
+                  aria-label="Person customization shortcuts"
+                ></nav>
+
+                <div class="character-sheet-layout">
+                  <div
+                    class="equipment-column equipment-column-left"
+                    id="equipment-slots-left"
+                    aria-label="Left-side equipment regions"
+                  ></div>
+
+                  <section class="character-identity" aria-label="Selected Person identity">
+                    <div class="character-silhouette" aria-hidden="true">
+                      <svg viewBox="0 0 140 300" focusable="false">
+                        <circle cx="70" cy="35" r="24"></circle>
+                        <path d="M51 67c-12 17-15 42-13 67l6 58-8 89h27l7-68 7 68h27l-8-89 6-58c2-25-1-50-13-67-12 7-26 7-38 0Z"></path>
+                        <path d="M42 85 19 163l18 7 20-65M98 85l23 78-18 7-20-65"></path>
+                        <path d="M43 192h54M58 108h24"></path>
+                      </svg>
+                    </div>
+                    <strong id="character-identity-name">No Person selected</strong>
+                    <span id="character-identity-gender">Gender unavailable</span>
+                    <span id="character-identity-counts">0 worn · 0 locked</span>
+                  </section>
+
+                  <div
+                    class="equipment-column equipment-column-right"
+                    id="equipment-slots-right"
+                    aria-label="Right-side equipment regions"
+                  ></div>
+
+                  <div
+                    class="equipment-slots-extra"
+                    id="equipment-slots-extra"
+                    aria-label="Unsorted equipment"
+                  ></div>
+                </div>
+
+                <p
+                  class="equipment-warning"
+                  id="equipment-warning"
+                  role="status"
+                  aria-live="polite"
+                  hidden
+                ></p>
+              </section>
             </section>
 
             <section class="person-context atom-context" id="atom-context" aria-labelledby="atom-context-title" hidden>
