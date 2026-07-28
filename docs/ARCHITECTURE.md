@@ -38,6 +38,9 @@ flowchart LR
     Catalog --> State
     Service --> Catalog
 
+    Defaults["Plugins_UserDefaults.vap"] --> SessionDefaults["Session-default parser"]
+    SessionDefaults --> Service
+
     Service --> Mailbox["request.json / status.json"]
     Mailbox --> Bridge["VaM session-plugin bridge"]
     Bridge --> VaM["VaM package rescan"]
@@ -58,6 +61,7 @@ live in [`switching.py`](../src/vampip/switching.py).
 | [`src/vampip/switching.py`](../src/vampip/switching.py) | Managed switch plans, locking, manifests, apply, and rollback |
 | [`src/vampip/catalog.py`](../src/vampip/catalog.py) | BrowserAssist import, search, resource resolution, and thumbnails |
 | [`src/vampip/references.py`](../src/vampip/references.py) | Extra package references embedded in scenes and text presets |
+| [`src/vampip/session_plugins.py`](../src/vampip/session_plugins.py) | Bounded parsing and classification of VaM's default Session Plugins preset |
 | [`src/vampip/bridge.py`](../src/vampip/bridge.py) | Bridge installation and Linux-side mailbox client |
 | [`src/vampip/runtime.py`](../src/vampip/runtime.py) | VaM process detection, root validation, and atomic text writes |
 | [`src/vampip/service.py`](../src/vampip/service.py) | High-level manager policy and orchestration |
@@ -79,6 +83,7 @@ VAM-PIP separates observed state from desired state.
 | Package identity and dependencies | Filename plus root `meta.json` |
 | Current inventory cache | `package_files` in SQLite |
 | Permanent desired roots | `manager_pins` |
+| Default session-plugin intent | `<VaM>/Custom/PluginPresets/Plugins_UserDefaults.vap` |
 | Temporary exact closures | `manager_leases` and `manager_lease_packages` |
 | Pre-manager visibility | `manager_baseline` |
 | Resource catalogue | Last successfully imported BrowserAssist snapshot |
@@ -197,6 +202,50 @@ again during reconciliation, so a family or `latest` pin can move to a newly
 installed version. Creating a pin fails when its current dependency closure is
 incomplete.
 
+### Default session plugins
+
+[`session_plugins.py`](../src/vampip/session_plugins.py) reads VaM's default
+Session Plugins preset at:
+
+```text
+<VaM>/Custom/PluginPresets/Plugins_UserDefaults.vap
+```
+
+It identifies PluginManager slots, their enabled state, and whether each source
+is a packaged virtual path or a loose script. Package roots are deduplicated
+case-insensitively. Loose scripts are reported for visibility but need no pin:
+managed mode changes only files under `AddonPackages`.
+
+The preset is optional. A missing file produces an empty snapshot. An existing
+file is read with a 16 MiB bound and must be valid UTF-8 JSON with an
+unambiguous PluginManager structure, boolean enabled values, and valid package
+references. Parsing errors are surfaced instead of partially trusting the
+preset.
+
+During the first applied managed-mode activation, enabled packaged roots join
+the desired-set resolution. After a successful switch they are stored as
+ordinary permanent pins, so later reconciliations preserve them. A malformed
+preset or unresolved enabled root aborts activation before archive suffixes are
+changed. Disabled entries are not automatic activation roots.
+
+The same snapshot and import operation are available through:
+
+```text
+vampip manager session-plugins list
+vampip manager session-plugins import [--include-disabled] [--apply]
+GET  /api/session-plugins
+POST /api/session-plugins/import
+```
+
+The import endpoint accepts `include_disabled` and `apply` booleans. Importing
+creates missing pins immediately; `apply` also reconciles them when managed
+mode is active under the same manager lock. Pin persistence is the primary
+operation: if that reconciliation fails, the response keeps `applied` false,
+includes `reconcile_error`, and leaves the imported pins for a later retry.
+The browser UI's **Import session defaults** action and first-activation flow
+use the enabled-only form. Importing disabled entries requires the explicit CLI
+`--include-disabled` option or equivalent API request.
+
 ### Leases
 
 A lease stores:
@@ -259,9 +308,9 @@ Deactivation requires VaM to be closed. It builds a plan from the baseline,
 restores the recorded state for matching current paths, clears the baseline,
 and turns managed mode off. Pins and leases remain in SQLite.
 
-Restore matching is case-insensitive. On a case-sensitive Linux filesystem,
-two logical paths that differ only by case collapse during restore planning and
-cannot reliably recover different original visibility states.
+Restore planning prefers exact path matches, so case-distinct Linux paths keep
+independent baseline states. If an exact match is absent, one unique
+case-insensitive baseline match may be used; an ambiguous fallback is skipped.
 
 ### Desired set
 
@@ -273,8 +322,11 @@ UNION
 exact package snapshots of all unexpired leases
 ```
 
-Unresolved pins, missing desired exact IDs, or detected same-ID content
-conflicts block the switch.
+On first activation only, the enabled packaged roots detected in
+`Plugins_UserDefaults.vap` are additional resolution roots and become
+permanent pins after a successful applied switch. Unresolved pins or session
+defaults, missing desired exact IDs, or detected same-ID content conflicts
+block the switch.
 
 ### Reconciliation
 
@@ -282,16 +334,20 @@ conflicts block the switch.
 
 1. refresh the package inventory;
 2. determine whether this is a new managed-mode activation;
-3. resolve pins and active leases;
-4. verify desired duplicate copies;
-5. build the complete enable/disable plan;
-6. detect whether VaM is running;
-7. reduce the plan to enable-only when VaM is running;
-8. return immediately for a preview, without baseline or mode changes;
-9. for an apply, ensure baseline rows and run `apply_switch()`;
-10. after a new activation switch, set `managed_mode`;
-11. rescan the inventory after a real switch;
-12. after a successful closed-state apply, remove expired lease rows.
+3. on first activation, parse enabled packaged session defaults;
+4. resolve pins, activation defaults, and active leases;
+5. verify desired duplicate copies;
+6. build the complete enable/disable plan;
+7. detect whether VaM is running;
+8. reduce the plan to enable-only when VaM is running;
+9. return immediately for a preview, without baseline, pin, or mode changes;
+10. for an apply, ensure and commit any new baseline rows, then run
+    `apply_switch()`;
+11. after a successful new activation switch, persist session-default pins and
+    set `managed_mode`; if this persistence fails, attempt to roll the switch
+    back from its manifest;
+12. rescan the inventory after a real switch;
+13. after a successful closed-state apply, remove expired lease rows.
 
 If VaM was running and packages were enabled, the service publishes a bridge
 rescan request atomically for live readers after leaving the
@@ -345,13 +401,13 @@ modification time before reversing entries marked `complete`.
 Crash-level caveats and the recovery procedure are documented in
 [SAFETY.md](SAFETY.md#crash-consistency-and-recovery).
 
-SQLite state and archive renames do not share one transaction. On initial
-activation, the baseline is committed before the switch and `managed_mode` is
-committed afterward. Deactivation restores archives before clearing the
-baseline and flag. During an ordinary reconciliation, a baseline row for a new
-path can still be uncommitted when its archive is renamed. A crash in one of
-these gaps can therefore leave the suffix state, baseline, and mode flag out of
-agreement even when the switch manifest is understood.
+SQLite state and archive renames do not share one transaction. Baseline rows
+are committed before every switch. On initial activation, `managed_mode` and
+session-default pins are committed afterward; a caught persistence failure
+attempts to roll the completed switch back from its manifest. Deactivation
+restores archives before clearing the baseline and flag. A crash or power loss
+in one of these gaps can still leave the suffix state, baseline, and mode flag
+out of agreement even when the switch manifest is understood.
 
 Normal manager mutations are serialized with an advisory `fcntl` lock at:
 
@@ -427,10 +483,11 @@ The server may bind only to `127.0.0.1` or `localhost`. Static UI files are
 served from an explicit three-file allowlist. Every `/api/` request requires
 the manager token.
 
-Read endpoints expose status, packages, resources, facets, and thumbnails.
-Mutating endpoints cover scans, catalog imports, pins, leases, reconciliation,
-deactivation, settings, and VaM launch. The HTTP layer only validates and
-translates requests; it delegates behavior to `ManagerService`.
+Read endpoints expose status, packages, resources, facets, thumbnails, and the
+detected default session plugins. Mutating endpoints cover scans, catalog
+imports, session-default imports, pins, leases, reconciliation, deactivation,
+settings, and VaM launch. The HTTP layer only validates and translates
+requests; it delegates behavior to `ManagerService`.
 
 The token is generated with `secrets.token_urlsafe(32)` and stored in
 `manager_settings`. The launch URL carries it in a fragment. The UI moves it to

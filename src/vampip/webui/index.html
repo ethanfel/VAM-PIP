@@ -97,6 +97,20 @@
         <section class="side-section">
           <h3>Library tools</h3>
           <div class="side-actions">
+            <button
+              class="text-button"
+              id="session-import-button"
+              type="button"
+              aria-describedby="session-plugin-status"
+            >
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M8.5 4v3M15.5 4v3M6 7h12v3a6 6 0 0 1-6 6 6 6 0 0 1-6-6zM12 16v4M9 20h6"></path>
+              </svg>
+              Import session defaults
+            </button>
+            <p class="session-plugin-status" id="session-plugin-status" role="status" aria-live="polite">
+              Checking the default session preset…
+            </p>
             <button class="text-button" id="scan-button" type="button">
               <svg viewBox="0 0 24 24" aria-hidden="true">
                 <path d="M4 7V4h3M17 4h3v3M20 17v3h-3M7 20H4v-3M8 12h8M12 8v8"></path>

@@ -13,6 +13,45 @@ from vampip.web import ManagerHTTPServer
 from tests.test_vampip import make_var
 
 
+def write_web_session_defaults(vam_root: Path) -> Path:
+    path = (
+        vam_root
+        / "Custom"
+        / "PluginPresets"
+        / "Plugins_UserDefaults.vap"
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "storables": [
+                    {
+                        "id": "PluginManager",
+                        "plugins": {
+                            "plugin#0": (
+                                "Creator.Package.1:/Custom/Scripts/"
+                                "Package/Package.cslist"
+                            ),
+                            "plugin#1": (
+                                "Missing.Disabled.1:/Custom/Scripts/"
+                                "Missing/Missing.cslist"
+                            ),
+                            "plugin#2": (
+                                "Custom/Scripts/Loose/Loose.cslist"
+                            ),
+                        },
+                    },
+                    {"id": "plugin#0_Package", "enabled": True},
+                    {"id": "plugin#1_Missing", "enabled": False},
+                    {"id": "plugin#2_Loose", "enabled": True},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
 class WebSecurityTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
@@ -103,6 +142,89 @@ class WebSecurityTests(unittest.TestCase):
             "frame-ancestors 'none'", response.getheader("Content-Security-Policy")
         )
         response.read()
+
+    def test_session_plugin_endpoints_report_and_import_defaults(self) -> None:
+        preset_path = write_web_session_defaults(self.vam_root)
+        headers = {"X-VAMPIP-Token": self.token}
+
+        self.connection.request(
+            "GET",
+            "/api/session-plugins",
+            headers=headers,
+        )
+        response = self.connection.getresponse()
+        self.assertEqual(response.status, 200)
+        document = self.response_json(response)
+        self.assertEqual(document["preset"], str(preset_path))
+        self.assertTrue(document["exists"])
+        self.assertEqual(
+            document["enabled_packaged_roots"],
+            ["Creator.Package.1"],
+        )
+        self.assertEqual(
+            document["counts"],
+            {
+                "total": 3,
+                "enabled": 2,
+                "packaged": 2,
+                "enabled_packaged": 1,
+                "loose": 1,
+                "already_pinned": 0,
+                "missing": 0,
+            },
+        )
+
+        body = json.dumps(
+            {"include_disabled": False, "apply": False}
+        ).encode("utf-8")
+        self.connection.request(
+            "POST",
+            "/api/session-plugins/import",
+            body=body,
+            headers={
+                **headers,
+                "Content-Type": "application/json",
+                "Content-Length": str(len(body)),
+            },
+        )
+        response = self.connection.getresponse()
+        self.assertEqual(response.status, 200)
+        imported = self.response_json(response)
+        self.assertEqual(imported["roots"], ["Creator.Package.1"])
+        self.assertEqual(imported["pinned"], 1)
+        self.assertEqual(imported["already_pinned"], 0)
+        self.assertEqual(imported["resolved_packages"], 1)
+        self.assertFalse(imported["applied"])
+
+        self.connection.request("GET", "/api/status", headers=headers)
+        response = self.connection.getresponse()
+        self.assertEqual(response.status, 200)
+        status = self.response_json(response)
+        self.assertEqual(
+            [pin["root_ref"] for pin in status["pins"]],
+            ["Creator.Package.1"],
+        )
+
+    def test_session_plugin_import_requires_boolean_flags(self) -> None:
+        write_web_session_defaults(self.vam_root)
+        body = json.dumps(
+            {"include_disabled": "false", "apply": False}
+        ).encode("utf-8")
+        self.connection.request(
+            "POST",
+            "/api/session-plugins/import",
+            body=body,
+            headers={
+                "X-VAMPIP-Token": self.token,
+                "Content-Type": "application/json",
+                "Content-Length": str(len(body)),
+            },
+        )
+
+        response = self.connection.getresponse()
+        self.assertEqual(response.status, 400)
+        document = self.response_json(response)
+        self.assertIn("include_disabled must be a boolean", document["error"])
 
 
 if __name__ == "__main__":

@@ -476,6 +476,21 @@ button svg,
   margin-top: 8px;
 }
 
+.session-plugin-status {
+  margin: -1px 8px 6px 35px;
+  color: var(--text-faint);
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+.session-plugin-status.is-ready {
+  color: var(--accent);
+}
+
+.session-plugin-status.is-missing {
+  color: var(--warning);
+}
+
 .text-button {
   display: flex;
   gap: 10px;

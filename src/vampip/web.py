@@ -207,6 +207,12 @@ class ManagerRequestHandler(BaseHTTPRequestHandler):
             if parsed.path == "/api/status":
                 self._json(HTTPStatus.OK, self.server.service.status())
                 return
+            if parsed.path == "/api/session-plugins":
+                self._json(
+                    HTTPStatus.OK,
+                    self.server.service.session_plugins(),
+                )
+                return
             if parsed.path == "/api/packages":
                 self._json(
                     HTTPStatus.OK,
@@ -295,6 +301,24 @@ class ManagerRequestHandler(BaseHTTPRequestHandler):
                 return
             if method == "POST" and parsed.path == "/api/catalog/import":
                 self._json(HTTPStatus.OK, service.import_catalog())
+                return
+            if (
+                method == "POST"
+                and parsed.path == "/api/session-plugins/import"
+            ):
+                include_disabled = document.get("include_disabled", False)
+                apply = document.get("apply", False)
+                if not isinstance(include_disabled, bool):
+                    raise ValueError("include_disabled must be a boolean")
+                if not isinstance(apply, bool):
+                    raise ValueError("apply must be a boolean")
+                self._json(
+                    HTTPStatus.OK,
+                    service.import_session_plugins(
+                        include_disabled=include_disabled,
+                        apply=apply,
+                    ),
+                )
                 return
             if method == "POST" and parsed.path == "/api/pins":
                 self._json(

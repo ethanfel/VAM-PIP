@@ -248,6 +248,7 @@ def resolve_managed_set(
     connection: sqlite3.Connection,
     rows: list[sqlite3.Row],
     *,
+    extra_roots: list[str] | tuple[str, ...] = (),
     now: datetime | None = None,
 ) -> tuple[list[str], tuple[tuple[str, str], ...]]:
     """Resolve pins and union them with exact snapshots from active leases."""
@@ -259,6 +260,12 @@ def resolve_managed_set(
             "SELECT root_ref FROM manager_pins ORDER BY root_ref COLLATE NOCASE"
         )
     ]
+    known_roots = {root.casefold() for root in pin_roots}
+    for root in extra_roots:
+        normalized = root.strip()
+        if normalized and normalized.casefold() not in known_roots:
+            pin_roots.append(normalized)
+            known_roots.add(normalized.casefold())
     pin_resolution = resolve(pin_roots, rows)
     desired = {
         package_id(row).casefold(): package_id(row) for row in pin_resolution.selected

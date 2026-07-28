@@ -17,6 +17,8 @@ const app = {
   requestController: null,
   searchTimer: null,
   token: "",
+  sessionPlugins: null,
+  sessionPluginsError: null,
 };
 
 const elements = {};
@@ -54,6 +56,8 @@ function cacheElements() {
     "launch-vam-label",
     "scan-button",
     "import-button",
+    "session-import-button",
+    "session-plugin-status",
     "auto-reconcile",
     "addon-path",
     "state-path",
@@ -137,6 +141,7 @@ function bindEvents() {
   elements.refreshButton.addEventListener("click", refreshAll);
   elements.scanButton.addEventListener("click", runPackageScan);
   elements.importButton.addEventListener("click", importCatalogue);
+  elements.sessionImportButton.addEventListener("click", importSessionDefaults);
   elements.launchVamButton.addEventListener("click", launchVam);
   elements.activateButton.addEventListener("click", activateManagedMode);
   elements.reconcileButton.addEventListener("click", reconcileWithConfirmation);
@@ -228,9 +233,10 @@ function closeMobileTools() {
 async function refreshAll() {
   setButtonBusy(elements.refreshButton, true);
   try {
-    const [statusResult, facetResult] = await Promise.allSettled([
+    const [statusResult, facetResult, sessionPluginResult] = await Promise.allSettled([
       api("/api/status"),
       api("/api/catalog/facets"),
+      api("/api/session-plugins"),
     ]);
 
     if (statusResult.status === "rejected") {
@@ -247,6 +253,15 @@ async function refreshAll() {
       renderFacets();
     }
 
+    if (sessionPluginResult.status === "fulfilled") {
+      app.sessionPlugins = sessionPluginResult.value || {};
+      app.sessionPluginsError = null;
+    } else {
+      app.sessionPlugins = null;
+      app.sessionPluginsError = sessionPluginResult.reason;
+    }
+    renderSessionPlugins();
+
     if (app.view !== "access") {
       await loadLibrary();
     }
@@ -256,6 +271,98 @@ async function refreshAll() {
     toast("Could not reach VAM-PIP", errorMessage(error), "error");
   } finally {
     setButtonBusy(elements.refreshButton, false);
+  }
+}
+
+function renderSessionPlugins() {
+  const snapshot = app.sessionPlugins;
+  const statusElement = elements.sessionPluginStatus;
+  statusElement.classList.remove("is-ready", "is-missing");
+
+  if (!snapshot) {
+    statusElement.textContent = app.sessionPluginsError
+      ? "Could not check the session preset."
+      : "Checking the default session preset…";
+    elements.sessionImportButton.disabled = Boolean(app.sessionPluginsError);
+    elements.sessionImportButton.title = app.sessionPluginsError
+      ? "Refresh to check the default session preset again"
+      : "";
+    return;
+  }
+
+  const counts = snapshot.counts || {};
+  const packaged = sessionPackagedRoots(snapshot).length;
+  const loose = numberOr(counts.loose, 0);
+  const alreadyPinned = Math.min(numberOr(counts.already_pinned, 0), packaged);
+  const missing = Math.max(numberOr(counts.missing, 0), 0);
+
+  if (!snapshot.exists) {
+    statusElement.textContent = "No default session preset found.";
+    statusElement.classList.add("is-missing");
+    elements.sessionImportButton.disabled = true;
+    elements.sessionImportButton.title =
+      "Save a default Session Plugins preset in VaM, then refresh";
+    return;
+  }
+
+  if (packaged === 0) {
+    statusElement.textContent = loose
+      ? `${formatNumber(loose)} enabled loose ${plural("plugin", loose)} · no pins needed`
+      : "No enabled session plugins detected.";
+    elements.sessionImportButton.disabled = true;
+    elements.sessionImportButton.title = loose
+      ? "Loose scripts stay available without package pins"
+      : "There are no enabled packaged session plugins to import";
+    return;
+  }
+
+  const remaining = Math.max(packaged - alreadyPinned, 0);
+  const details = [
+    `${formatNumber(packaged)} enabled package ${plural("root", packaged)}`,
+  ];
+  if (alreadyPinned) {
+    details.push(`${formatNumber(alreadyPinned)} already pinned`);
+  }
+  if (remaining) {
+    details.push(`${formatNumber(remaining)} ready to pin`);
+  }
+  if (loose) details.push(`${formatNumber(loose)} loose`);
+  if (missing) {
+    details.push(`${formatNumber(missing)} missing`);
+    statusElement.classList.add("is-missing");
+  }
+  statusElement.textContent = details.join(" · ");
+  if (remaining === 0 && missing === 0) statusElement.classList.add("is-ready");
+  elements.sessionImportButton.disabled = remaining === 0 || missing > 0;
+  elements.sessionImportButton.title =
+    missing > 0
+      ? "Install the missing session-plugin packages and dependencies first"
+      : remaining === 0
+      ? "Enabled packaged session plugins are already preserved"
+      : `Pin ${formatNumber(remaining)} enabled package ${plural("root", remaining)}`;
+}
+
+function sessionPackagedRoots(snapshot) {
+  return Array.from(
+    new Set(
+      asArray(snapshot && snapshot.enabled_packaged_roots)
+        .map((root) => String(root || "").trim())
+        .filter(Boolean),
+    ),
+  );
+}
+
+async function ensureSessionPlugins({ refresh = false } = {}) {
+  if (app.sessionPlugins && !refresh) return app.sessionPlugins;
+  try {
+    app.sessionPlugins = await api("/api/session-plugins");
+    app.sessionPluginsError = null;
+    renderSessionPlugins();
+    return app.sessionPlugins;
+  } catch (error) {
+    app.sessionPluginsError = error;
+    renderSessionPlugins();
+    throw error;
   }
 }
 
@@ -896,16 +1003,203 @@ async function importCatalogue() {
   }
 }
 
+async function importSessionDefaults() {
+  let snapshot;
+  try {
+    snapshot = await ensureSessionPlugins({ refresh: true });
+  } catch (error) {
+    toast("Could not read session defaults", errorMessage(error), "error");
+    return;
+  }
+
+  if (!snapshot.exists) {
+    toast(
+      "No default session preset found",
+      "Save your Session Plugins as the default preset in VaM, then refresh VAM-PIP.",
+      "error",
+    );
+    return;
+  }
+
+  const roots = sessionPackagedRoots(snapshot);
+  const counts = snapshot.counts || {};
+  const pluginCount = numberOr(counts.enabled_packaged, roots.length);
+  const loose = numberOr(counts.loose, 0);
+  const missing = Math.max(numberOr(counts.missing, 0), 0);
+  const alreadyPinned = Math.min(numberOr(counts.already_pinned, 0), roots.length);
+  const remaining = Math.max(roots.length - alreadyPinned, 0);
+
+  if (missing) {
+    toast(
+      "Session-plugin packages are missing",
+      `${formatNumber(missing)} required package ${plural(
+        "reference",
+        missing,
+      )} must be installed before these defaults can be preserved.`,
+      "error",
+    );
+    return;
+  }
+
+  if (!roots.length) {
+    toast(
+      "No package pins needed",
+      loose
+        ? `${formatNumber(loose)} enabled loose ${plural(
+            "plugin",
+            loose,
+          )} stay available outside the VAR package set.`
+        : "The default preset has no enabled packaged session plugins.",
+    );
+    return;
+  }
+
+  const confirmed = await showDialog({
+    eyebrow: "Preserve session plugins",
+    title: "Import enabled session defaults?",
+    message:
+      `Your default preset has ${formatNumber(pluginCount)} enabled packaged ${plural(
+        "plugin",
+        pluginCount,
+      )} using ${formatNumber(roots.length)} package ${plural("root", roots.length)}. ` +
+      "VAM-PIP will permanently pin those package roots. " +
+      (loose
+        ? `${formatNumber(loose)} enabled loose ${plural(
+            "plugin",
+            loose,
+          )} need no pins and remain available.`
+        : "Loose scripts need no pins and remain available."),
+    confirmLabel: remaining ? "Import pins" : "Keep pins",
+    icon: "safe",
+    plan: [
+      ["Plugin slots", pluginCount],
+      ["Package roots", roots.length],
+      ["Already pinned", alreadyPinned],
+      ["New pins", remaining],
+    ],
+  });
+  if (!confirmed) return;
+
+  setButtonBusy(elements.sessionImportButton, true, "Importing…");
+  try {
+    const result = await api("/api/session-plugins/import", {
+      method: "POST",
+      body: {
+        include_disabled: false,
+        apply: Boolean(app.status && app.status.managed_mode),
+      },
+    });
+    const resultRoots = asArray(result.roots);
+    const preserved = resultRoots.length;
+    const detail = [
+      preserved
+        ? `${formatNumber(preserved)} package ${plural(
+            "root",
+            preserved,
+          )} preserved`
+        : "No packaged session roots were present when imported",
+    ];
+    if (loose) detail.push(`${formatNumber(loose)} loose need no pins`);
+    if (result.reconcile) detail.push(planResultText(result.reconcile).replace(/\.$/, ""));
+    if (result.reconcile_error) {
+      detail.push(`visibility update failed: ${result.reconcile_error}`);
+      toast(
+        "Session pins imported; apply is pending",
+        `${detail.join(" · ")}.`,
+        "error",
+      );
+    } else {
+      toast("Session defaults imported", `${detail.join(" · ")}.`);
+    }
+    await refreshAll();
+  } catch (error) {
+    toast("Session-default import failed", errorMessage(error), "error");
+  } finally {
+    setButtonBusy(elements.sessionImportButton, false);
+    renderSessionPlugins();
+  }
+}
+
 async function activateManagedMode() {
   const status = app.status || {};
   const pinCount = asArray(status.pins).length;
   const activeCount = numberOr(status.packages && status.packages.active, 0);
+  let sessionPlugins;
+  try {
+    sessionPlugins = await ensureSessionPlugins({ refresh: true });
+  } catch (error) {
+    toast(
+      "Could not verify session defaults",
+      `VAM-PIP did not start managed mode: ${errorMessage(error)}`,
+      "error",
+    );
+    return;
+  }
+
+  const sessionRoots = sessionPackagedRoots(sessionPlugins);
+  const sessionCounts = sessionPlugins.counts || {};
+  const sessionPluginCount = numberOr(
+    sessionCounts.enabled_packaged,
+    sessionRoots.length,
+  );
+  const sessionLoose = numberOr(sessionCounts.loose, 0);
+  const sessionMissing = Math.max(numberOr(sessionCounts.missing, 0), 0);
+  const sessionAlreadyPinned = Math.min(
+    numberOr(sessionCounts.already_pinned, 0),
+    sessionRoots.length,
+  );
+  const sessionNewPins = Math.max(sessionRoots.length - sessionAlreadyPinned, 0);
+  if (sessionMissing) {
+    toast(
+      "Session-plugin packages are missing",
+      `VAM-PIP did not start managed mode. Install the ${formatNumber(
+        sessionMissing,
+      )} missing package ${plural(
+        "reference",
+        sessionMissing,
+      )} or remove it from the default Session Plugins preset.`,
+      "error",
+    );
+    return;
+  }
+  let sessionMessage;
+  if (!sessionPlugins.exists) {
+    sessionMessage =
+      "No default Session Plugins preset was found, so there are no session defaults to import automatically. ";
+  } else if (sessionRoots.length) {
+    sessionMessage =
+      `${formatNumber(sessionPluginCount)} enabled packaged session ${plural(
+        "plugin",
+        sessionPluginCount,
+      )} use ${formatNumber(sessionRoots.length)} package ${plural(
+        "root",
+        sessionRoots.length,
+      )}; those roots will be automatically preserved as permanent pins. ` +
+      (sessionLoose
+        ? `${formatNumber(sessionLoose)} enabled loose ${plural(
+            "plugin",
+            sessionLoose,
+          )} need no pins. `
+        : "Loose plugins need no pins. ");
+  } else if (sessionLoose) {
+    sessionMessage =
+      `${formatNumber(sessionLoose)} enabled session ${plural(
+        "plugin",
+        sessionLoose,
+      )} are loose scripts, so they remain available without pins. `;
+  } else {
+    sessionMessage = "The default preset has no enabled session plugins to preserve. ";
+  }
+
   const confirmed = await showDialog({
     eyebrow: "Managed mode",
     title: "Let VAM-PIP control package visibility?",
     message:
       `VAM-PIP will record your current ${formatNumber(activeCount)} active packages as a rollback baseline, ` +
-      `then keep only ${formatNumber(pinCount)} pinned root${pinCount === 1 ? "" : "s"} and their dependencies active. ` +
+      sessionMessage +
+      `It will then keep ${formatNumber(
+        pinCount + sessionNewPins,
+      )} pinned root${pinCount + sessionNewPins === 1 ? "" : "s"} and their dependencies active. ` +
       (status.vam && status.vam.running
         ? "VaM is running, so packages will only be enabled now; hiding is deferred until it closes."
         : "VaM is closed, so the new package set can be applied safely."),
@@ -913,7 +1207,8 @@ async function activateManagedMode() {
     icon: "warning",
     plan: [
       ["Active now", activeCount],
-      ["Pinned roots", pinCount],
+      ["Session plugin slots", sessionPluginCount],
+      ["Pins after import", pinCount + sessionNewPins],
       ["Rollback", "Saved"],
     ],
   });

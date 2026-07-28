@@ -77,13 +77,25 @@ export VAMPIP_STATE_DIR=/path/to/vampip-state
 ## Recommended first use
 
 1. Scan packages and import the BrowserAssist catalogue.
-2. Pin anything that every session needs, such as core plugins or shared assets.
-3. Review the managed-mode confirmation carefully.
-4. Start managed mode. VAM-PIP records the exact current enabled/disabled state
+2. Review the detected default session plugins in the web app or with
+   `./vampip manager session-plugins list`.
+3. Pin any additional package that every session needs but that is not in
+   VaM's default Session Plugins preset.
+4. Review the managed-mode confirmation carefully.
+5. Start managed mode. VAM-PIP records the exact current enabled/disabled state
    before applying the smaller set.
-5. Find a scene or preset and select **Enable for 3 days**.
-6. Launch VaM, or load the resource in an already-running VaM after the bridge
+6. Find a scene or preset and select **Enable for 3 days**.
+7. Launch VaM, or load the resource in an already-running VaM after the bridge
    reports a successful rescan.
+
+VAM-PIP reads
+`<VaM>/Custom/PluginPresets/Plugins_UserDefaults.vap`. On the first applied
+managed-mode activation, every enabled packaged plugin in that preset is
+resolved with its dependencies and saved as a permanent pin. Enabled loose
+scripts already live outside `AddonPackages`, so they remain available without
+a package pin. A missing preset is treated as an empty default; a malformed
+preset or an enabled packaged reference that cannot resolve blocks activation
+before package visibility changes.
 
 Selecting a packaged resource creates a lease containing its archive, declared
 `.var` dependencies, and package references found in supported scene/preset
@@ -110,6 +122,9 @@ Then, once in VaM:
 1. open **Session Plugins**;
 2. add `Custom/Scripts/VAMPip/Bridge/VAMPipBridge.cslist`;
 3. save it in the default session-plugin preset.
+
+The bridge is a loose script, so VAM-PIP detects it in that preset but does not
+create a package pin for it.
 
 The bridge polls a local mailbox, coalesces requests, waits while VaM is
 loading, and invokes BrowserAssist's lightweight package refresh when available.
@@ -153,6 +168,11 @@ The browser uses the same service exposed by `vampip manager`:
 ./vampip manager pin AcidBubbles.Timeline
 ./vampip manager unpin AcidBubbles.Timeline
 
+# VaM default Session Plugins preset
+./vampip manager session-plugins list
+./vampip manager session-plugins import
+./vampip manager session-plugins import --include-disabled
+
 # Temporary package access
 ./vampip manager lease Creator.Scene.4 --days 3
 ./vampip manager renew LEASE_ID --days 3
@@ -170,6 +190,16 @@ The browser uses the same service exposed by `vampip manager`:
 Mutating CLI commands either require `--apply` or clearly identify themselves
 as immediate pin/lease changes. Run `./vampip manager --help` for the complete
 command tree.
+
+`session-plugins import` immediately creates any missing pins. By default it
+imports only enabled packaged defaults; `--include-disabled` is the explicit
+opt-in for disabled entries. Add `--apply` to reconcile the enlarged pin set
+immediately when managed mode is already active. Pin creation and reconciliation
+share the manager lock; if reconciliation fails, the result reports
+`reconcile_error` and leaves the successfully imported pins in place for a
+later retry (the CLI also exits nonzero). The web app exposes the same
+enabled-only operation as **Import session defaults** and performs equivalent
+preservation automatically as part of first activation.
 
 ## Audit and maintenance commands
 

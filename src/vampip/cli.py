@@ -600,6 +600,20 @@ def cmd_manager_catalog_facets(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_manager_session_plugins_list(args: argparse.Namespace) -> int:
+    _print_json(_manager_service(args).session_plugins())
+    return 0
+
+
+def cmd_manager_session_plugins_import(args: argparse.Namespace) -> int:
+    result = _manager_service(args).import_session_plugins(
+        include_disabled=args.include_disabled,
+        apply=args.apply,
+    )
+    _print_json(result)
+    return 2 if result.get("reconcile_error") else 0
+
+
 def cmd_manager_packages(args: argparse.Namespace) -> int:
     _print_json(
         _manager_service(args).list_packages(
@@ -932,6 +946,41 @@ def build_parser() -> argparse.ArgumentParser:
         "facets", help="show resource types, creators, and tags"
     )
     manager_catalog_facets.set_defaults(func=cmd_manager_catalog_facets)
+
+    manager_session_plugins = manager_commands.add_parser(
+        "session-plugins",
+        help="inspect or pin VaM's default Session Plugins preset",
+    )
+    manager_session_plugin_commands = manager_session_plugins.add_subparsers(
+        dest="manager_session_plugin_command",
+        required=True,
+    )
+    manager_session_plugins_list = manager_session_plugin_commands.add_parser(
+        "list",
+        help="show default session plugins and their package state",
+    )
+    manager_session_plugins_list.set_defaults(
+        func=cmd_manager_session_plugins_list
+    )
+    manager_session_plugins_import = (
+        manager_session_plugin_commands.add_parser(
+            "import",
+            help="pin packaged plugins from the default session preset",
+        )
+    )
+    manager_session_plugins_import.add_argument(
+        "--include-disabled",
+        action="store_true",
+        help="also pin session-plugin slots disabled in the preset",
+    )
+    manager_session_plugins_import.add_argument(
+        "--apply",
+        action="store_true",
+        help="reconcile immediately when managed mode is active",
+    )
+    manager_session_plugins_import.set_defaults(
+        func=cmd_manager_session_plugins_import
+    )
 
     manager_packages = manager_commands.add_parser(
         "packages", help="search indexed package archives"

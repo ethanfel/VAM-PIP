@@ -63,7 +63,7 @@ Consequently, VaM's active archive count can be larger than the desired package
 count. Encrypted ZIP members and some unsupported compression errors can abort
 inventory scanning instead of being recorded as an invalid row.
 
-### 4. Desired packages must resolve completely
+### 4. Desired packages and session defaults must resolve completely
 
 Pins must have a complete current dependency closure. Leases store an exact
 closure only after successful resolution. Reconciliation stops when a pin is
@@ -71,6 +71,14 @@ missing, an exact leased ID has disappeared, or desired same-ID copies have
 differing sizes or known SHA-256 digests. Hash calculation skips files that
 raise `OSError`; a group of same-size copies whose hashes all remain unknown is
 not rejected by this check.
+
+On first managed-mode activation, VAM-PIP also reads
+`Custom/PluginPresets/Plugins_UserDefaults.vap` and adds its enabled packaged
+plugins to resolution. A missing preset is an empty default. A malformed preset
+or unresolved enabled package reference refuses activation before any archive
+visibility change; VAM-PIP does not fall back to hiding the unverified plugin.
+Enabled loose scripts need no pin because package switching cannot hide them.
+Disabled preset entries are ignored unless the user explicitly imports them.
 
 ### 5. Enables happen before disables
 
@@ -224,11 +232,10 @@ evidence to compare, not assume either is durable ground truth.
 
 SQLite mode/baseline changes and archive renames are also separate:
 
-- activation commits the baseline before switching, then commits
-  `managed_mode = true`;
+- every applied reconciliation commits new baseline rows before switching;
+- activation then commits its session-default pins and
+  `managed_mode = true`; a caught failure attempts manifest rollback;
 - deactivation restores archives before clearing the baseline and mode flag;
-- an ordinary reconciliation can rename a newly discovered archive before its
-  new baseline row is committed.
 
 A crash can therefore leave managed suffix changes while the mode flag is
 false, or a restored baseline while the flag is still true. In the latter
@@ -324,6 +331,7 @@ can freeze VaM briefly.
 | Live package removal | Running VaM gets enable-only plans | A false-negative process probe can make an unsafe disable possible |
 | Bridge abuse | Rescan-only schema, duplicate suppression, loading deferral, five-second rate limit | A same-user process or VaM plugin can still cause periodic rescan stalls |
 | BrowserAssist volatility | Pre-read 64 MiB size check, before/after fingerprint snapshot, schema validation, savepoint | A concurrently growing file is read before rejection and can exceed 64 MiB in memory; catalog can remain stale until imported again |
+| Malformed session defaults | Fixed preset path, 16 MiB read bound, strict JSON/slot/reference validation, complete package resolution before activation | The preset expresses availability intent only; VaM remains responsible for executing the selected plugins |
 | Malicious package payload | No archive extraction; targeted bounded thumbnail/reference reads | VaM itself executes plugins; VAM-PIP does not establish package trust |
 | Launch command injection | Script must be executable below VaM root and is passed without a shell | A malicious configured script file still executes with the user's authority |
 
@@ -371,8 +379,9 @@ Do not assume that the presence of Wine or Proton alone counts as VaM.
 ## Untrusted archive and catalog input
 
 VAM-PIP parses archive filenames, ZIP metadata, root `meta.json`, selected
-resource text, and sibling JPEG thumbnails. Catalog manifests have a 64 MiB
-pre-read size check, text reference scans are bounded at 256 MiB, and
+resource text, sibling JPEG thumbnails, and VaM's default Session Plugins
+preset. Catalog manifests have a 64 MiB pre-read size check, session defaults
+have a 16 MiB limit, text reference scans are bounded at 256 MiB, and
 thumbnails are bounded at 16 MiB by default. A manifest that grows after its
 size check is read before the changed fingerprint is rejected.
 
@@ -392,7 +401,11 @@ Before first activation:
 
 - Back up the state directory and any irreplaceable archive collection.
 - Install and load the loose VAM-PIP session bridge if live enables are needed.
-- Pin BrowserAssist and any other always-required packaged session plugins.
+- Inspect `vampip manager session-plugins list`; enabled packaged defaults are
+  auto-pinned on first activation, while loose scripts need no package pin.
+- Pin any other always-required package that is absent from the default preset.
+- Import disabled defaults only when deliberately needed, with
+  `vampip manager session-plugins import --include-disabled`.
 - Scan and resolve all pins successfully.
 - Verify VaM process detection with the real launcher.
 - Preview activation, preferably with VaM closed.

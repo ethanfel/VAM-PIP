@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import nullcontext
 from dataclasses import asdict
 import json
 import os
@@ -34,15 +35,21 @@ from vampip.manager_state import (
     resolve_managed_set,
     set_setting,
 )
+from vampip.models import parse_dependency_ref
 from vampip.profiles import preferred, resolve
 from vampip.references import resource_package_roots
 from vampip.runtime import derive_vam_root, find_vam_processes
+from vampip.session_plugins import (
+    SessionPlugin,
+    load_session_plugin_defaults,
+)
 from vampip.switching import (
     SwitchPlan,
     apply_switch,
     build_baseline_restore_plan,
     build_switch_plan,
     manager_lock,
+    rollback_switch,
 )
 
 
@@ -253,8 +260,237 @@ class ManagerService:
             )
         return rows
 
+    @staticmethod
+    def _session_plugin_root_row(
+        plugin: SessionPlugin,
+        rows: list[sqlite3.Row],
+    ) -> sqlite3.Row | None:
+        """Return the archive selected for one packaged plugin root."""
+
+        if plugin.package_ref is None:
+            return None
+        resolution = resolve([plugin.package_ref], rows)
+        if any(
+            owner == "<root>"
+            and reference.casefold() == plugin.package_ref.casefold()
+            for owner, reference in resolution.missing
+        ):
+            return None
+
+        reference = plugin.package_ref.casefold()
+        for row in resolution.selected:
+            if package_id(row).casefold() == reference:
+                return row
+
+        dependency = parse_dependency_ref(plugin.package_ref)
+        if dependency is not None and dependency.is_latest:
+            for row in resolution.selected:
+                if family_id(row).casefold() == dependency.family_key:
+                    return row
+        return None
+
+    def _loose_session_plugin_exists(self, plugin: SessionPlugin) -> bool:
+        """Check a loose virtual path without escaping the VaM root."""
+
+        if not plugin.loose:
+            return False
+        relative = plugin.source_path.replace("\\", "/").lstrip("/")
+        if not relative:
+            return False
+        try:
+            root = self.vam_root.resolve()
+            candidate = (root / relative).resolve()
+        except (OSError, RuntimeError):
+            return False
+        if not candidate.is_relative_to(root):
+            return False
+        try:
+            return candidate.is_file()
+        except OSError:
+            return False
+
+    @staticmethod
+    def _add_session_plugin_pins(
+        connection: sqlite3.Connection,
+        roots: list[str] | tuple[str, ...],
+    ) -> int:
+        """Add exact session-default roots without replacing user labels."""
+
+        existing = {
+            str(pin["root_ref"]).casefold()
+            for pin in list_pins(connection)
+        }
+        added = 0
+        for root in roots:
+            if root.casefold() in existing:
+                continue
+            add_pin(connection, root, label="VaM session default")
+            existing.add(root.casefold())
+            added += 1
+        return added
+
+    def session_plugins(self) -> dict[str, object]:
+        """Describe VaM's default Session Plugins preset and package state."""
+
+        preset = load_session_plugin_defaults(self.vam_root)
+        with manager_lock(self.state_dir), connect(self.state_dir) as connection:
+            rows, _ = self._rows(connection, refresh=False)
+            pins = list_pins(connection)
+
+        pinned_roots = {
+            str(pin["root_ref"]).casefold()
+            for pin in pins
+        }
+        enabled_roots = list(preset.enabled_package_roots)
+        session_resolution = resolve(enabled_roots, rows)
+        items: list[dict[str, object]] = []
+        for plugin in preset.plugins:
+            root_row = self._session_plugin_root_row(plugin, rows)
+            loose_available = self._loose_session_plugin_exists(plugin)
+            items.append(
+                {
+                    "slot": plugin.slot,
+                    "slot_index": plugin.slot_index,
+                    "source": plugin.source,
+                    "source_path": plugin.source_path,
+                    "package_ref": plugin.package_ref,
+                    "enabled": plugin.enabled,
+                    "packaged": plugin.packaged,
+                    "loose": plugin.loose,
+                    "installed": loose_available or root_row is not None,
+                    "package_installed": (
+                        root_row is not None if plugin.packaged else None
+                    ),
+                    "active": (
+                        loose_available
+                        or (
+                            root_row is not None
+                            and bool(root_row["enabled"])
+                        )
+                    ),
+                    "pinned": (
+                        plugin.package_ref is not None
+                        and plugin.package_ref.casefold() in pinned_roots
+                    ),
+                    "resolved_package": (
+                        package_id(root_row) if root_row is not None else None
+                    ),
+                }
+            )
+
+        return {
+            "preset": str(preset.path),
+            "exists": preset.exists,
+            "items": items,
+            "enabled_packaged_roots": enabled_roots,
+            "missing": [
+                {"required_by": owner, "reference": reference}
+                for owner, reference in session_resolution.missing
+            ],
+            "counts": {
+                "total": len(preset.plugins),
+                "enabled": sum(plugin.enabled for plugin in preset.plugins),
+                "packaged": sum(plugin.packaged for plugin in preset.plugins),
+                "enabled_packaged": sum(
+                    plugin.enabled and plugin.packaged
+                    for plugin in preset.plugins
+                ),
+                "loose": sum(
+                    plugin.enabled and plugin.loose
+                    for plugin in preset.plugins
+                ),
+                "already_pinned": sum(
+                    root.casefold() in pinned_roots
+                    for root in enabled_roots
+                ),
+                "missing": len(session_resolution.missing),
+            },
+        }
+
+    def import_session_plugins(
+        self,
+        *,
+        include_disabled: bool = False,
+        apply: bool = False,
+    ) -> dict[str, object]:
+        """Pin packaged plugins referenced by VaM's default session preset."""
+
+        preset = load_session_plugin_defaults(self.vam_root)
+        roots = list(
+            preset.package_roots
+            if include_disabled
+            else preset.enabled_package_roots
+        )
+        pinned = 0
+        already_pinned = 0
+        resolved_packages = 0
+        managed_mode = False
+        reconcile_result: dict[str, object] | None = None
+        reconcile_error: str | None = None
+        with manager_lock(self.state_dir):
+            with connect(self.state_dir) as connection:
+                rows, _ = self._rows(connection, refresh=bool(roots))
+                existing = {
+                    str(pin["root_ref"]).casefold()
+                    for pin in list_pins(connection)
+                }
+                already_pinned = sum(
+                    root.casefold() in existing for root in roots
+                )
+                if roots:
+                    resolution = resolve(roots, rows)
+                    if resolution.missing:
+                        summary = ", ".join(
+                            (
+                                reference
+                                if owner == "<root>"
+                                else f"{reference} (required by {owner})"
+                            )
+                            for owner, reference in resolution.missing[:10]
+                        )
+                        raise ValueError(
+                            "cannot preserve unresolved session-plugin "
+                            f"packages: {summary}"
+                        )
+                    rows = self._verify_desired_copies(
+                        connection,
+                        rows,
+                        [package_id(row) for row in resolution.selected],
+                    )
+                    resolved_packages = len(resolution.selected)
+                    pinned = self._add_session_plugin_pins(connection, roots)
+                managed_mode = bool(
+                    get_setting(connection, "managed_mode", False)
+                )
+            if apply and managed_mode and roots:
+                try:
+                    reconcile_result = self.reconcile(
+                        apply=True,
+                        _lock_held=True,
+                    )
+                except (OSError, ValueError, sqlite3.Error) as exc:
+                    reconcile_error = str(exc)
+
+        result: dict[str, object] = {
+            "preset": str(preset.path),
+            "exists": preset.exists,
+            "include_disabled": include_disabled,
+            "roots": roots,
+            "pinned": pinned,
+            "already_pinned": already_pinned,
+            "resolved_packages": resolved_packages,
+            "managed_mode": managed_mode,
+            "applied": False,
+        }
+        if reconcile_result is not None:
+            result["reconcile"] = reconcile_result
+            result["applied"] = True
+        if reconcile_error is not None:
+            result["reconcile_error"] = reconcile_error
+        return result
+
     def status(self, *, refresh_if_empty: bool = True) -> dict[str, object]:
-        with connect(self.state_dir) as connection:
+        with manager_lock(self.state_dir), connect(self.state_dir) as connection:
             rows, scan_result = self._rows(
                 connection,
                 refresh=refresh_if_empty
@@ -522,6 +758,8 @@ class ManagerService:
         manifest: Path | None = None,
         bridge_request: str | None = None,
         expired_leases_removed: int = 0,
+        session_default_roots: int = 0,
+        session_defaults_pinned: int = 0,
     ) -> dict[str, object]:
         return {
             "desired_packages": len(plan.desired_ids),
@@ -532,6 +770,8 @@ class ManagerService:
             "manifest": str(manifest) if manifest else None,
             "bridge_request": bridge_request,
             "expired_leases_removed": expired_leases_removed,
+            "session_default_roots": session_default_roots,
+            "session_defaults_pinned": session_defaults_pinned,
         }
 
     def reconcile(
@@ -539,8 +779,10 @@ class ManagerService:
         *,
         apply: bool,
         activate: bool = False,
+        _lock_held: bool = False,
     ) -> dict[str, object]:
-        with manager_lock(self.state_dir):
+        lock = nullcontext() if _lock_held else manager_lock(self.state_dir)
+        with lock:
             with connect(self.state_dir) as connection:
                 rows, _ = self._rows(connection, refresh=True)
                 root_text = str(self.addon_dir)
@@ -560,12 +802,25 @@ class ManagerService:
                         "vam_running": bool(self._running_pids()),
                         "manifest": None,
                         "bridge_request": None,
+                        "session_default_roots": 0,
+                        "session_defaults_pinned": 0,
                     }
 
-                desired, missing = resolve_managed_set(connection, rows)
+                session_roots: tuple[str, ...] = ()
+                if activating:
+                    session_roots = load_session_plugin_defaults(
+                        self.vam_root
+                    ).enabled_package_roots
+                desired, missing = resolve_managed_set(
+                    connection,
+                    rows,
+                    extra_roots=session_roots,
+                )
                 if missing:
                     summary = ", ".join(reference for _, reference in missing[:10])
-                    raise ValueError(f"pinned package resolution failed: {summary}")
+                    raise ValueError(
+                        f"managed package resolution failed: {summary}"
+                    )
                 rows = self._verify_desired_copies(connection, rows, desired)
 
                 full_plan = build_switch_plan(rows, desired, disable_unselected=True)
@@ -582,13 +837,14 @@ class ManagerService:
                         plan,
                         running=running,
                         pending_disable=pending_disable,
+                        session_default_roots=len(session_roots),
                     )
 
-                # Persist the rollback baseline before the first filesystem
-                # rename, but only for a real activation. A dry-run activation
-                # must remain entirely read-only.
-                ensure_baseline(connection, root_text, rows)
-                if activating:
+                # Persist any newly observed rollback baseline rows before the
+                # first filesystem rename. Dry runs returned above without
+                # creating baseline state.
+                baseline_added = ensure_baseline(connection, root_text, rows)
+                if baseline_added or activating:
                     connection.commit()
                 manifest = apply_switch(
                     self.state_dir,
@@ -598,9 +854,41 @@ class ManagerService:
                     allow_disable=not running,
                     lock_held=True,
                 )
+                session_defaults_pinned = 0
                 if activating:
-                    set_setting(connection, "managed_mode", True)
-                    connection.commit()
+                    try:
+                        session_defaults_pinned = (
+                            self._add_session_plugin_pins(
+                                connection,
+                                session_roots,
+                            )
+                        )
+                        set_setting(connection, "managed_mode", True)
+                        connection.commit()
+                    except BaseException:
+                        try:
+                            connection.rollback()
+                        except Exception:
+                            pass
+                        if manifest is not None:
+                            try:
+                                rollback_switch(manifest)
+                            except BaseException as rollback_error:
+                                raise RuntimeError(
+                                    "managed activation changed package "
+                                    "visibility, then saving its pins/mode and "
+                                    "the automatic filesystem rollback both "
+                                    f"failed; recover with {manifest}"
+                                ) from rollback_error
+                            try:
+                                scan(self.addon_dir, connection)
+                                connection.commit()
+                            except Exception:
+                                try:
+                                    connection.rollback()
+                                except Exception:
+                                    pass
+                        raise
                 if manifest is not None:
                     scan(self.addon_dir, connection)
                 expired_leases_removed = (
@@ -617,6 +905,8 @@ class ManagerService:
             manifest=manifest,
             bridge_request=bridge_request,
             expired_leases_removed=expired_leases_removed,
+            session_default_roots=len(session_roots),
+            session_defaults_pinned=session_defaults_pinned,
         )
 
     def deactivate(self, *, apply: bool) -> dict[str, object]:
