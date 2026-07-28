@@ -9,7 +9,7 @@ import unittest
 from unittest import mock
 
 from vampip.database import SCHEMA_VERSION, connect
-from vampip.bridge import install_bridge
+from vampip.bridge import install_bridge, read_bridge_status
 from vampip.inventory import rows_for_root, scan
 from vampip.manager_state import add_pin, list_leases
 from vampip.session_plugins import SessionPluginPresetError
@@ -565,6 +565,36 @@ class ManagerServiceTests(unittest.TestCase):
         installed[0].write_text("different", encoding="utf-8")
         with self.assertRaises(FileExistsError):
             install_bridge(self.vam_root)
+
+    def test_bridge_status_accepts_vam_simplejson_scalar_strings(self) -> None:
+        status_path = (
+            self.vam_root
+            / "Saves"
+            / "PluginData"
+            / "VAMPip"
+            / "Bridge"
+            / "status.json"
+        )
+        status_path.parent.mkdir(parents=True)
+        status_path.write_text(
+            json.dumps(
+                {
+                    "protocol": "1",
+                    "bridgeVersion": "0.1.3",
+                    "state": "ready",
+                    "ok": "false",
+                    "message": "Bridge ready.",
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        status = read_bridge_status(self.vam_root)
+        self.assertIsNotNone(status)
+        assert status is not None
+        self.assertEqual(status["protocol"], 1)
+        self.assertIs(status["ok"], False)
+        self.assertEqual(status["state"], "ready")
 
 
 class DatabaseMigrationTests(unittest.TestCase):

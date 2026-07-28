@@ -47,8 +47,28 @@ def read_bridge_status(vam_root: Path) -> dict[str, object] | None:
         document = json.loads(path.read_text(encoding="utf-8"))
     except (FileNotFoundError, OSError, UnicodeDecodeError, json.JSONDecodeError):
         return None
-    if not isinstance(document, dict) or document.get("protocol") != PROTOCOL_VERSION:
+    if not isinstance(document, dict):
         return None
+    protocol = document.get("protocol")
+    if isinstance(protocol, str):
+        try:
+            protocol = int(protocol)
+        except ValueError:
+            return None
+    if protocol != PROTOCOL_VERSION:
+        return None
+    document["protocol"] = PROTOCOL_VERSION
+
+    # VaM 1.22's bundled SimpleJSON can serialize AsBool/AsInt values as
+    # JSON strings. Normalize the protocol-1 fields while still accepting
+    # native JSON scalars from newer runtimes.
+    ok = document.get("ok")
+    if isinstance(ok, str):
+        folded = ok.strip().casefold()
+        if folded == "true":
+            document["ok"] = True
+        elif folded == "false":
+            document["ok"] = False
     return document
 
 
