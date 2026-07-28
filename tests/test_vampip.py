@@ -5,6 +5,7 @@ from io import StringIO
 import json
 import os
 from pathlib import Path
+import stat
 import tempfile
 import unittest
 import zipfile
@@ -19,7 +20,12 @@ from vampip.analysis import (
 from vampip.cli import main
 from vampip.content_audit import audit_contents
 from vampip.database import connect
-from vampip.inventory import rows_for_root, scan
+from vampip.inventory import (
+    archive_content_sha256,
+    ensure_content_hashes,
+    rows_for_root,
+    scan,
+)
 from vampip.models import parse_dependency_ref, parse_var_filename
 from vampip.operations import (
     candidates_from_duplicates,
@@ -56,6 +62,34 @@ def make_var(
     with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         archive.writestr("meta.json", json.dumps(metadata))
         archive.writestr("Custom/data.bin", payload)
+
+
+def repack_var(
+    source: Path,
+    destination: Path,
+    *,
+    replace_members: dict[str, bytes] | None = None,
+) -> None:
+    replacements = replace_members or {}
+    with zipfile.ZipFile(source) as archive:
+        members = [
+            (entry.filename, archive.read(entry))
+            for entry in archive.infolist()
+        ]
+
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(destination, "w") as archive:
+        archive.comment = b"repacked container"
+        for index, (name, contents) in enumerate(reversed(members)):
+            entry = zipfile.ZipInfo(
+                name,
+                date_time=(2001, 2, 3, 4, 5, 6),
+            )
+            entry.compress_type = zipfile.ZIP_STORED
+            entry.create_system = 3
+            entry.external_attr = 0o100644 << 16
+            entry.comment = f"repacked member {index}".encode("ascii")
+            archive.writestr(entry, replacements.get(name, contents))
 
 
 def set_nonstandard_zip_version_high_byte(
@@ -192,6 +226,102 @@ class InventoryTests(unittest.TestCase):
             result = scan(self.addons, database)
             self.assertEqual(result.inspected, 1)
 
+    def test_content_hash_cache_follows_rename_and_invalidates_changed_archive(
+        self,
+    ) -> None:
+        archive = self.addons / "Owner.Asset.1.var"
+        make_var(archive, creator="Owner", package="Asset")
+
+        with connect(self.state) as database:
+            scan(self.addons, database)
+            initial_rows = rows_for_root(database, self.addons)
+            self.assertEqual(ensure_content_hashes(database, initial_rows), 1)
+            initial = rows_for_root(database, self.addons)[0]
+            initial_hash = initial["content_sha256"]
+            self.assertTrue(initial_hash)
+
+            moved = self.addons / "Collection" / archive.name
+            moved.parent.mkdir()
+            archive.rename(moved)
+            renamed_scan = scan(self.addons, database)
+            self.assertEqual(renamed_scan.inspected, 0)
+            renamed = rows_for_root(database, self.addons)[0]
+            self.assertEqual(renamed["path"], str(moved.resolve()))
+            self.assertEqual(renamed["content_sha256"], initial_hash)
+            self.assertEqual(ensure_content_hashes(database, [renamed]), 0)
+
+            make_var(
+                moved,
+                creator="Owner",
+                package="Asset",
+                payload=bytes(range(256)) * 8,
+            )
+            self.assertNotEqual(moved.stat().st_size, renamed["size"])
+            changed_scan = scan(self.addons, database)
+            self.assertEqual(changed_scan.inspected, 1)
+            changed = rows_for_root(database, self.addons)[0]
+            self.assertIsNone(changed["content_sha256"])
+
+            self.assertEqual(ensure_content_hashes(database, [changed]), 1)
+            rehashed = rows_for_root(database, self.addons)[0]
+            self.assertNotEqual(rehashed["content_sha256"], initial_hash)
+
+    def test_content_hash_rejects_nonempty_explicit_directory(self) -> None:
+        archive = self.addons / "Owner.Asset.1.var"
+        make_var(archive, creator="Owner", package="Asset")
+        with zipfile.ZipFile(archive, "a") as opened:
+            directory = zipfile.ZipInfo("Custom/Unexpected/")
+            directory.create_system = 3
+            directory.external_attr = (stat.S_IFDIR | 0o755) << 16
+            opened.writestr(directory, b"directory payload")
+
+        with self.assertRaisesRegex(ValueError, "directory contains data"):
+            archive_content_sha256(archive)
+
+    def test_content_hash_rejects_unix_directory_without_trailing_slash(
+        self,
+    ) -> None:
+        archive = self.addons / "Owner.Asset.1.var"
+        make_var(archive, creator="Owner", package="Asset")
+        with zipfile.ZipFile(archive, "a") as opened:
+            directory = zipfile.ZipInfo("Custom/Unexpected")
+            directory.create_system = 3
+            directory.external_attr = (stat.S_IFDIR | 0o755) << 16
+            opened.writestr(directory, b"")
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "directory path has no trailing slash",
+        ):
+            archive_content_sha256(archive)
+
+    def test_malformed_cached_content_hash_is_recalculated(self) -> None:
+        archive = self.addons / "Owner.Asset.1.var"
+        make_var(archive, creator="Owner", package="Asset")
+
+        with connect(self.state) as database:
+            scan(self.addons, database)
+            rows = rows_for_root(database, self.addons)
+            self.assertEqual(ensure_content_hashes(database, rows), 1)
+            valid_hash = rows_for_root(database, self.addons)[0][
+                "content_sha256"
+            ]
+            malformed_hash = f"{valid_hash[:-1]}z"
+            database.execute(
+                """
+                UPDATE package_files
+                SET content_sha256 = ?
+                WHERE path = ?
+                """,
+                (malformed_hash, str(archive.resolve())),
+            )
+
+            malformed = rows_for_root(database, self.addons)
+            self.assertEqual(malformed[0]["content_sha256"], malformed_hash)
+            self.assertEqual(ensure_content_hashes(database, malformed), 1)
+            repaired = rows_for_root(database, self.addons)[0]
+            self.assertEqual(repaired["content_sha256"], valid_hash)
+
     def test_scan_reports_external_enable_and_active_removal(self) -> None:
         archive = self.addons / "Owner.Asset.1.var"
         make_var(archive, creator="Owner", package="Asset")
@@ -312,6 +442,33 @@ class InventoryTests(unittest.TestCase):
             scan(self.addons, database)
             rows = rows_for_root(database, self.addons)
             self.assertEqual(len(identity_conflicts(rows)), 1)
+
+    def test_repacked_package_is_logically_already_installed(self) -> None:
+        installed = self.addons / "Creator.Asset.1.var"
+        incoming = self.base / installed.name
+        make_var(installed, creator="Creator", package="Asset")
+        repack_var(installed, incoming)
+
+        with connect(self.state) as database:
+            scan(self.addons, database)
+            rows = rows_for_root(database, self.addons)
+            status, location = install_archive(incoming, self.addons, rows)
+
+        self.assertEqual(status, "already installed")
+        self.assertEqual(location, installed)
+
+    def test_verified_repack_is_not_an_identity_conflict(self) -> None:
+        original = self.addons / "Creator.Asset.1.var"
+        repacked = self.addons / "Collection" / original.name
+        make_var(original, creator="Creator", package="Asset")
+        repack_var(original, repacked)
+
+        with connect(self.state) as database:
+            scan(self.addons, database)
+            rows = rows_for_root(database, self.addons)
+            self.assertEqual(ensure_content_hashes(database, rows), 2)
+            checked = rows_for_root(database, self.addons)
+            self.assertEqual(identity_conflicts(checked), [])
 
     def test_reverse_dependency_blocks_uninstall(self) -> None:
         make_var(

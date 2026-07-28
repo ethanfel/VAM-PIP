@@ -44,8 +44,9 @@ from vampip.catalog import (
 from vampip.database import connect
 from vampip.inventory import (
     ScanResult,
-    ensure_hashes,
+    ensure_content_hashes,
     inventory_changed,
+    is_archive_content_sha256,
     rows_for_root,
     scan,
 )
@@ -2281,7 +2282,7 @@ class ManagerService:
         rows: list[sqlite3.Row],
         desired_ids: list[str],
     ) -> list[sqlite3.Row]:
-        """Hash only ambiguous desired copies and reject content conflicts."""
+        """Compare logical contents of ambiguous desired package copies."""
 
         desired = {identity.casefold() for identity in desired_ids}
         grouped: dict[str, list[sqlite3.Row]] = {}
@@ -2293,10 +2294,10 @@ class ManagerService:
 
         hash_rows: list[sqlite3.Row] = []
         for group in grouped.values():
-            if len(group) > 1 and len({row["size"] for row in group}) == 1:
-                hash_rows.extend(row for row in group if not row["sha256"])
+            if len(group) > 1:
+                hash_rows.extend(group)
         if hash_rows:
-            ensure_hashes(connection, hash_rows)
+            ensure_content_hashes(connection, hash_rows)
             rows = rows_for_root(connection, self.addon_dir)
 
         grouped.clear()
@@ -2309,8 +2310,13 @@ class ManagerService:
         for group in grouped.values():
             if len(group) < 2:
                 continue
-            signatures = {(row["size"], row["sha256"]) for row in group}
-            if len(signatures) > 1:
+            signatures = {
+                str(row["content_sha256"] or "") for row in group
+            }
+            if (
+                any(not is_archive_content_sha256(value) for value in signatures)
+                or len(signatures) > 1
+            ):
                 conflicts.append(package_id(group[0]))
         if conflicts:
             raise ValueError(

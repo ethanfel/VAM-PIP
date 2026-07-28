@@ -7,7 +7,7 @@ import sqlite3
 from typing import Iterator
 
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 
 SCHEMA = """
@@ -34,6 +34,7 @@ CREATE TABLE IF NOT EXISTS package_files (
     error TEXT,
     dependencies_json TEXT NOT NULL DEFAULT '[]',
     sha256 TEXT,
+    content_sha256 TEXT,
     enabled INTEGER NOT NULL DEFAULT 1,
     scan_generation TEXT NOT NULL
 );
@@ -182,6 +183,10 @@ def connect(state_dir: Path) -> Iterator[sqlite3.Connection]:
     if "enabled" not in columns:
         connection.execute(
             "ALTER TABLE package_files ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1"
+        )
+    if "content_sha256" not in columns:
+        connection.execute(
+            "ALTER TABLE package_files ADD COLUMN content_sha256 TEXT"
         )
     catalog_columns = {
         row["name"]

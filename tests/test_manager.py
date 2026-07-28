@@ -8,6 +8,7 @@ import tempfile
 import threading
 import unittest
 from unittest import mock
+import zipfile
 
 from vampip.database import SCHEMA_VERSION, connect
 from vampip.bridge import install_bridge, read_bridge_status
@@ -18,7 +19,7 @@ from vampip.service import ManagerService
 from vampip.switching import rollback_switch
 from vampip.web import AutoReconciler
 
-from tests.test_vampip import make_var
+from tests.test_vampip import make_var, repack_var
 
 
 def write_session_plugin_defaults(
@@ -791,6 +792,84 @@ class ManagerServiceTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "different data"):
             self.service().pin(["Core.Base"])
 
+    def test_manager_accepts_same_id_harmless_unequal_size_zip_repack(
+        self,
+    ) -> None:
+        original = self.addons / "Core.Base.1.var"
+        repacked = self.addons / "Collection" / original.name
+        repack_var(original, repacked)
+
+        self.assertNotEqual(original.read_bytes(), repacked.read_bytes())
+        self.assertNotEqual(original.stat().st_size, repacked.stat().st_size)
+        with (
+            zipfile.ZipFile(original) as source,
+            zipfile.ZipFile(repacked) as copy,
+        ):
+            source_members = {
+                entry.filename: source.read(entry)
+                for entry in source.infolist()
+            }
+            copy_members = {
+                entry.filename: copy.read(entry)
+                for entry in copy.infolist()
+            }
+            self.assertEqual(copy.namelist(), list(reversed(source.namelist())))
+            self.assertTrue(
+                all(
+                    entry.compress_type == zipfile.ZIP_STORED
+                    for entry in copy.infolist()
+                )
+            )
+        self.assertEqual(copy_members, source_members)
+
+        result = self.service().pin(["Core.Base"])
+        self.assertEqual(result["resolved_packages"], 1)
+        with connect(self.state) as connection:
+            rows = [
+                row
+                for row in rows_for_root(connection, self.addons)
+                if row["creator"] == "Core" and row["package_name"] == "Base"
+            ]
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(
+            len({row["content_sha256"] for row in rows}),
+            1,
+        )
+        self.assertTrue(rows[0]["content_sha256"])
+
+    def test_manager_rejects_same_id_meta_json_only_conflict(self) -> None:
+        original = self.addons / "Core.Base.1.var"
+        conflicting = self.addons / "Collection" / original.name
+        with zipfile.ZipFile(original) as archive:
+            metadata = json.loads(archive.read("meta.json"))
+        metadata["licenseType"] = "Questionable"
+        repack_var(
+            original,
+            conflicting,
+            replace_members={
+                "meta.json": json.dumps(metadata).encode("utf-8"),
+            },
+        )
+
+        with (
+            zipfile.ZipFile(original) as source,
+            zipfile.ZipFile(conflicting) as copy,
+        ):
+            self.assertEqual(
+                source.read("Custom/data.bin"),
+                copy.read("Custom/data.bin"),
+            )
+            self.assertNotEqual(
+                source.read("meta.json"),
+                copy.read("meta.json"),
+            )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            r"different data: Core\.Base\.1",
+        ):
+            self.service().pin(["Core.Base"])
+
     def test_launch_uses_the_scoped_proton_script_without_a_shell(self) -> None:
         script = self.vam_root / "launch-vam-desktop-proton.sh"
         script.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
@@ -1015,11 +1094,14 @@ class DatabaseMigrationTests(unittest.TestCase):
             connection.close()
 
             with connect(state) as migrated:
-                row = migrated.execute("SELECT enabled FROM package_files").fetchone()
+                row = migrated.execute(
+                    "SELECT enabled, content_sha256 FROM package_files"
+                ).fetchone()
                 version = migrated.execute(
                     "SELECT value FROM schema_meta WHERE key = 'schema_version'"
                 ).fetchone()
                 self.assertEqual(row["enabled"], 1)
+                self.assertIsNone(row["content_sha256"])
                 self.assertEqual(int(version["value"]), SCHEMA_VERSION)
                 self.assertIsNotNone(
                     migrated.execute(

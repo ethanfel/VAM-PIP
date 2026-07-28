@@ -587,8 +587,8 @@ class WorkspaceWebUITests(unittest.TestCase):
                 self.assertIn(selector, self.styles)
 
     def test_static_assets_use_the_current_cache_version(self) -> None:
-        self.assertIn("/styles.css?v=0.6.5", self.html)
-        self.assertIn("/app.js?v=0.6.5", self.html)
+        self.assertIn("/styles.css?v=0.6.6", self.html)
+        self.assertIn("/app.js?v=0.6.6", self.html)
 
 
 if __name__ == "__main__":

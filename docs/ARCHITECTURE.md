@@ -95,7 +95,7 @@ especially the baseline are persistent manager state and should be backed up.
 
 ## SQLite state
 
-[`database.py`](../src/vampip/database.py) currently defines schema version 3.
+[`database.py`](../src/vampip/database.py) currently defines schema version 5.
 An installed CLI defaults its state directory to:
 
 ```text
@@ -119,7 +119,8 @@ Connections enable:
 The main table groups are:
 
 - `package_files`: observed archive path, stat identity, parsed package
-  identity, dependencies, optional SHA-256, and enabled state;
+  identity, dependencies, optional raw-file and logical-content SHA-256
+  fingerprints, and enabled state;
 - `manager_settings`: managed mode, automatic reconciliation, API token, and
   optional launch script;
 - `manager_pins`: permanent package roots;
@@ -168,12 +169,19 @@ When several physical files claim one package ID,
 5. case-folded lexical path.
 
 Before a desired package is used, `ManagerService._verify_desired_copies()`
-checks ambiguous copies. Different sizes are conflicts. Same-size copies are
-hashed on demand; different known hashes are conflicts. A detected desired
-same-ID conflict blocks pinning or reconciliation rather than making an
-arbitrary content choice. Hashing currently skips an archive on `OSError`; if
-every same-size copy remains unhashed, duplicate verification cannot prove
-that their bytes differ and does not itself block the operation.
+checks every ambiguous copy with a lazily cached logical fingerprint. The
+fingerprint hashes sorted, normalized member paths and each member's exact
+uncompressed bytes. ZIP entry order, compression, timestamps, comments, extra
+fields, and explicit directory entries therefore do not make harmless repacks
+conflict. `meta.json` remains exact package data.
+
+Unreadable, encrypted, unsupported, corrupt, path-ambiguous, or concurrently
+changed archives fail closed. Different or unavailable logical fingerprints
+block pinning, leasing, and reconciliation rather than making an arbitrary
+content choice. A content fingerprint survives a manager visibility rename and
+is cleared when the scanner observes a changed archive identity. The separate
+raw-file SHA-256 remains the authority for byte-identical duplicate cleanup and
+quarantine evidence.
 
 ## Dependency resolution
 

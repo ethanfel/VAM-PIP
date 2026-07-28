@@ -10,7 +10,11 @@ import sqlite3
 import uuid
 
 from vampip.analysis import DuplicateGroup, family_id, package_id
-from vampip.inventory import inspect_archive, sha256_file
+from vampip.inventory import (
+    archive_content_sha256,
+    inspect_archive,
+    is_archive_content_sha256,
+)
 from vampip.models import parse_dependency_ref, parse_var_filename
 
 
@@ -169,10 +173,12 @@ def install_archive(
     ]
     source_digest: str | None = None
     for row in matching:
-        if row["size"] != source.stat().st_size:
-            continue
-        source_digest = source_digest or sha256_file(source)
-        existing_digest = row["sha256"] or sha256_file(Path(row["path"]))
+        source_digest = source_digest or archive_content_sha256(source)
+        existing_digest = (
+            str(row["content_sha256"])
+            if is_archive_content_sha256(row["content_sha256"])
+            else archive_content_sha256(Path(row["path"]))
+        )
         if source_digest == existing_digest:
             return "already installed", Path(row["path"])
     if matching:

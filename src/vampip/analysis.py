@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 import sqlite3
 
-from vampip.inventory import ensure_hashes
+from vampip.inventory import ensure_hashes, is_archive_content_sha256
 from vampip.models import parse_dependency_ref
 
 
@@ -133,6 +133,15 @@ def identity_conflicts(rows: list[sqlite3.Row]) -> list[tuple[str, list[sqlite3.
 
     conflicts = []
     for group in groups.values():
+        content_hashes = [
+            str(row["content_sha256"] or "")
+            for row in group
+            if is_archive_content_sha256(row["content_sha256"])
+        ]
+        if len(content_hashes) == len(group):
+            if len(set(content_hashes)) > 1:
+                conflicts.append((package_id(group[0]), group))
+            continue
         sizes = {row["size"] for row in group}
         known_hashes = {row["sha256"] for row in group if row["sha256"]}
         if len(sizes) > 1 or len(known_hashes) > 1:

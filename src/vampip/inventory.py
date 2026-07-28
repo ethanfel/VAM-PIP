@@ -7,14 +7,28 @@ import json
 import os
 from pathlib import Path
 import sqlite3
+import stat as stat_module
 import time
+import unicodedata
 import uuid
 import zipfile
+import zlib
 
 from vampip.models import DISABLED_SUFFIX, parse_dependency_ref, parse_var_filename
 
 
 ARCHIVE_INSPECTION_VERSION = 1
+ARCHIVE_CONTENT_HASH_VERSION = 1
+_ARCHIVE_CONTENT_HASH_PREFIX = f"{ARCHIVE_CONTENT_HASH_VERSION}:"
+_MAX_CONTENT_HASH_MEMBERS = 250_000
+_MAX_CONTENT_HASH_PATH_BYTES = 4096
+_MAX_CONTENT_HASH_UNCOMPRESSED = 512 * 1024**3
+_MAX_CONTENT_HASH_EXPANSION_RATIO = 1_000
+_MIN_CONTENT_HASH_EXPANSION_ALLOWANCE = 2 * 1024**3
+_SUPPORTED_VAR_COMPRESSION = {
+    zipfile.ZIP_STORED,
+    zipfile.ZIP_DEFLATED,
+}
 
 
 @dataclass(frozen=True)
@@ -239,12 +253,13 @@ def scan(root: Path, connection: sqlite3.Connection) -> ScanResult:
         INSERT INTO package_files (
             path, root, relative_path, basename, size, mtime_ns, device, inode,
             creator, package_name, version, version_text, canonical_filename,
-            valid, error, dependencies_json, sha256, enabled, scan_generation
+            valid, error, dependencies_json, sha256, content_sha256, enabled,
+            scan_generation
         ) VALUES (
             :path, :root, :relative_path, :basename, :size, :mtime_ns, :device,
             :inode, :creator, :package_name, :version, :version_text,
             :canonical_filename, :valid, :error, :dependencies_json, :sha256,
-            :enabled, :scan_generation
+            :content_sha256, :enabled, :scan_generation
         )
         ON CONFLICT(path) DO UPDATE SET
             root=excluded.root,
@@ -263,6 +278,7 @@ def scan(root: Path, connection: sqlite3.Connection) -> ScanResult:
             error=excluded.error,
             dependencies_json=excluded.dependencies_json,
             sha256=excluded.sha256,
+            content_sha256=excluded.content_sha256,
             enabled=excluded.enabled,
             scan_generation=excluded.scan_generation
     """
@@ -342,6 +358,7 @@ def scan(root: Path, connection: sqlite3.Connection) -> ScanResult:
                         "error": moved["error"],
                         "dependencies_json": moved["dependencies_json"],
                         "sha256": moved["sha256"],
+                        "content_sha256": moved["content_sha256"],
                         "enabled": enabled,
                         "scan_generation": generation,
                     },
@@ -388,6 +405,9 @@ def scan(root: Path, connection: sqlite3.Connection) -> ScanResult:
                 "device": stat.st_dev,
                 "inode": stat.st_ino,
                 "sha256": cached["sha256"] if cached_unchanged else None,
+                "content_sha256": (
+                    cached["content_sha256"] if cached_unchanged else None
+                ),
                 "enabled": enabled,
                 "scan_generation": generation,
                 **details,
@@ -449,6 +469,327 @@ def sha256_file(path: Path) -> str:
         while chunk := handle.read(8 * 1024 * 1024):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _content_hash_member_path(entry: zipfile.ZipInfo) -> tuple[str, bool]:
+    original = entry.orig_filename
+    if not original or "\0" in original:
+        raise ValueError("ZIP member has an empty or NUL-containing path")
+    normalized = original.replace("\\", "/")
+    while normalized.startswith("./"):
+        normalized = normalized[2:]
+    if not normalized or normalized.startswith("/"):
+        raise ValueError(f"ZIP member has an unsafe absolute path: {original!r}")
+
+    unix_mode = (
+        (entry.external_attr >> 16) & 0xFFFF
+        if entry.create_system == 3
+        else 0
+    )
+    unix_type = stat_module.S_IFMT(unix_mode)
+    directory = normalized.endswith("/")
+    if unix_type == stat_module.S_IFDIR and not directory:
+        raise ValueError(
+            f"ZIP directory path has no trailing slash: {original!r}"
+        )
+    if directory:
+        normalized = normalized.rstrip("/")
+    parts = normalized.split("/")
+    if (
+        not normalized
+        or any(not part or part in {".", ".."} or ":" in part for part in parts)
+    ):
+        raise ValueError(f"ZIP member has an unsafe path: {original!r}")
+    if unix_type not in {0, stat_module.S_IFREG, stat_module.S_IFDIR}:
+        raise ValueError(f"ZIP member is not a regular file: {original!r}")
+    if directory and unix_type not in {0, stat_module.S_IFDIR}:
+        raise ValueError(f"ZIP directory has incompatible attributes: {original!r}")
+    if not directory and unix_type not in {0, stat_module.S_IFREG}:
+        raise ValueError(f"ZIP file has incompatible attributes: {original!r}")
+    return normalized, directory
+
+
+def is_archive_content_sha256(value: object) -> bool:
+    text = str(value or "")
+    payload = text.removeprefix(_ARCHIVE_CONTENT_HASH_PREFIX)
+    return (
+        len(text) == len(_ARCHIVE_CONTENT_HASH_PREFIX) + 64
+        and text.startswith(_ARCHIVE_CONTENT_HASH_PREFIX)
+        and all(character in "0123456789abcdef" for character in payload)
+    )
+
+
+def archive_content_sha256(path: Path) -> str:
+    """Hash logical VAR member names and bytes, ignoring ZIP repack metadata."""
+
+    members: list[tuple[bytes, zipfile.ZipInfo]] = []
+    collision_names: dict[str, str] = {}
+    directory_names: set[str] = set()
+    declared_total = 0
+    try:
+        with path.open("rb") as raw:
+            before = os.fstat(raw.fileno())
+            expansion_limit = min(
+                _MAX_CONTENT_HASH_UNCOMPRESSED,
+                max(
+                    _MIN_CONTENT_HASH_EXPANSION_ALLOWANCE,
+                    before.st_size * _MAX_CONTENT_HASH_EXPANSION_RATIO,
+                ),
+            )
+            with zipfile.ZipFile(raw) as archive:
+                entries = archive.infolist()
+                if len(entries) > _MAX_CONTENT_HASH_MEMBERS:
+                    raise ValueError(
+                        f"ZIP has too many members ({len(entries):,})"
+                    )
+                for entry in entries:
+                    normalized, directory = _content_hash_member_path(entry)
+                    collision_key = unicodedata.normalize(
+                        "NFC",
+                        normalized,
+                    ).casefold()
+                    name = normalized.encode("utf-8")
+                    if len(name) > _MAX_CONTENT_HASH_PATH_BYTES:
+                        raise ValueError(
+                            f"ZIP member path is too long: {entry.orig_filename!r}"
+                        )
+                    if entry.flag_bits & 0x1:
+                        raise ValueError(
+                            f"ZIP member is encrypted: {entry.orig_filename!r}"
+                        )
+                    if entry.compress_type not in _SUPPORTED_VAR_COMPRESSION:
+                        raise ValueError(
+                            "ZIP member uses unsupported compression "
+                            f"{entry.compress_type}: {entry.orig_filename!r}"
+                        )
+                    if directory:
+                        if entry.file_size != 0:
+                            raise ValueError(
+                                "ZIP directory contains data: "
+                                f"{entry.orig_filename!r}"
+                            )
+                        directory_names.add(collision_key)
+                        continue
+                    previous = collision_names.get(collision_key)
+                    if previous is not None:
+                        raise ValueError(
+                            "ZIP has ambiguous duplicate member paths: "
+                            f"{previous!r}, {entry.orig_filename!r}"
+                        )
+                    collision_names[collision_key] = entry.orig_filename
+                    declared_total += int(entry.file_size)
+                    if declared_total > expansion_limit:
+                        raise ValueError(
+                            "ZIP member data exceeds the logical hashing "
+                            "expansion limit"
+                        )
+                    members.append((name, entry))
+
+                file_names = set(collision_names)
+                all_names = file_names | directory_names
+                for name in all_names:
+                    if name in directory_names:
+                        if name in file_names:
+                            raise ValueError(
+                                f"ZIP path is both a file and directory: {name!r}"
+                            )
+                    parts = name.split("/")
+                    for index in range(1, len(parts)):
+                        ancestor = "/".join(parts[:index])
+                        if ancestor in file_names:
+                            raise ValueError(
+                                "ZIP file path is also a parent directory: "
+                                f"{ancestor!r}"
+                            )
+
+                records: list[tuple[bytes, int, bytes]] = []
+                actual_total = 0
+                for name, entry in sorted(
+                    members,
+                    key=lambda value: value[0],
+                ):
+                    member_digest = hashlib.sha256()
+                    member_size = 0
+                    with archive.open(entry, "r") as handle:
+                        while chunk := handle.read(8 * 1024 * 1024):
+                            member_digest.update(chunk)
+                            member_size += len(chunk)
+                            actual_total += len(chunk)
+                            if actual_total > expansion_limit:
+                                raise ValueError(
+                                    "ZIP expands beyond the logical hashing "
+                                    "safety limit"
+                                )
+                    if member_size != entry.file_size:
+                        raise ValueError(
+                            "ZIP member size changed while reading: "
+                            f"{entry.orig_filename!r}"
+                        )
+                    records.append((name, member_size, member_digest.digest()))
+            after = os.fstat(raw.fileno())
+    except (
+        EOFError,
+        NotImplementedError,
+        OSError,
+        RuntimeError,
+        zipfile.BadZipFile,
+        zipfile.LargeZipFile,
+        zlib.error,
+    ) as exc:
+        raise ValueError(
+            f"could not read logical VAR contents: {type(exc).__name__}: {exc}"
+        ) from exc
+
+    identity_before = (
+        before.st_dev,
+        before.st_ino,
+        before.st_size,
+        before.st_mtime_ns,
+    )
+    identity_after = (
+        after.st_dev,
+        after.st_ino,
+        after.st_size,
+        after.st_mtime_ns,
+    )
+    if identity_before != identity_after:
+        raise ValueError("archive changed while its logical contents were hashed")
+
+    digest = hashlib.sha256()
+    digest.update(b"VAM-PIP logical VAR contents\0")
+    digest.update(ARCHIVE_CONTENT_HASH_VERSION.to_bytes(4, "big"))
+    digest.update(len(records).to_bytes(8, "big"))
+    for name, member_size, member_digest in records:
+        digest.update(len(name).to_bytes(4, "big"))
+        digest.update(name)
+        digest.update(member_size.to_bytes(8, "big"))
+        digest.update(member_digest)
+    return f"{_ARCHIVE_CONTENT_HASH_PREFIX}{digest.hexdigest()}"
+
+
+def _row_matches_stat(row: sqlite3.Row, file_stat: os.stat_result) -> bool:
+    return (
+        row["size"] == file_stat.st_size
+        and row["mtime_ns"] == file_stat.st_mtime_ns
+        and row["device"] == file_stat.st_dev
+        and row["inode"] == file_stat.st_ino
+    )
+
+
+def ensure_content_hashes(
+    connection: sqlite3.Connection,
+    rows: Iterable[sqlite3.Row],
+) -> int:
+    """Lazily cache logical VAR hashes without changing raw SHA semantics."""
+
+    calculated = 0
+    seen_paths: set[str] = set()
+    cached_by_file: dict[tuple[int, int, int, int], str] = {}
+    cached_by_raw_hash: dict[str, str] = {}
+    row_list = list(rows)
+    for row in row_list:
+        content_hash = str(row["content_sha256"] or "")
+        if not is_archive_content_sha256(content_hash):
+            continue
+        try:
+            current = Path(str(row["path"])).stat()
+        except OSError as exc:
+            raise ValueError(
+                f"could not verify logical contents of {row['relative_path']}: {exc}"
+            ) from exc
+        if not _row_matches_stat(row, current):
+            raise ValueError(
+                f"package changed before logical hashing: {row['relative_path']}"
+            )
+        file_key = (
+            row["device"],
+            row["inode"],
+            row["size"],
+            row["mtime_ns"],
+        )
+        cached_by_file[file_key] = content_hash
+        if row["sha256"]:
+            cached_by_raw_hash[str(row["sha256"])] = content_hash
+
+    pending: list[tuple[str, sqlite3.Row]] = []
+    for row in row_list:
+        path_text = str(row["path"])
+        if path_text in seen_paths:
+            continue
+        seen_paths.add(path_text)
+        content_hash = str(row["content_sha256"] or "")
+        if is_archive_content_sha256(content_hash):
+            continue
+
+        file_key = (
+            row["device"],
+            row["inode"],
+            row["size"],
+            row["mtime_ns"],
+        )
+        digest = cached_by_file.get(file_key)
+        if digest is None and row["sha256"]:
+            digest = cached_by_raw_hash.get(str(row["sha256"]))
+        path = Path(path_text)
+        try:
+            before = path.stat()
+        except OSError as exc:
+            raise ValueError(
+                f"could not verify logical contents of {row['relative_path']}: {exc}"
+            ) from exc
+        if not _row_matches_stat(row, before):
+            raise ValueError(
+                f"package changed before logical hashing: {row['relative_path']}"
+            )
+        if digest is None:
+            try:
+                digest = archive_content_sha256(path)
+            except ValueError as exc:
+                raise ValueError(
+                    "could not verify logical contents of "
+                    f"{row['relative_path']}: {exc}"
+                ) from exc
+            calculated += 1
+        try:
+            after = path.stat()
+        except OSError as exc:
+            raise ValueError(
+                f"package changed after logical hashing: {row['relative_path']}"
+            ) from exc
+        if not _row_matches_stat(row, after):
+            raise ValueError(
+                f"package changed during logical hashing: {row['relative_path']}"
+            )
+        cached_by_file[file_key] = digest
+        if row["sha256"]:
+            cached_by_raw_hash[str(row["sha256"])] = digest
+        pending.append((digest, row))
+
+    for digest, row in pending:
+        cursor = connection.execute(
+            """
+            UPDATE package_files
+            SET content_sha256 = ?
+            WHERE path = ? AND size = ? AND mtime_ns = ?
+              AND device = ? AND inode = ?
+            """,
+            (
+                digest,
+                row["path"],
+                row["size"],
+                row["mtime_ns"],
+                row["device"],
+                row["inode"],
+            ),
+        )
+        if cursor.rowcount != 1:
+            connection.rollback()
+            raise ValueError(
+                "package inventory changed while saving logical hash: "
+                f"{row['relative_path']}"
+            )
+    connection.commit()
+    return calculated
 
 
 def ensure_hashes(connection: sqlite3.Connection, rows: Iterable[sqlite3.Row]) -> int:

@@ -72,9 +72,11 @@ it.
 Pins must have a complete current dependency closure. Leases store an exact
 closure only after successful resolution. Reconciliation stops when a pin is
 missing, an exact leased ID has disappeared, or desired same-ID copies have
-differing sizes or known SHA-256 digests. Hash calculation skips files that
-raise `OSError`; a group of same-size copies whose hashes all remain unknown is
-not rejected by this check.
+different logical archive contents. Logical fingerprints compare normalized
+member paths and exact uncompressed member bytes while ignoring ZIP container
+metadata such as compression, order, timestamps, and comments. An unreadable,
+encrypted, unsupported, corrupt, path-ambiguous, or concurrently changed copy
+cannot be verified and blocks the operation.
 
 On first managed-mode activation, VAM-PIP also reads
 `Custom/PluginPresets/Plugins_UserDefaults.vap` and adds its enabled packaged
@@ -408,7 +410,7 @@ can freeze VaM briefly.
 | Oversized HTTP request | JSON body is limited to 1 MiB and requires Content-Length/type | Slow local clients can still consume server threads |
 | Path traversal in local resources | Absolute paths, `..`, colon components, and resolved escapes are rejected | Symlink behavior depends on the resolved filesystem at access time |
 | Ambiguous ZIP member casing | Case-insensitive fallback is accepted only for one unique member | Malformed archives may still be expensive to inspect |
-| Same-ID copy ambiguity | Different sizes or known SHA-256 digests are rejected | If hashing every same-size copy raises `OSError`, their content remains unverified |
+| Same-ID copy ambiguity | Every desired copy is compared by a cached, versioned fingerprint of normalized member paths and exact uncompressed bytes; unverified or different contents are rejected | Initial verification reads every ambiguous archive once; `meta.json` differences remain intentionally significant |
 | Concurrent manager mutation | Advisory manager lock, destination preflight, atomic no-clobber archive renames, SQLite WAL | Non-cooperating tools and manual renames can still force a switch to stop |
 | Partial multi-file switch | Prewritten canonical plan, batched `fsync`ed append-only progress, filesystem identity inspection, preflighted rollback, best-effort automatic reverse rollback | SIGKILL can leave a rename ahead of a progress batch; archive directories are not `fsync`ed, and no transaction spans every rename |
 | SQLite/filesystem split state | Baseline and mode updates are deliberately ordered around switches | No transaction spans SQLite and archive renames; a crash requires checking both |
