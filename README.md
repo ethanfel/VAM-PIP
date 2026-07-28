@@ -127,9 +127,9 @@ The bridge is a loose script, so VAM-PIP detects it in that preset but does not
 create a package pin for it.
 
 The bridge polls a local mailbox, coalesces requests, waits while VaM is
-loading, and invokes BrowserAssist's lightweight package refresh when available.
-VaM's core package rescan is the fallback. It cannot rename files, run commands,
-or accept arbitrary paths.
+loading, and invokes VaM's core package rescan. BrowserAssist must be reloaded
+when it needs to rebuild its private package/resource manifest. The bridge
+cannot rename files, run commands, or accept arbitrary paths.
 
 See [bridge/vam/README.md](bridge/vam/README.md) for the protocol and manual
 installation layout.
@@ -219,6 +219,12 @@ the manager:
 to a timestamped quarantine rather than being deleted. Old versions are
 reported but are not automatically discarded because scenes and plugins can
 pin an exact version.
+
+`scan` also rejects ZIP entries whose version-required high byte is nonzero.
+Python can read those entries, but VaM's old SharpZipLib reports the combined
+value (for example, `788` for `0x0314`) as unsupported. Run
+`./vampip doctor --refresh` to identify the archive and entry before loading it
+in VaM.
 
 Profiles are still useful for fixed, named package sets:
 

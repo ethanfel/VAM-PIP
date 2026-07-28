@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from contextlib import redirect_stdout
+from io import StringIO
 import json
 import os
 from pathlib import Path
@@ -14,8 +16,9 @@ from vampip.analysis import (
     verified_duplicate_groups,
     version_families,
 )
-from vampip.database import connect
+from vampip.cli import main
 from vampip.content_audit import audit_contents
+from vampip.database import connect
 from vampip.inventory import rows_for_root, scan
 from vampip.models import parse_dependency_ref, parse_var_filename
 from vampip.operations import (
@@ -53,6 +56,54 @@ def make_var(
     with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         archive.writestr("meta.json", json.dumps(metadata))
         archive.writestr("Custom/data.bin", payload)
+
+
+def set_nonstandard_zip_version_high_byte(
+    path: Path,
+    *,
+    entry_name: str,
+    high_byte: int,
+) -> None:
+    with zipfile.ZipFile(path) as archive:
+        entry = archive.getinfo(entry_name)
+        local_header_offset = entry.header_offset
+        central_directory_offset = archive.start_dir
+
+    contents = bytearray(path.read_bytes())
+    contents[local_header_offset + 5] = high_byte
+    while central_directory_offset < len(contents):
+        if contents[central_directory_offset : central_directory_offset + 4] != (
+            b"PK\x01\x02"
+        ):
+            break
+        name_length = int.from_bytes(
+            contents[
+                central_directory_offset + 28 : central_directory_offset + 30
+            ],
+            "little",
+        )
+        extra_length = int.from_bytes(
+            contents[
+                central_directory_offset + 30 : central_directory_offset + 32
+            ],
+            "little",
+        )
+        comment_length = int.from_bytes(
+            contents[
+                central_directory_offset + 32 : central_directory_offset + 34
+            ],
+            "little",
+        )
+        name_start = central_directory_offset + 46
+        name_end = name_start + name_length
+        if contents[name_start:name_end].decode("utf-8") == entry_name:
+            contents[central_directory_offset + 7] = high_byte
+            path.write_bytes(contents)
+            return
+        central_directory_offset = (
+            name_end + extra_length + comment_length
+        )
+    raise AssertionError(f"central-directory entry not found: {entry_name}")
 
 
 class NameParsingTests(unittest.TestCase):
@@ -140,6 +191,63 @@ class InventoryTests(unittest.TestCase):
             os.replace(replacement, archive)
             result = scan(self.addons, database)
             self.assertEqual(result.inspected, 1)
+
+    def test_inspection_version_invalidates_unchanged_archive_cache(self) -> None:
+        archive = self.addons / "Owner.Asset.1.var"
+        make_var(archive, creator="Owner", package="Asset")
+        with connect(self.state) as database:
+            first = scan(self.addons, database)
+            self.assertEqual(first.inspected, 1)
+            database.execute(
+                """
+                UPDATE schema_meta SET value = '0'
+                WHERE key LIKE 'archive_inspection_version:%'
+                """
+            )
+
+            upgraded = scan(self.addons, database)
+            self.assertEqual(upgraded.inspected, 1)
+            self.assertEqual(upgraded.unchanged, 0)
+
+            cached = scan(self.addons, database)
+            self.assertEqual(cached.inspected, 0)
+            self.assertEqual(cached.unchanged, 1)
+
+    def test_doctor_reports_sharpziplib_incompatible_version_high_byte(
+        self,
+    ) -> None:
+        archive = self.addons / "Owner.Asset.1.var"
+        make_var(archive, creator="Owner", package="Asset")
+        set_nonstandard_zip_version_high_byte(
+            archive,
+            entry_name="meta.json",
+            high_byte=3,
+        )
+
+        with zipfile.ZipFile(archive) as opened:
+            entry = opened.getinfo("meta.json")
+            self.assertEqual(entry.extract_version, 20)
+            self.assertEqual(entry.reserved, 3)
+
+        output = StringIO()
+        with redirect_stdout(output):
+            exit_code = main(
+                [
+                    "--addon-dir",
+                    str(self.addons),
+                    "--state-dir",
+                    str(self.state),
+                    "doctor",
+                    "--refresh",
+                ]
+            )
+
+        self.assertEqual(exit_code, 1)
+        report = output.getvalue()
+        self.assertIn("Invalid archives/names:       1", report)
+        self.assertIn("invalid Owner.Asset.1.var", report)
+        self.assertIn("VaM/SharpZipLib-incompatible ZIP entry 'meta.json'", report)
+        self.assertIn("version required to extract is 788", report)
 
     def test_duplicates_quarantine_and_restore(self) -> None:
         original = self.addons / "Creator.Asset.1.var"

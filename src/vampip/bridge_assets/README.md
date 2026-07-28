@@ -48,16 +48,20 @@ After all package enables have completed, the manager atomically replaces
 
 `browserAssist` may be:
 
-- `auto`: use the installed BrowserAssist refresh API when available, otherwise
-  fall back to VaM's core package rescan.
-- `off`: use VaM's core package rescan directly.
+- `auto`: use VaM's core package rescan and remind the caller that BrowserAssist
+  may need to be reloaded before it sees newly enabled packages.
+- `off`: use the same core package rescan without that reminder.
+
+Both values remain in protocol 1 for compatibility. VaM's loose-script sandbox
+blocks reflection, and BrowserAssist does not expose a sandbox-safe rescan
+action to other plugins.
 
 The bridge writes `status.json`:
 
 ```json
 {
   "protocol": 1,
-  "bridgeVersion": "0.1.1",
+  "bridgeVersion": "0.1.2",
   "instanceId": "id-created-when-the-plugin-started",
   "requestId": "a-new-unique-id",
   "lastCompletedRequestId": "a-new-unique-id",
@@ -66,8 +70,8 @@ The bridge writes `status.json`:
   "updatedAtUtc": "2026-07-28T12:00:02.0000000Z",
   "startedAtUtc": "2026-07-28T12:00:01.0000000Z",
   "finishedAtUtc": "2026-07-28T12:00:02.0000000Z",
-  "backend": "browserassist",
-  "message": "VaM and BrowserAssist package data were refreshed."
+  "backend": "vam",
+  "message": "Core VaM package rescan completed. Reload BrowserAssist if it must see newly enabled packages."
 }
 ```
 
@@ -94,7 +98,8 @@ interrupted or failed request is retried once after restart.
 - Keep the mailbox directory private to the current Linux user and expose any
   manager web interface only on `127.0.0.1`.
 
-BrowserAssist integration is best-effort and currently targets its public
-`JayJayWon.VARPackageManifest.RescanPackages()` method. VaM's core
-`SuperController.singleton.RescanPackages()` remains the fallback. The bridge
-never invokes BrowserAssist's expensive full-resource rescan.
+The bridge calls only VaM's public
+`SuperController.singleton.RescanPackages()` API. It does not access
+BrowserAssist internals: those require reflection, which VaM prohibits for
+loose plugins. Reload BrowserAssist, or restart VaM, when BrowserAssist must
+rebuild its own package/resource manifest.

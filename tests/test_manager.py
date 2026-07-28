@@ -552,9 +552,12 @@ class ManagerServiceTests(unittest.TestCase):
         self.assertEqual(len(installed), 2)
         self.assertTrue(all(path.is_file() for path in installed))
         source = installed[0].read_text(encoding="utf-8")
-        self.assertIn('BridgeVersion = "0.1.1"', source)
+        self.assertIn('BridgeVersion = "0.1.2"', source)
         self.assertNotRegex(source, r"(?m)^\s*Type(?:\s|\.)")
         self.assertNotIn("new Type[]", source)
+        self.assertNotIn("System.Reflection", source)
+        self.assertNotIn("BindingFlags", source)
+        self.assertNotIn("TargetInvocationException", source)
         self.assertEqual(install_bridge(self.vam_root), installed)
         installed[0].write_text("different", encoding="utf-8")
         with self.assertRaises(FileExistsError):

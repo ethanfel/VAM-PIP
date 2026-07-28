@@ -1,5 +1,4 @@
 using System;
-using System.Reflection;
 using MVR.FileManagementSecure;
 using SimpleJSON;
 using UnityEngine;
@@ -15,7 +14,7 @@ namespace VAMPip
     public class VAMPipBridge : MVRScript
     {
         private const int ProtocolVersion = 1;
-        private const string BridgeVersion = "0.1.1";
+        private const string BridgeVersion = "0.1.2";
 
         private const string PluginDataRoot = "Saves\\PluginData";
         private const string DataRoot = "Saves\\PluginData\\VAMPip";
@@ -347,43 +346,22 @@ namespace VAMPip
 
             try
             {
-                bool browserAssistCompleted = false;
-                string browserAssistResult = "";
+                // VaM's loose-script security sandbox prohibits reflection.
+                // BrowserAssist does not expose its package
+                // refresh through a sandbox-safe public action, so the bridge
+                // uses VaM's supported core rescan API directly.
+                SuperController.singleton.RescanPackages();
+                backend = "vam";
 
-                if (request.BrowserAssistMode == "auto")
+                if (request.BrowserAssistMode == "off")
                 {
-                    browserAssistCompleted =
-                        TryRescanWithBrowserAssist(out browserAssistResult);
-                }
-
-                if (browserAssistCompleted)
-                {
-                    backend = "browserassist";
-                    message = browserAssistResult;
+                    message = "Core VaM package rescan completed.";
                 }
                 else
                 {
-                    // BrowserAssist is optional. Its method calls the core VaM
-                    // rescan itself, so this fallback runs only when that path
-                    // was unavailable or reported failure.
-                    SuperController.singleton.RescanPackages();
-                    backend = "vam";
-
-                    if (request.BrowserAssistMode == "off")
-                    {
-                        message = "Core VaM package rescan completed.";
-                    }
-                    else if (browserAssistResult.Length == 0)
-                    {
-                        message =
-                            "Core VaM package rescan completed; BrowserAssist was unavailable.";
-                    }
-                    else
-                    {
-                        message =
-                            "Core VaM package rescan completed after BrowserAssist fallback: " +
-                            browserAssistResult;
-                    }
+                    message =
+                        "Core VaM package rescan completed. " +
+                        "Reload BrowserAssist if it must see newly enabled packages.";
                 }
 
                 _lastHandledRequestId = request.RequestId;
@@ -419,175 +397,6 @@ namespace VAMPip
             {
                 _nextAllowedRescanAt =
                     Time.realtimeSinceStartup + MinimumRescanIntervalSeconds;
-            }
-        }
-
-        private bool TryRescanWithBrowserAssist(out string result)
-        {
-            result = "";
-
-            try
-            {
-                MVRScript browserAssist = FindBrowserAssist();
-                if (browserAssist == null)
-                {
-                    result = "BrowserAssist is not loaded and enabled.";
-                    return false;
-                }
-
-                Assembly assembly = browserAssist.GetType().Assembly;
-                // MVRScript inherits JSONStorable.Type, which shadows
-                // System.Type in VaM's legacy compiler. Keep reflection types
-                // fully qualified throughout this class.
-                System.Type manifestType =
-                    assembly.GetType("JayJayWon.VARPackageManifest", false);
-                if (manifestType == null)
-                {
-                    result = "Compatible BrowserAssist manifest API was not found.";
-                    return false;
-                }
-
-                MethodInfo rescanMethod = manifestType.GetMethod(
-                    "RescanPackages",
-                    BindingFlags.Public | BindingFlags.Static,
-                    null,
-                    System.Type.EmptyTypes,
-                    null);
-                if (rescanMethod == null)
-                {
-                    result = "Compatible BrowserAssist rescan method was not found.";
-                    return false;
-                }
-
-                // This BrowserAssist method performs the core VaM rescan and
-                // then updates BrowserAssist's own package/resource manifests.
-                rescanMethod.Invoke(null, null);
-
-                string uiWarning;
-                if (TryRefreshVisibleBrowserAssistUI(assembly, out uiWarning))
-                {
-                    result = "VaM and BrowserAssist package data were refreshed.";
-                }
-                else if (uiWarning.Length == 0)
-                {
-                    result =
-                        "VaM and BrowserAssist package data were refreshed; " +
-                        "the BrowserAssist UI was closed.";
-                }
-                else
-                {
-                    result =
-                        "VaM and BrowserAssist package data were refreshed; " +
-                        "UI refresh warning: " + uiWarning;
-                }
-
-                return true;
-            }
-            catch (Exception exception)
-            {
-                // A BrowserAssist failure is best-effort. The caller performs
-                // the reliable core rescan. This can rarely duplicate core work
-                // if BrowserAssist threw after entering its own rescan method.
-                result = DescribeException(exception);
-                SuperController.LogError(
-                    "[VAM-PIP Bridge] BrowserAssist refresh failed; " +
-                    "using core fallback. " + result);
-                return false;
-            }
-        }
-
-        private MVRScript FindBrowserAssist()
-        {
-            if (manager == null || manager.gameObject == null)
-            {
-                return null;
-            }
-
-            Transform pluginsRoot = manager.gameObject.transform.Find("Plugins");
-            if (pluginsRoot == null)
-            {
-                return null;
-            }
-
-            foreach (Transform child in pluginsRoot)
-            {
-                MVRScript script = child.gameObject.GetComponent<MVRScript>();
-                if (script != null &&
-                    script.enabled &&
-                    script.name.EndsWith(
-                        "_JayJayWon.BrowserAssist",
-                        StringComparison.Ordinal))
-                {
-                    return script;
-                }
-            }
-
-            return null;
-        }
-
-        private static bool TryRefreshVisibleBrowserAssistUI(
-            Assembly assembly,
-            out string warning)
-        {
-            warning = "";
-
-            try
-            {
-                System.Type browserAssistType =
-                    assembly.GetType("JayJayWon.BrowserAssist", false);
-                if (browserAssistType == null)
-                {
-                    warning = "BrowserAssist type was not found.";
-                    return false;
-                }
-
-                PropertyInfo mainBrowserProperty = browserAssistType.GetProperty(
-                    "mainBrowserUI",
-                    BindingFlags.Public | BindingFlags.Static);
-                if (mainBrowserProperty == null)
-                {
-                    warning = "BrowserAssist main UI property was not found.";
-                    return false;
-                }
-
-                object mainBrowser = mainBrowserProperty.GetValue(null, null);
-                if (mainBrowser == null)
-                {
-                    return false;
-                }
-
-                System.Type mainBrowserType = mainBrowser.GetType();
-                PropertyInfo isActiveProperty = mainBrowserType.GetProperty(
-                    "isActive",
-                    BindingFlags.Public | BindingFlags.Instance);
-                if (isActiveProperty != null)
-                {
-                    object isActiveValue = isActiveProperty.GetValue(mainBrowser, null);
-                    if (isActiveValue is bool && !(bool)isActiveValue)
-                    {
-                        return false;
-                    }
-                }
-
-                MethodInfo refreshMethod = mainBrowserType.GetMethod(
-                    "RefreshFilterResults",
-                    BindingFlags.Public | BindingFlags.Instance,
-                    null,
-                    new System.Type[] { typeof(bool) },
-                    null);
-                if (refreshMethod == null)
-                {
-                    warning = "BrowserAssist UI refresh method was not found.";
-                    return false;
-                }
-
-                refreshMethod.Invoke(mainBrowser, new object[] { true });
-                return true;
-            }
-            catch (Exception exception)
-            {
-                warning = DescribeException(exception);
-                return false;
             }
         }
 
@@ -645,12 +454,6 @@ namespace VAMPip
             if (exception == null)
             {
                 return "Unknown error.";
-            }
-
-            while (exception is TargetInvocationException &&
-                   exception.InnerException != null)
-            {
-                exception = exception.InnerException;
             }
 
             string message =

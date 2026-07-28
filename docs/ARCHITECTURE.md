@@ -555,13 +555,13 @@ The session plugin:
 - ignores the last handled request ID;
 - defers while `SuperController.singleton.isLoading`;
 - rate-limits rescans to one every five seconds;
-- tries BrowserAssist's public
-  `JayJayWon.VARPackageManifest.RescanPackages()` via reflection;
-- falls back to `SuperController.singleton.RescanPackages()`;
+- calls `SuperController.singleton.RescanPackages()` directly;
 - never enables, disables, deletes, or launches anything.
 
-If BrowserAssist throws after it has already entered its own rescan, the core
-fallback can rarely perform the core scan a second time.
+Protocol 1 retains the `browserAssist` field for compatibility, but the bridge
+does not call BrowserAssist internals. VaM prohibits reflection in loose
+plugins, and BrowserAssist exposes no sandbox-safe package-rescan action.
+BrowserAssist must be reloaded when it needs to rebuild its own manifest.
 
 ### Status
 
@@ -575,8 +575,7 @@ message. Valid states are:
 - `ok`;
 - `error`.
 
-`backend` is empty while pending, `browserassist` after a successful
-BrowserAssist path, or `vam` after the core path.
+`backend` is empty while pending and `vam` after the core rescan.
 
 Status writes are not atomic. The Linux reader therefore treats a missing,
 malformed-JSON, non-object, or wrong-protocol status as temporarily

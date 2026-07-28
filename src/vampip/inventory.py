@@ -14,6 +14,9 @@ import zipfile
 from vampip.models import DISABLED_SUFFIX, parse_dependency_ref, parse_var_filename
 
 
+ARCHIVE_INSPECTION_VERSION = 1
+
+
 @dataclass(frozen=True)
 class ScanResult:
     found: int
@@ -49,6 +52,19 @@ def _flatten_dependencies(value: object) -> list[str]:
     return list(found)
 
 
+def _vam_zip_version_error(archive: zipfile.ZipFile) -> str | None:
+    for entry in archive.infolist():
+        if not entry.reserved:
+            continue
+        version_required = entry.extract_version | (entry.reserved << 8)
+        return (
+            f"VaM/SharpZipLib-incompatible ZIP entry {entry.filename!r}: "
+            f"version required to extract is {version_required} "
+            f"(nonzero high byte {entry.reserved})"
+        )
+    return None
+
+
 def inspect_archive(path: Path) -> dict[str, object]:
     parsed = parse_var_filename(path)
     result: dict[str, object] = {
@@ -67,6 +83,9 @@ def inspect_archive(path: Path) -> dict[str, object]:
 
     try:
         with zipfile.ZipFile(path) as archive:
+            if version_error := _vam_zip_version_error(archive):
+                result["error"] = version_error
+                return result
             metadata_names = [
                 name for name in archive.namelist() if name.casefold() == "meta.json"
             ]
@@ -116,6 +135,16 @@ def scan(root: Path, connection: sqlite3.Connection) -> ScanResult:
     root = root.resolve()
     if not root.is_dir():
         raise FileNotFoundError(f"AddonPackages directory does not exist: {root}")
+
+    inspection_key = f"archive_inspection_version:{root}"
+    stored_inspection_version = connection.execute(
+        "SELECT value FROM schema_meta WHERE key = ?",
+        (inspection_key,),
+    ).fetchone()
+    force_inspection = (
+        stored_inspection_version is None
+        or stored_inspection_version["value"] != str(ARCHIVE_INSPECTION_VERSION)
+    )
 
     started = time.monotonic()
     generation = uuid.uuid4().hex
@@ -175,11 +204,19 @@ def scan(root: Path, connection: sqlite3.Connection) -> ScanResult:
         path_text = str(path.resolve())
         cached = existing.get(path_text)
         enabled = 0 if path.name.casefold().endswith(DISABLED_SUFFIX) else 1
+        cached_unchanged = (
+            cached is not None
+            and cached["size"] == stat.st_size
+            and cached["mtime_ns"] == stat.st_mtime_ns
+            and cached["device"] == stat.st_dev
+            and cached["inode"] == stat.st_ino
+        )
 
         if cached is None:
             moved = existing_by_inode.get((stat.st_dev, stat.st_ino))
             if (
-                moved is not None
+                not force_inspection
+                and moved is not None
                 and moved["size"] == stat.st_size
                 and moved["mtime_ns"] == stat.st_mtime_ns
             ):
@@ -219,13 +256,7 @@ def scan(root: Path, connection: sqlite3.Connection) -> ScanResult:
                 unchanged += 1
                 continue
 
-        if (
-            cached is not None
-            and cached["size"] == stat.st_size
-            and cached["mtime_ns"] == stat.st_mtime_ns
-            and cached["device"] == stat.st_dev
-            and cached["inode"] == stat.st_ino
-        ):
+        if not force_inspection and cached_unchanged:
             connection.execute(
                 """
                 UPDATE package_files
@@ -259,7 +290,7 @@ def scan(root: Path, connection: sqlite3.Connection) -> ScanResult:
                 "mtime_ns": stat.st_mtime_ns,
                 "device": stat.st_dev,
                 "inode": stat.st_ino,
-                "sha256": None,
+                "sha256": cached["sha256"] if cached_unchanged else None,
                 "enabled": enabled,
                 "scan_generation": generation,
                 **details,
@@ -271,6 +302,13 @@ def scan(root: Path, connection: sqlite3.Connection) -> ScanResult:
     cursor = connection.execute(
         "DELETE FROM package_files WHERE root = ? AND scan_generation != ?",
         (str(root), generation),
+    )
+    connection.execute(
+        """
+        INSERT INTO schema_meta(key, value) VALUES (?, ?)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value
+        """,
+        (inspection_key, str(ARCHIVE_INSPECTION_VERSION)),
     )
     invalid_total = connection.execute(
         "SELECT COUNT(*) FROM package_files WHERE root = ? AND valid = 0",

@@ -61,7 +61,10 @@ An archive recorded with no trustworthy package identity is excluded from
 managed enable/disable planning. It remains visible or hidden exactly as found.
 Consequently, VaM's active archive count can be larger than the desired package
 count. Encrypted ZIP members and some unsupported compression errors can abort
-inventory scanning instead of being recorded as an invalid row.
+inventory scanning instead of being recorded as an invalid row. The known case
+where a ZIP entry has a nonzero version-required high byte is detected during
+inspection and recorded as invalid because VaM's old SharpZipLib cannot extract
+it.
 
 ### 4. Desired packages and session defaults must resolve completely
 
@@ -435,8 +438,9 @@ Before deactivation or rollback:
 - No distributed or multi-host coordination.
 - No atomic transaction spanning SQLite, every archive rename, and bridge
   status.
-- No guaranteed live BrowserAssist compatibility beyond the reflected public
-  method used by the installed integration; core VaM rescan is the fallback.
+- No live refresh of BrowserAssist's private package/resource manifest. VaM's
+  loose-plugin sandbox prohibits reflection and BrowserAssist exposes no public
+  rescan action, so reload BrowserAssist or restart VaM when needed.
 - No automatic resolution of a crash-window mismatch between disk and journal.
 - No guarantee that heuristic scene reference scanning finds every runtime
   dependency.
