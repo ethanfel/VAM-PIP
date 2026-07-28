@@ -30,10 +30,16 @@ class WorkspaceWebUITests(unittest.TestCase):
         self.assertIn('id="atom-context"', self.html)
         self.assertIn('id="atom-target"', self.html)
         self.assertIn('id="select-atom-button"', self.html)
+        self.assertIn('id="atom-target-mode"', self.html)
+        self.assertIn('id="atom-mode-existing"', self.html)
+        self.assertIn('id="atom-mode-create"', self.html)
+        self.assertIn('id="atom-new-uid"', self.html)
+        self.assertIn('id="add-atom-button"', self.html)
         self.assertIn('category.targetKind !== "person"', self.javascript)
         self.assertIn('api("/api/vam/person/add"', self.javascript)
         self.assertIn('api("/api/vam/person/select"', self.javascript)
         self.assertIn('api("/api/vam/atom/select"', self.javascript)
+        self.assertIn('api("/api/vam/atom/add"', self.javascript)
         self.assertNotIn("VaM will add and select", self.javascript)
 
     def test_workspace_uses_canonical_browse_and_apply_contracts(self) -> None:
@@ -45,16 +51,52 @@ class WorkspaceWebUITests(unittest.TestCase):
         self.assertIn("requireBridgeQueue(result", self.javascript)
         self.assertIn("result.bridge_busy !== true", self.javascript)
         self.assertIn("Required packages remain enabled", self.javascript)
+        self.assertIn("snapshot.bridge_busy === true", self.javascript)
         self.assertNotIn('params.set("type", "Preset Hair")', self.javascript)
         self.assertNotIn('api("/api/vam/person/apply"', self.javascript)
 
     def test_scene_replace_requires_explicit_confirmation(self) -> None:
         self.assertIn("Replace current scene", self.javascript)
-        self.assertIn("body.confirm_replace = true", self.javascript)
+        self.assertIn("confirm_replace: confirmedReplace", self.javascript)
         self.assertIn("confirmSceneLoad(item, merge)", self.javascript)
         self.assertIn("merge,", self.javascript)
-        self.assertIn("confirmRiskyAssetLoad(item, category)", self.javascript)
+        self.assertIn(
+            "confirmRiskyAssetLoad(item, category, merge)",
+            self.javascript,
+        )
         self.assertIn("confirm_critical: confirmedRisk", self.javascript)
+
+    def test_atom_and_subscene_apply_use_catalog_owned_actions(self) -> None:
+        self.assertIn('"apply-atom-preset"', self.javascript)
+        self.assertIn('"load-subscene"', self.javascript)
+        self.assertIn("create_if_missing: createIfMissing", self.javascript)
+        self.assertIn("entry.create_supported", self.javascript)
+        self.assertIn("entry.create_capability", self.javascript)
+        self.assertIn("categorySupportsTargetCreation", self.javascript)
+        self.assertIn("categoryCreateCapability", self.javascript)
+        self.assertIn("category_id: category.id", self.javascript)
+        self.assertIn("target_uid: targetUid", self.javascript)
+        self.assertIn('category.createCapability || "atom-add"', self.javascript)
+        self.assertIn(
+            "elements.addAtomButton.hidden = !categoryUsesManagedAtomTarget(category)",
+            self.javascript,
+        )
+        self.assertNotIn("body.atom_type", self.javascript)
+        self.assertNotIn("body.resource_path", self.javascript)
+        self.assertNotIn("body.operation", self.javascript)
+
+    def test_new_atom_target_cannot_request_merge(self) -> None:
+        self.assertIn("const creatingManagedTarget =", self.javascript)
+        self.assertIn(
+            "category.mergeSupported && !creatingManagedTarget",
+            self.javascript,
+        )
+        self.assertIn("syncWorkspaceApplyModeControls(category)", self.javascript)
+        self.assertIn("BrowserAssist cannot merge", self.javascript)
+        self.assertIn(
+            '!createIfMissing && app.workspaceApplyMode === "merge"',
+            self.javascript,
+        )
 
     def test_fallback_covers_broad_asset_families(self) -> None:
         for resource_type in (
@@ -86,10 +128,15 @@ class WorkspaceWebUITests(unittest.TestCase):
             ".asset-category-button.is-active",
             ".asset-category-panel",
             ".asset-apply-mode",
+            ".target-mode",
             ".person-context",
         ):
             with self.subTest(selector=selector):
                 self.assertIn(selector, self.styles)
+
+    def test_static_assets_use_the_current_cache_version(self) -> None:
+        self.assertIn("/styles.css?v=0.5.0", self.html)
+        self.assertIn("/app.js?v=0.5.0", self.html)
 
 
 if __name__ == "__main__":

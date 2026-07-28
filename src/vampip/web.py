@@ -459,6 +459,9 @@ class ManagerRequestHandler(BaseHTTPRequestHandler):
                 merge = document.get("merge", False)
                 if not isinstance(merge, bool):
                     raise ValueError("merge must be a boolean")
+                create_if_missing = document.get("create_if_missing", False)
+                if not isinstance(create_if_missing, bool):
+                    raise ValueError("create_if_missing must be a boolean")
                 confirm_replace = document.get("confirm_replace", False)
                 if not isinstance(confirm_replace, bool):
                     raise ValueError("confirm_replace must be a boolean")
@@ -472,6 +475,7 @@ class ManagerRequestHandler(BaseHTTPRequestHandler):
                         target_uid=target_uid,
                         days=float(days),
                         merge=merge,
+                        create_if_missing=create_if_missing,
                         confirm_replace=confirm_replace,
                         confirm_critical=confirm_critical,
                     ),
@@ -519,6 +523,18 @@ class ManagerRequestHandler(BaseHTTPRequestHandler):
                 if not isinstance(target_uid, str):
                     raise ValueError("target_uid must be a string")
                 self._json(HTTPStatus.OK, service.select_person(target_uid))
+                return
+            if method == "POST" and parsed.path == "/api/vam/atom/add":
+                category_id = document.get("category_id")
+                target_uid = document.get("target_uid")
+                if not isinstance(category_id, str):
+                    raise ValueError("category_id must be a string")
+                if not isinstance(target_uid, str):
+                    raise ValueError("target_uid must be a string")
+                self._json(
+                    HTTPStatus.OK,
+                    service.add_atom(category_id, target_uid),
+                )
                 return
             if method == "POST" and parsed.path == "/api/vam/atom/select":
                 target_uid = document.get("target_uid")

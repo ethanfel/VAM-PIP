@@ -979,7 +979,8 @@ button svg,
   line-height: 1.5;
 }
 
-.asset-apply-mode {
+.asset-apply-mode,
+.target-mode {
   display: flex;
   gap: 4px;
   padding: 4px;
@@ -988,7 +989,8 @@ button svg,
   border-radius: 10px;
 }
 
-.asset-apply-mode legend {
+.asset-apply-mode legend,
+.target-mode legend {
   position: absolute;
   width: 1px;
   height: 1px;
@@ -996,18 +998,21 @@ button svg,
   clip: rect(0 0 0 0);
 }
 
-.asset-apply-mode label {
+.asset-apply-mode label,
+.target-mode label {
   position: relative;
   cursor: pointer;
 }
 
-.asset-apply-mode input {
+.asset-apply-mode input,
+.target-mode input[type="radio"] {
   position: absolute;
   opacity: 0;
   pointer-events: none;
 }
 
-.asset-apply-mode span {
+.asset-apply-mode span,
+.target-mode span {
   display: inline-flex;
   min-height: 31px;
   align-items: center;
@@ -1018,17 +1023,20 @@ button svg,
   font-weight: 750;
 }
 
-.asset-apply-mode input:checked + span {
+.asset-apply-mode input:checked + span,
+.target-mode input:checked + span {
   color: var(--accent-ink);
   background: var(--accent);
 }
 
-.asset-apply-mode input:focus-visible + span {
+.asset-apply-mode input:focus-visible + span,
+.target-mode input:focus-visible + span {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
 }
 
-.asset-apply-mode input:disabled + span {
+.asset-apply-mode input:disabled + span,
+.target-mode input:disabled + span {
   cursor: not-allowed;
   opacity: 0.45;
 }
@@ -1067,7 +1075,8 @@ button svg,
   text-transform: uppercase;
 }
 
-.person-target-field select {
+.person-target-field select,
+.person-target-field input {
   width: 100%;
   height: 42px;
   padding: 0 34px 0 12px;
@@ -1082,7 +1091,8 @@ button svg,
   text-transform: none;
 }
 
-.person-target-field select:focus {
+.person-target-field select:focus,
+.person-target-field input:focus {
   border-color: rgba(134, 230, 176, 0.52);
   box-shadow: 0 0 0 3px rgba(134, 230, 176, 0.07);
 }

@@ -14,6 +14,7 @@ PROTOCOL_VERSION = 2
 BRIDGE_RELATIVE_DIR = Path("Saves") / "PluginData" / "VAMPip" / "Bridge"
 MAX_RESOURCE_REF_LENGTH = 1000
 SCENE_RESOURCE_PREFIX = "Saves/scene/"
+SUBSCENE_RESOURCE_PREFIX = "Custom/SubScene/"
 PERSON_PRESET_PREFIXES = {
     "appearance": "Custom/Atom/Person/Appearance/",
     "animation": "Custom/Atom/Person/AnimationPresets/",
@@ -27,6 +28,185 @@ PERSON_PRESET_PREFIXES = {
     "pose": "Custom/Atom/Person/Pose/",
     "skin": "Custom/Atom/Person/Skin/",
 }
+# VaM 1.22 native non-Person atom types, audited against BrowserAssist 39's
+# static native-type registry. Packaged/custom atom types are deliberately not
+# accepted: creation and generic preset loading must not become an arbitrary
+# AddAtomByType surface.
+ATOM_TYPE_ALLOWLIST = frozenset(
+    {
+        "AnimationPattern",
+        "AnimationStep",
+        "AptBook01",
+        "AptBook02",
+        "AptBookShelf",
+        "AptChair",
+        "AptCoffeeTable",
+        "AptJacuzzi",
+        "AptJacuzziProp",
+        "AptJacuzziRailing",
+        "AptLamp",
+        "AptOutdoorLight",
+        "AptPatioChair",
+        "AptPicture01",
+        "AptPicture02",
+        "AptPlant",
+        "AptPlanter",
+        "AptRug",
+        "AptSmartTV",
+        "AptSmartWebTV",
+        "AptSofa",
+        "AptSpeaker",
+        "AptTVStand",
+        "AudioSource",
+        "Button",
+        "Capsule",
+        "CityScape",
+        "CityScapeNight",
+        "ClothGrabSphere",
+        "CollisionTrigger",
+        "Crypt",
+        "Cube",
+        "CustomUnityAsset",
+        "CyberpunkApartment",
+        "CyberpunkApartmentDecor",
+        "CyberpunkBed",
+        "CyberpunkBedPillow01",
+        "CyberpunkBedPillow02",
+        "CyberpunkBedPillow03",
+        "CyberpunkChair",
+        "CyberpunkCoffeeTable",
+        "CyberpunkComputer",
+        "CyberpunkComputerChair",
+        "CyberpunkControlScreen",
+        "CyberpunkDresser01",
+        "CyberpunkDresser02",
+        "CyberpunkKeyboard",
+        "CyberpunkLaptop",
+        "CyberpunkLight",
+        "CyberpunkMouse",
+        "CyberpunkMousepad",
+        "CyberpunkRemote",
+        "CyberpunkSofa",
+        "CyberpunkSofaCushion01",
+        "CyberpunkSofaCushion02",
+        "CyberpunkTable",
+        "CyberpunkTablet",
+        "CyberpunkWallLight01",
+        "CyberpunkWallLight02",
+        "CycleForce",
+        "DecoDowntimeChair",
+        "DecoDowntimeCoffeeTable",
+        "DecoDowntimeSideTable",
+        "DecoDowntimeStand",
+        "Dildo",
+        "DreamHomeTV",
+        "DreamHomeWebTV",
+        "DreamStreetBedroom",
+        "DSBR_2TierTable",
+        "DSBR_Bed",
+        "DSBR_BedPillow",
+        "DSBR_Bench",
+        "DSBR_BuiltInShelves",
+        "DSBR_Chair",
+        "DSBR_DecorativePillow",
+        "DSBR_Ottoman",
+        "DSBR_Shelf",
+        "DSBR_ThrowPillow",
+        "Empty",
+        "Glass",
+        "Glass-Stained",
+        "GrabPoint",
+        "ImagePanel",
+        "ImagePanelEmissive",
+        "ImagePanelTransparent",
+        "ImagePanelTransparentEmissive",
+        "InvisibleLight",
+        "InvisiblePanel",
+        "ISCapsule",
+        "ISCone",
+        "ISCube",
+        "ISCylinder",
+        "IslBench",
+        "IslFencePost",
+        "IslFenceSection",
+        "IslOverlook",
+        "IslPatioChair",
+        "IslPlantWFlowers",
+        "IslPotA",
+        "IslPotB",
+        "IslPotSmall",
+        "IslRailingGlass",
+        "IslStool",
+        "IslTerrain",
+        "IslTopiary",
+        "IslTree",
+        "IslTreePlanter",
+        "IslWallPost",
+        "IslWallSection",
+        "ISSphere",
+        "ISTube",
+        "LookAtTrigger",
+        "LoungeChair",
+        "ModernRoomBed",
+        "ModernRoomLargeLamp",
+        "OldStyleBed",
+        "OldStyleChair",
+        "OldStylePillow01",
+        "OldStylePillow02",
+        "OldStyleRoom",
+        "OldStyleSideTable",
+        "OldStyleVanityStool",
+        "Paddle",
+        "PlayerNavigationPanel",
+        "ReflectiveSlate",
+        "ReflectiveWoodPanel",
+        "RhythmAudioSource",
+        "RhythmForce",
+        "SimpleSign",
+        "SimSheet",
+        "SkullQueenSword",
+        "Slate",
+        "SpaceBox",
+        "Sphere",
+        "SubScene",
+        "SyncForce",
+        "TechnoDancePole",
+        "TechnoGirder",
+        "TechnoLight",
+        "TechnoLightBar",
+        "TechnoLightBar+Light",
+        "TechnoNeonCircle",
+        "TechnoNeonCircle+Light",
+        "TechnoNeonHeart",
+        "TechnoNeonHeart+Light",
+        "TechnoNeonSquare",
+        "TechnoNeonSquare+Light",
+        "TechnoNeonTriangle",
+        "TechnoNeonTriangle+Light",
+        "TechnoRingLight",
+        "TechnoRingLight+Light",
+        "TechnoRoom",
+        "TechnoRoundCage",
+        "TechnoRoundPlatform",
+        "TechnoThrone",
+        "Torch",
+        "ToyAH",
+        "ToyBP",
+        "UIButton",
+        "UISlider",
+        "UIText",
+        "UIToggle",
+        "VaMLogo",
+        "VaMSign",
+        "VariableTrigger",
+        "Wall",
+        "WebBrowser",
+        "WebPanel",
+        "WebPanelEmissive",
+        "WindowCamera",
+        "WoodPanel",
+    }
+)
 
 
 def bridge_directory(vam_root: Path) -> Path:
@@ -74,6 +254,14 @@ def _validate_target_uid(target_uid: str) -> str:
     if any(ord(character) < 32 or ord(character) == 127 for character in target_uid):
         raise ValueError("target_uid must not contain control characters")
     return target_uid
+
+
+def _validate_atom_type(atom_type: str) -> str:
+    if not isinstance(atom_type, str):
+        raise TypeError("atom_type must be a string")
+    if atom_type not in ATOM_TYPE_ALLOWLIST:
+        raise ValueError("atom_type is not an allowlisted VaM 1.22 native atom type")
+    return atom_type
 
 
 def _validate_person_preset_resource_ref(
@@ -206,6 +394,92 @@ def request_select_atom(vam_root: Path, target_uid: str) -> str:
         {
             "command": "selectAtom",
             "targetUid": _validate_target_uid(target_uid),
+        },
+    )
+
+
+def request_add_atom(vam_root: Path, atom_type: str, target_uid: str) -> str:
+    return _write_request(
+        vam_root,
+        {
+            "command": "addAtom",
+            "atomType": _validate_atom_type(atom_type),
+            "targetUid": _validate_target_uid(target_uid),
+        },
+    )
+
+
+def request_atom_preset(
+    vam_root: Path,
+    target_uid: str,
+    atom_type: str,
+    resource_ref: str,
+    *,
+    rescan: bool = True,
+    merge: bool = False,
+    create_if_missing: bool = False,
+) -> str:
+    atom_type = _validate_atom_type(atom_type)
+    target_uid = _validate_target_uid(target_uid)
+    if not isinstance(resource_ref, str):
+        raise TypeError("resource_ref must be a string")
+    _validate_allowlisted_resource_ref(
+        resource_ref,
+        required_prefix=f"Custom/Atom/{atom_type}/",
+        extension=".vap",
+        require_preset_basename=True,
+    )
+    if not isinstance(rescan, bool):
+        raise TypeError("rescan must be a bool")
+    if not isinstance(merge, bool):
+        raise TypeError("merge must be a bool")
+    if not isinstance(create_if_missing, bool):
+        raise TypeError("create_if_missing must be a bool")
+    if merge and create_if_missing:
+        raise ValueError("merge and create_if_missing cannot both be true")
+    return _write_request(
+        vam_root,
+        {
+            "command": "applyAtomPreset",
+            "targetUid": target_uid,
+            "atomType": atom_type,
+            "resourceRef": resource_ref,
+            "rescan": rescan,
+            "merge": merge,
+            "createIfMissing": create_if_missing,
+        },
+    )
+
+
+def request_subscene_load(
+    vam_root: Path,
+    target_uid: str,
+    resource_ref: str,
+    *,
+    rescan: bool = True,
+    create_if_missing: bool = False,
+) -> str:
+    target_uid = _validate_target_uid(target_uid)
+    if not isinstance(resource_ref, str):
+        raise TypeError("resource_ref must be a string")
+    _validate_allowlisted_resource_ref(
+        resource_ref,
+        required_prefix=SUBSCENE_RESOURCE_PREFIX,
+        extension=".json",
+        require_preset_basename=False,
+    )
+    if not isinstance(rescan, bool):
+        raise TypeError("rescan must be a bool")
+    if not isinstance(create_if_missing, bool):
+        raise TypeError("create_if_missing must be a bool")
+    return _write_request(
+        vam_root,
+        {
+            "command": "loadSubscene",
+            "targetUid": target_uid,
+            "resourceRef": resource_ref,
+            "rescan": rescan,
+            "createIfMissing": create_if_missing,
         },
     )
 

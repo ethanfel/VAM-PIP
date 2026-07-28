@@ -3,8 +3,9 @@
 This is a deliberately small VaM **session plugin**. The external VAM-PIP
 manager enables packages and resolves dependencies. The bridge asks VaM to
 rescan packages, publishes bounded atom and Person rosters, and can load an
-allowlisted scene, apply one allowlisted Person preset, add one Person, or
-select one existing atom on VaM's Unity main thread.
+allowlisted scene or SubScene, apply one allowlisted Person or generic atom
+preset, add one allowlisted native atom, or select one existing atom on VaM's
+Unity main thread.
 
 ## Install
 
@@ -117,13 +118,84 @@ The more general alias selects any existing roster atom by exact UID:
 
 It does not expose arbitrary storables or actions.
 
+Generic non-Person atom creation uses an exact, case-sensitive static allowlist
+of atom types verified against VaM 1.22. Packaged/custom atom types remain
+browse-only. A request is:
+
+```json
+{
+  "protocol": 2,
+  "requestId": "unique-4",
+  "command": "addAtom",
+  "atomType": "WindowCamera",
+  "targetUid": "External Camera"
+}
+```
+
+`addAtom` is idempotent. An existing atom succeeds only when both its UID and
+type match; a same-UID atom of another type is rejected.
+
+A generic atom preset uses that same type allowlist:
+
+```json
+{
+  "protocol": 2,
+  "requestId": "unique-5",
+  "command": "applyAtomPreset",
+  "targetUid": "External Camera",
+  "atomType": "WindowCamera",
+  "resourceRef": "creator.cameras.1:/Custom/Atom/WindowCamera/Preset_Framing.vap",
+  "rescan": true,
+  "merge": false,
+  "createIfMissing": true
+}
+```
+
+The reference must be below `Custom/Atom/<atomType>/`, its basename must start
+with `Preset_`, and it must end in `.vap`. The bridge verifies the target's
+exact type and uses only the fixed `Preset` storable, `presetBrowsePath`, and
+`LoadPreset`/`MergeLoadPreset` actions. The modes are strict and mutually
+exclusive: with `createIfMissing: false`, the correctly typed target must
+already exist; with `createIfMissing: true`, the UID must be absent when the
+request executes. An existing UID—even with the requested type—makes create
+mode fail without applying the preset. Successful creation and application
+remain one single-flight request. `merge` and `createIfMissing` cannot both be
+true.
+
+A SubScene load is similarly bounded:
+
+```json
+{
+  "protocol": 2,
+  "requestId": "unique-6",
+  "command": "loadSubscene",
+  "targetUid": "Apartment",
+  "resourceRef": "creator.rooms.2:/Custom/SubScene/Apartment.json",
+  "rescan": true,
+  "createIfMissing": true
+}
+```
+
+Only local or packaged `.json` members below `Custom/SubScene/` are accepted.
+The target must be a `SubScene` atom. The bridge uses only its fixed `SubScene`
+storable and `browsePath`. With `createIfMissing: false`, the SubScene atom must
+already exist; with `createIfMissing: true`, its UID must be absent at
+execution. An existing UID fails create mode without loading. Atom creation,
+generic preset loading, and SubScene loading have a 120-second upper bound.
+
+Generic atom presets and SubScenes can themselves contain plugin
+configurations or plugin-bearing atoms. The bridge validates the resource
+identity and fixed VaM API surface, but cannot inspect or approve the semantic
+contents of a `.vap` or SubScene `.json`. The external client must surface that
+risk and require confirmation for unknown or untrusted content.
+
 Scene loading accepts only a local or packaged member below `Saves/scene/`
 whose name ends in `.json`:
 
 ```json
 {
   "protocol": 2,
-  "requestId": "unique-4",
+  "requestId": "unique-7",
   "command": "loadScene",
   "resourceRef": "creator.scenes.1:/Saves/scene/Example.json",
   "rescan": true,
@@ -144,7 +216,7 @@ The bridge writes `status.json`:
 ```json
 {
   "protocol": 2,
-  "bridgeVersion": "0.3.0",
+  "bridgeVersion": "0.4.0",
   "instanceId": "id-created-when-the-plugin-started",
   "requestId": "a-new-unique-id",
   "lastCompletedRequestId": "a-new-unique-id",
@@ -158,6 +230,9 @@ The bridge writes `status.json`:
   "capabilities": [
     "atom-roster",
     "atom-select",
+    "atom-add",
+    "atom-preset-apply",
+    "subscene-load",
     "scene-load",
     "person-roster",
     "person-preset-apply",
@@ -187,9 +262,11 @@ The mailbox holds one request. Pending rescan-only requests may safely coalesce
 to the newest rescan. An overwrite involving any atom or resource action is
 rejected as busy because those actions are ordered and must never coalesce.
 Callers must wait until the matching status is `ok` or `error` before
-submitting another action. Full preset loads and add/select commands are safe
-to retry. Preset merges and scene merges are non-idempotent and are processed
-only once per request ID in a plugin session. An `ok` ID is recovered after a
+submitting another action. Add/select commands are safe to retry. Preset
+merges and scene merges are non-idempotent and are processed only once per
+request ID in a plugin session. Full preset and SubScene reloads are normally
+state-setting operations, but their semantic contents can include plugins; a
+client must not assume they are harmless. An `ok` ID is recovered after a
 plugin restart; an interrupted or failed request is eligible to run after a
 restart, so a client must reconcile state before restarting around a merge.
 
@@ -198,7 +275,7 @@ The bridge refreshes `scene.json` once per second:
 ```json
 {
   "protocol": 2,
-  "bridgeVersion": "0.3.0",
+  "bridgeVersion": "0.4.0",
   "instanceId": "id-created-when-the-plugin-started",
   "updatedAtUtc": "2026-07-28T12:00:02.0000000Z",
   "loading": false,
@@ -214,6 +291,9 @@ The bridge refreshes `scene.json` once per second:
   "capabilities": [
     "atom-roster",
     "atom-select",
+    "atom-add",
+    "atom-preset-apply",
+    "subscene-load",
     "scene-load",
     "person-roster",
     "person-preset-apply",
@@ -248,8 +328,12 @@ not establish support for every preset kind.
   while VaM is running; defer expiry and disable operations until VaM exits.
 - The bridge accepts no filesystem paths, deletes, shell commands, network
   requests, arbitrary storable IDs, or arbitrary action names. Resource inputs
-  are tightly constrained VaM `.vap` references in the mapped Person preset
-  directories or `.json` references below `Saves/scene/`.
+  are tightly constrained VaM `.vap` references in mapped Person preset
+  directories or `Custom/Atom/<allowlisted-type>/`, and `.json` references
+  below `Custom/SubScene/` or `Saves/scene/`.
+- The generic atom and SubScene resource containers can include plugin
+  configurations. Path/type validation does not establish that their semantic
+  contents are trusted or side-effect free.
 - Rescans are synchronous and may briefly freeze VaM. Requests are deferred
   while a scene is loading and rate-limited to one every five seconds.
 - `loadScene` is intentionally a separate high-impact capability. Replacing a

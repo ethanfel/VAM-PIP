@@ -16,7 +16,7 @@ namespace VAMPip
     public class VAMPipBridge : MVRScript
     {
         private const int ProtocolVersion = 2;
-        private const string BridgeVersion = "0.3.0";
+        private const string BridgeVersion = "0.4.0";
 
         private const string PluginDataRoot = "Saves\\PluginData";
         private const string DataRoot = "Saves\\PluginData\\VAMPip";
@@ -29,11 +29,14 @@ namespace VAMPip
         private const float PollIntervalSeconds = 0.5f;
         private const float ScenePublishIntervalSeconds = 1.0f;
         private const float MinimumRescanIntervalSeconds = 5.0f;
-        private const float MaximumSceneLoadWaitSeconds = 120.0f;
+        private const float MaximumOperationWaitSeconds = 120.0f;
 
         private const string CommandRescan = "rescan";
         private const string CommandApplyPersonPreset = "applyPersonPreset";
         private const string CommandAddPerson = "addPerson";
+        private const string CommandAddAtom = "addAtom";
+        private const string CommandApplyAtomPreset = "applyAtomPreset";
+        private const string CommandLoadSubscene = "loadSubscene";
         private const string CommandSelectPerson = "selectPerson";
         private const string CommandSelectAtom = "selectAtom";
         private const string CommandLoadScene = "loadScene";
@@ -47,16 +50,83 @@ namespace VAMPip
         private const string StateOk = "ok";
         private const string StateError = "error";
 
+        // VaM 1.22 native non-Person atom types, audited against
+        // BrowserAssist 39's static native-type registry. Custom/package atom
+        // types are intentionally browse-only: this must not become an
+        // arbitrary AddAtomByType surface.
+        private const string AllowedAtomTypes =
+            "|AnimationPattern|AnimationStep|AptBook01|AptBook02|" +
+            "AptBookShelf|AptChair|AptCoffeeTable|AptJacuzzi|" +
+            "AptJacuzziProp|AptJacuzziRailing|AptLamp|AptOutdoorLight|" +
+            "AptPatioChair|AptPicture01|AptPicture02|AptPlant|AptPlanter|" +
+            "AptRug|AptSmartTV|AptSmartWebTV|AptSofa|AptSpeaker|AptTVStand|" +
+            "AudioSource|Button|Capsule|CityScape|CityScapeNight|" +
+            "ClothGrabSphere|CollisionTrigger|Crypt|Cube|CustomUnityAsset|" +
+            "CyberpunkApartment|CyberpunkApartmentDecor|CyberpunkBed|" +
+            "CyberpunkBedPillow01|CyberpunkBedPillow02|" +
+            "CyberpunkBedPillow03|CyberpunkChair|CyberpunkCoffeeTable|" +
+            "CyberpunkComputer|CyberpunkComputerChair|" +
+            "CyberpunkControlScreen|CyberpunkDresser01|" +
+            "CyberpunkDresser02|CyberpunkKeyboard|CyberpunkLaptop|" +
+            "CyberpunkLight|CyberpunkMouse|CyberpunkMousepad|" +
+            "CyberpunkRemote|CyberpunkSofa|CyberpunkSofaCushion01|" +
+            "CyberpunkSofaCushion02|CyberpunkTable|CyberpunkTablet|" +
+            "CyberpunkWallLight01|CyberpunkWallLight02|CycleForce|" +
+            "DecoDowntimeChair|DecoDowntimeCoffeeTable|" +
+            "DecoDowntimeSideTable|DecoDowntimeStand|Dildo|DreamHomeTV|" +
+            "DreamHomeWebTV|DreamStreetBedroom|DSBR_2TierTable|DSBR_Bed|" +
+            "DSBR_BedPillow|DSBR_Bench|DSBR_BuiltInShelves|DSBR_Chair|" +
+            "DSBR_DecorativePillow|DSBR_Ottoman|DSBR_Shelf|" +
+            "DSBR_ThrowPillow|Empty|Glass|Glass-Stained|GrabPoint|" +
+            "ImagePanel|ImagePanelEmissive|ImagePanelTransparent|" +
+            "ImagePanelTransparentEmissive|InvisibleLight|InvisiblePanel|" +
+            "ISCapsule|ISCone|ISCube|ISCylinder|IslBench|IslFencePost|" +
+            "IslFenceSection|IslOverlook|IslPatioChair|IslPlantWFlowers|" +
+            "IslPotA|IslPotB|IslPotSmall|IslRailingGlass|IslStool|" +
+            "IslTerrain|IslTopiary|IslTree|IslTreePlanter|IslWallPost|" +
+            "IslWallSection|ISSphere|ISTube|LookAtTrigger|LoungeChair|" +
+            "ModernRoomBed|ModernRoomLargeLamp|OldStyleBed|OldStyleChair|" +
+            "OldStylePillow01|OldStylePillow02|OldStyleRoom|" +
+            "OldStyleSideTable|OldStyleVanityStool|Paddle|" +
+            "PlayerNavigationPanel|ReflectiveSlate|ReflectiveWoodPanel|" +
+            "RhythmAudioSource|RhythmForce|SimpleSign|SimSheet|" +
+            "SkullQueenSword|Slate|SpaceBox|Sphere|SubScene|SyncForce|" +
+            "TechnoDancePole|TechnoGirder|TechnoLight|TechnoLightBar|" +
+            "TechnoLightBar+Light|TechnoNeonCircle|" +
+            "TechnoNeonCircle+Light|TechnoNeonHeart|" +
+            "TechnoNeonHeart+Light|TechnoNeonSquare|" +
+            "TechnoNeonSquare+Light|TechnoNeonTriangle|" +
+            "TechnoNeonTriangle+Light|TechnoRingLight|" +
+            "TechnoRingLight+Light|TechnoRoom|TechnoRoundCage|" +
+            "TechnoRoundPlatform|TechnoThrone|Torch|ToyAH|ToyBP|UIButton|" +
+            "UISlider|UIText|UIToggle|VaMLogo|VaMSign|VariableTrigger|" +
+            "Wall|WebBrowser|WebPanel|WebPanelEmissive|WindowCamera|" +
+            "WoodPanel|";
+
         private sealed class BridgeRequest
         {
             public string RequestId;
             public string Command;
             public string BrowserAssistMode;
             public string TargetUid;
+            public string AtomType;
             public string PresetKind;
             public string ResourceRef;
             public bool RescanRequired;
             public bool Merge;
+            public bool CreateIfMissing;
+        }
+
+        private sealed class AtomCreationResult
+        {
+            public Atom Atom;
+            public bool Created;
+            public string Error;
+        }
+
+        private sealed class LoadingWaitResult
+        {
+            public string Error;
         }
 
         private bool _operational;
@@ -267,9 +337,11 @@ namespace VAMPip
                 parsed.Command = command;
                 parsed.BrowserAssistMode = "auto";
                 parsed.TargetUid = "";
+                parsed.AtomType = "";
                 parsed.PresetKind = "";
                 parsed.ResourceRef = "";
                 parsed.Merge = false;
+                parsed.CreateIfMissing = false;
 
                 if (command == CommandRescan)
                 {
@@ -325,6 +397,61 @@ namespace VAMPip
                     }
                     parsed.RescanRequired = false;
                 }
+                else if (command == CommandAddAtom)
+                {
+                    parsed.TargetUid =
+                        ((string)request["targetUid"] ?? "").Trim();
+                    parsed.AtomType =
+                        (string)request["atomType"] ?? "";
+                    string validationError =
+                        ValidateAddAtomRequest(parsed);
+                    if (validationError.Length != 0)
+                    {
+                        RejectRequest(requestId, validationError);
+                        return;
+                    }
+                    parsed.RescanRequired = false;
+                }
+                else if (command == CommandApplyAtomPreset)
+                {
+                    parsed.TargetUid =
+                        ((string)request["targetUid"] ?? "").Trim();
+                    parsed.AtomType =
+                        (string)request["atomType"] ?? "";
+                    parsed.ResourceRef =
+                        (string)request["resourceRef"] ?? "";
+                    parsed.RescanRequired = request["rescan"].AsBool;
+                    parsed.Merge = request["merge"].AsBool;
+                    parsed.CreateIfMissing =
+                        request["createIfMissing"].AsBool;
+
+                    string validationError =
+                        ValidateAtomPresetRequest(parsed);
+                    if (validationError.Length != 0)
+                    {
+                        RejectRequest(requestId, validationError);
+                        return;
+                    }
+                }
+                else if (command == CommandLoadSubscene)
+                {
+                    parsed.TargetUid =
+                        ((string)request["targetUid"] ?? "").Trim();
+                    parsed.AtomType = "SubScene";
+                    parsed.ResourceRef =
+                        (string)request["resourceRef"] ?? "";
+                    parsed.RescanRequired = request["rescan"].AsBool;
+                    parsed.CreateIfMissing =
+                        request["createIfMissing"].AsBool;
+
+                    string validationError =
+                        ValidateSubsceneRequest(parsed);
+                    if (validationError.Length != 0)
+                    {
+                        RejectRequest(requestId, validationError);
+                        return;
+                    }
+                }
                 else if (command == CommandLoadScene)
                 {
                     parsed.ResourceRef =
@@ -345,7 +472,8 @@ namespace VAMPip
                     RejectRequest(
                         requestId,
                         "Unsupported command. Accepted commands are 'rescan' " +
-                        "'applyPersonPreset', 'addPerson', 'selectPerson', " +
+                        "'applyPersonPreset', 'addPerson', 'addAtom', " +
+                        "'applyAtomPreset', 'loadSubscene', 'selectPerson', " +
                         "'selectAtom', and 'loadScene'.");
                     return;
                 }
@@ -430,6 +558,50 @@ namespace VAMPip
                 "scenes");
         }
 
+        private static string ValidateAddAtomRequest(BridgeRequest request)
+        {
+            string targetError = ValidateTargetUid(request.TargetUid);
+            if (targetError.Length != 0)
+            {
+                return targetError;
+            }
+            return ValidateAtomType(request.AtomType);
+        }
+
+        private static string ValidateAtomPresetRequest(BridgeRequest request)
+        {
+            string addError = ValidateAddAtomRequest(request);
+            if (addError.Length != 0)
+            {
+                return addError;
+            }
+            if (request.CreateIfMissing && request.Merge)
+            {
+                return "createIfMissing and merge cannot both be true.";
+            }
+            return ValidateResourceRef(
+                request.ResourceRef,
+                "Custom/Atom/" + request.AtomType + "/",
+                ".vap",
+                true,
+                "presets for atom type " + request.AtomType);
+        }
+
+        private static string ValidateSubsceneRequest(BridgeRequest request)
+        {
+            string targetError = ValidateTargetUid(request.TargetUid);
+            if (targetError.Length != 0)
+            {
+                return targetError;
+            }
+            return ValidateResourceRef(
+                request.ResourceRef,
+                "Custom/SubScene/",
+                ".json",
+                false,
+                "SubScenes");
+        }
+
         private static string ValidateTargetUid(string targetUid)
         {
             if (targetUid == null ||
@@ -443,6 +615,24 @@ namespace VAMPip
                 return "targetUid must not contain control characters.";
             }
             return "";
+        }
+
+        private static string ValidateAtomType(string atomType)
+        {
+            if (!IsAllowedAtomType(atomType))
+            {
+                return "atomType is not an allowlisted VaM 1.22 native atom type.";
+            }
+            return "";
+        }
+
+        private static bool IsAllowedAtomType(string atomType)
+        {
+            return atomType != null &&
+                atomType.IndexOf('|') < 0 &&
+                AllowedAtomTypes.IndexOf(
+                    "|" + atomType + "|",
+                    StringComparison.Ordinal) >= 0;
         }
 
         private static string GetPresetPrefix(string presetKind)
@@ -686,12 +876,18 @@ namespace VAMPip
             }
 
             BridgeRequest request = _pendingRequest;
-            if (request.Command == CommandAddPerson)
+            if (request.Command == CommandAddPerson ||
+                request.Command == CommandAddAtom)
             {
                 _requestInProgress = true;
                 try
                 {
-                    StartCoroutine(ExecuteAddPerson(request));
+                    StartCoroutine(
+                        ExecuteAddAtom(
+                            request,
+                            request.Command == CommandAddPerson
+                            ? "Person"
+                            : request.AtomType));
                 }
                 catch (Exception exception)
                 {
@@ -700,7 +896,34 @@ namespace VAMPip
                     FailRequest(
                         request,
                         "",
-                        "Could not start Person creation: " +
+                        "Could not start atom creation: " +
+                        DescribeException(exception));
+                }
+                return;
+            }
+            if (request.Command == CommandApplyAtomPreset ||
+                request.Command == CommandLoadSubscene)
+            {
+                _requestInProgress = true;
+                try
+                {
+                    if (request.Command == CommandApplyAtomPreset)
+                    {
+                        StartCoroutine(ExecuteApplyAtomPreset(request));
+                    }
+                    else
+                    {
+                        StartCoroutine(ExecuteLoadSubscene(request));
+                    }
+                }
+                catch (Exception exception)
+                {
+                    _requestInProgress = false;
+                    _pendingRequest = null;
+                    FailRequest(
+                        request,
+                        "",
+                        "Could not start atom resource action: " +
                         DescribeException(exception));
                 }
                 return;
@@ -1019,7 +1242,7 @@ namespace VAMPip
             yield return new WaitForEndOfFrame();
 
             float deadline =
-                Time.realtimeSinceStartup + MaximumSceneLoadWaitSeconds;
+                Time.realtimeSinceStartup + MaximumOperationWaitSeconds;
             while (SuperController.singleton != null &&
                    SuperController.singleton.isLoading &&
                    Time.realtimeSinceStartup < deadline)
@@ -1074,7 +1297,9 @@ namespace VAMPip
             FailRequest(request, startedAt, message);
         }
 
-        private IEnumerator ExecuteAddPerson(BridgeRequest request)
+        private IEnumerator ExecuteAddAtom(
+            BridgeRequest request,
+            string atomType)
         {
             string startedAt = UtcNow();
             PublishStatus(
@@ -1083,7 +1308,7 @@ namespace VAMPip
                 startedAt,
                 "",
                 "",
-                "Adding Person " + request.TargetUid + ".");
+                "Adding " + atomType + " " + request.TargetUid + ".");
 
             Atom existing = null;
             IEnumerator addRoutine = null;
@@ -1096,25 +1321,25 @@ namespace VAMPip
                 {
                     addRoutine =
                         SuperController.singleton.AddAtomByType(
-                            "Person",
+                            atomType,
                             request.TargetUid,
                             true);
                     if (addRoutine == null)
                     {
                         throw new Exception(
-                            "VaM did not provide a Person creation routine.");
+                            "VaM did not provide an atom creation routine.");
                     }
                 }
             }
             catch (Exception exception)
             {
                 addError =
-                    "Could not add Person: " +
+                    "Could not add " + atomType + ": " +
                     DescribeException(exception);
             }
             if (addError.Length != 0)
             {
-                FinishAddPersonError(
+                FinishAtomActionError(
                     request,
                     startedAt,
                     addError);
@@ -1123,43 +1348,58 @@ namespace VAMPip
 
             if (existing != null)
             {
-                if (existing.type != "Person")
+                if (existing.type != atomType)
                 {
-                    FinishAddPersonError(
+                    FinishAtomActionError(
                         request,
                         startedAt,
-                        "targetUid is already used by a non-Person atom.");
+                        "targetUid is already used by an atom of type " +
+                        existing.type +
+                        ", not " +
+                        atomType +
+                        ".");
                     yield break;
                 }
-                FinishAddPersonOk(
+                FinishAtomActionOk(
                     request,
                     startedAt,
-                    "Person already exists; no scene change was needed.");
+                    atomType +
+                    " already exists; no scene change was needed.");
                 yield break;
             }
 
+            float deadline =
+                Time.realtimeSinceStartup + MaximumOperationWaitSeconds;
             while (true)
             {
                 bool hasNext = false;
                 object current = null;
                 string iterationError = "";
-                try
-                {
-                    hasNext = addRoutine.MoveNext();
-                    if (hasNext)
-                    {
-                        current = addRoutine.Current;
-                    }
-                }
-                catch (Exception exception)
+                if (Time.realtimeSinceStartup >= deadline)
                 {
                     iterationError =
-                        "Person creation failed: " +
-                        DescribeException(exception);
+                        atomType + " creation did not finish within 120 seconds.";
+                }
+                else
+                {
+                    try
+                    {
+                        hasNext = addRoutine.MoveNext();
+                        if (hasNext)
+                        {
+                            current = addRoutine.Current;
+                        }
+                    }
+                    catch (Exception exception)
+                    {
+                        iterationError =
+                            atomType + " creation failed: " +
+                            DescribeException(exception);
+                    }
                 }
                 if (iterationError.Length != 0)
                 {
-                    FinishAddPersonError(
+                    FinishAtomActionError(
                         request,
                         startedAt,
                         iterationError);
@@ -1178,27 +1418,31 @@ namespace VAMPip
             {
                 Atom created =
                     SuperController.singleton.GetAtomByUid(request.TargetUid);
-                if (created == null || created.type != "Person")
+                if (created == null || created.type != atomType)
                 {
                     throw new Exception(
-                        "VaM completed creation without the requested Person.");
+                        "VaM completed creation without the requested " +
+                        atomType +
+                        " atom.");
                 }
-                FinishAddPersonOk(
+                FinishAtomActionOk(
                     request,
                     startedAt,
-                    "Person added.");
+                    atomType + " added.");
             }
             catch (Exception exception)
             {
-                FinishAddPersonError(
+                FinishAtomActionError(
                     request,
                     startedAt,
-                    "Could not verify the added Person: " +
+                    "Could not verify the added " +
+                    atomType +
+                    ": " +
                     DescribeException(exception));
             }
         }
 
-        private void FinishAddPersonOk(
+        private void FinishAtomActionOk(
             BridgeRequest request,
             string startedAt,
             string message)
@@ -1218,7 +1462,7 @@ namespace VAMPip
                 "[VAM-PIP Bridge] " + message);
         }
 
-        private void FinishAddPersonError(
+        private void FinishAtomActionError(
             BridgeRequest request,
             string startedAt,
             string message)
@@ -1226,6 +1470,424 @@ namespace VAMPip
             _pendingRequest = null;
             _requestInProgress = false;
             FailRequest(request, startedAt, message);
+        }
+
+        private string PrepareAtomResourceRequest(
+            BridgeRequest request,
+            string startedAt,
+            string actionDescription)
+        {
+            bool rescanAttempted = false;
+            try
+            {
+                if (request.RescanRequired)
+                {
+                    rescanAttempted = true;
+                    PublishStatus(
+                        StateRescanning,
+                        request.RequestId,
+                        startedAt,
+                        "",
+                        "",
+                        "Rescanning VaM packages before " +
+                        actionDescription +
+                        ".");
+                    SuperController.singleton.RescanPackages();
+                }
+                if (!FileManagerSecure.FileExists(request.ResourceRef))
+                {
+                    throw new Exception(
+                        "The validated resource does not exist or is not visible to VaM.");
+                }
+                return "";
+            }
+            catch (Exception exception)
+            {
+                return "Could not prepare " +
+                    actionDescription +
+                    ": " +
+                    DescribeException(exception);
+            }
+            finally
+            {
+                if (rescanAttempted)
+                {
+                    _nextAllowedRescanAt =
+                        Time.realtimeSinceStartup +
+                        MinimumRescanIntervalSeconds;
+                }
+            }
+        }
+
+        private IEnumerator EnsureTargetAtom(
+            BridgeRequest request,
+            string atomType,
+            bool createIfMissing,
+            AtomCreationResult result)
+        {
+            result.Atom = null;
+            result.Created = false;
+            result.Error = "";
+
+            Atom existing = null;
+            IEnumerator addRoutine = null;
+            try
+            {
+                if (SuperController.singleton == null)
+                {
+                    throw new Exception("VaM's scene controller is unavailable.");
+                }
+                existing =
+                    SuperController.singleton.GetAtomByUid(request.TargetUid);
+                if (existing == null && createIfMissing)
+                {
+                    PublishStatus(
+                        StateAdding,
+                        request.RequestId,
+                        "",
+                        "",
+                        "vam",
+                        "Adding " + atomType + " " + request.TargetUid + ".");
+                    addRoutine =
+                        SuperController.singleton.AddAtomByType(
+                            atomType,
+                            request.TargetUid,
+                            true);
+                    if (addRoutine == null)
+                    {
+                        throw new Exception(
+                            "VaM did not provide an atom creation routine.");
+                    }
+                }
+            }
+            catch (Exception exception)
+            {
+                result.Error =
+                    "Could not resolve target atom: " +
+                    DescribeException(exception);
+            }
+            if (result.Error.Length != 0)
+            {
+                yield break;
+            }
+
+            if (existing != null)
+            {
+                if (createIfMissing)
+                {
+                    result.Error =
+                        "createIfMissing requires targetUid to be absent " +
+                        "when the request executes.";
+                    yield break;
+                }
+                if (existing.type != atomType)
+                {
+                    result.Error =
+                        "targetUid is already used by an atom of type " +
+                        existing.type +
+                        ", not " +
+                        atomType +
+                        ".";
+                    yield break;
+                }
+                result.Atom = existing;
+                yield break;
+            }
+            if (!createIfMissing)
+            {
+                result.Error =
+                    "targetUid does not identify an existing " +
+                    atomType +
+                    " atom and createIfMissing is false.";
+                yield break;
+            }
+
+            float deadline =
+                Time.realtimeSinceStartup + MaximumOperationWaitSeconds;
+            while (true)
+            {
+                bool hasNext = false;
+                object current = null;
+                string iterationError = "";
+                if (Time.realtimeSinceStartup >= deadline)
+                {
+                    iterationError =
+                        atomType + " creation did not finish within 120 seconds.";
+                }
+                else
+                {
+                    try
+                    {
+                        hasNext = addRoutine.MoveNext();
+                        if (hasNext)
+                        {
+                            current = addRoutine.Current;
+                        }
+                    }
+                    catch (Exception exception)
+                    {
+                        iterationError =
+                            atomType + " creation failed: " +
+                            DescribeException(exception);
+                    }
+                }
+                if (iterationError.Length != 0)
+                {
+                    result.Error = iterationError;
+                    yield break;
+                }
+                if (!hasNext)
+                {
+                    break;
+                }
+                yield return current;
+            }
+
+            yield return new WaitForEndOfFrame();
+            try
+            {
+                if (SuperController.singleton == null)
+                {
+                    throw new Exception(
+                        "VaM's scene controller became unavailable.");
+                }
+                Atom created =
+                    SuperController.singleton.GetAtomByUid(request.TargetUid);
+                if (created == null || created.type != atomType)
+                {
+                    throw new Exception(
+                        "VaM completed creation without the requested " +
+                        atomType +
+                        " atom.");
+                }
+                result.Atom = created;
+                result.Created = true;
+            }
+            catch (Exception exception)
+            {
+                result.Error =
+                    "Could not verify the added " +
+                    atomType +
+                    ": " +
+                    DescribeException(exception);
+            }
+        }
+
+        private IEnumerator WaitForVaMLoading(
+            string actionDescription,
+            LoadingWaitResult result)
+        {
+            result.Error = "";
+
+            // Preset and SubScene assignments can raise isLoading
+            // asynchronously, so always cross a frame boundary first.
+            yield return new WaitForEndOfFrame();
+
+            float deadline =
+                Time.realtimeSinceStartup + MaximumOperationWaitSeconds;
+            while (SuperController.singleton != null &&
+                   SuperController.singleton.isLoading &&
+                   Time.realtimeSinceStartup < deadline)
+            {
+                yield return null;
+            }
+
+            if (SuperController.singleton == null)
+            {
+                result.Error =
+                    "VaM's scene controller became unavailable while " +
+                    actionDescription +
+                    ".";
+            }
+            else if (SuperController.singleton.isLoading)
+            {
+                result.Error =
+                    actionDescription +
+                    " did not finish within 120 seconds.";
+            }
+        }
+
+        private IEnumerator ExecuteApplyAtomPreset(BridgeRequest request)
+        {
+            string startedAt = UtcNow();
+            string prepareError =
+                PrepareAtomResourceRequest(
+                    request,
+                    startedAt,
+                    "applying the atom preset");
+            if (prepareError.Length != 0)
+            {
+                FinishAtomActionError(request, startedAt, prepareError);
+                yield break;
+            }
+
+            AtomCreationResult target = new AtomCreationResult();
+            yield return EnsureTargetAtom(
+                request,
+                request.AtomType,
+                request.CreateIfMissing,
+                target);
+            if (target.Error.Length != 0)
+            {
+                FinishAtomActionError(request, startedAt, target.Error);
+                yield break;
+            }
+
+            PublishStatus(
+                StateApplying,
+                request.RequestId,
+                startedAt,
+                "",
+                "vam",
+                "Applying " + request.AtomType + " atom preset.");
+
+            string applyError = "";
+            try
+            {
+                JSONStorable presetStorable =
+                    target.Atom.GetStorableByID("Preset");
+                if (presetStorable == null)
+                {
+                    throw new Exception(
+                        "The target atom does not expose the Preset storable.");
+                }
+                JSONStorableUrl presetBrowsePath =
+                    presetStorable.GetUrlJSONParam("presetBrowsePath");
+                if (presetBrowsePath == null)
+                {
+                    throw new Exception(
+                        "The target atom Preset storable has no presetBrowsePath.");
+                }
+
+                JSONStorableBool loadPresetOnSelect =
+                    presetStorable.GetBoolJSONParam("loadPresetOnSelect");
+                bool previousLoadPresetOnSelect = false;
+                if (loadPresetOnSelect != null)
+                {
+                    previousLoadPresetOnSelect = loadPresetOnSelect.val;
+                    loadPresetOnSelect.val = false;
+                }
+                try
+                {
+                    presetBrowsePath.val =
+                        SuperController.singleton.NormalizePath(
+                            request.ResourceRef);
+                    presetStorable.CallAction(
+                        request.Merge
+                        ? "MergeLoadPreset"
+                        : "LoadPreset");
+                }
+                finally
+                {
+                    if (loadPresetOnSelect != null)
+                    {
+                        loadPresetOnSelect.val = previousLoadPresetOnSelect;
+                    }
+                }
+            }
+            catch (Exception exception)
+            {
+                applyError =
+                    "Could not apply atom preset: " +
+                    DescribeException(exception);
+            }
+            if (applyError.Length != 0)
+            {
+                FinishAtomActionError(request, startedAt, applyError);
+                yield break;
+            }
+
+            LoadingWaitResult wait = new LoadingWaitResult();
+            yield return WaitForVaMLoading("atom preset loading", wait);
+            if (wait.Error.Length != 0)
+            {
+                FinishAtomActionError(request, startedAt, wait.Error);
+                yield break;
+            }
+
+            FinishAtomActionOk(
+                request,
+                startedAt,
+                request.AtomType +
+                (request.Merge ? " atom preset merged." : " atom preset applied."));
+        }
+
+        private IEnumerator ExecuteLoadSubscene(BridgeRequest request)
+        {
+            string startedAt = UtcNow();
+            string prepareError =
+                PrepareAtomResourceRequest(
+                    request,
+                    startedAt,
+                    "loading the SubScene");
+            if (prepareError.Length != 0)
+            {
+                FinishAtomActionError(request, startedAt, prepareError);
+                yield break;
+            }
+
+            AtomCreationResult target = new AtomCreationResult();
+            yield return EnsureTargetAtom(
+                request,
+                "SubScene",
+                request.CreateIfMissing,
+                target);
+            if (target.Error.Length != 0)
+            {
+                FinishAtomActionError(request, startedAt, target.Error);
+                yield break;
+            }
+
+            PublishStatus(
+                StateApplying,
+                request.RequestId,
+                startedAt,
+                "",
+                "vam",
+                "Loading SubScene.");
+
+            string loadError = "";
+            try
+            {
+                JSONStorable subsceneStorable =
+                    target.Atom.GetStorableByID("SubScene");
+                if (subsceneStorable == null)
+                {
+                    throw new Exception(
+                        "The target atom does not expose the SubScene storable.");
+                }
+                JSONStorableUrl browsePath =
+                    subsceneStorable.GetUrlJSONParam("browsePath");
+                if (browsePath == null)
+                {
+                    throw new Exception(
+                        "The target SubScene storable has no browsePath.");
+                }
+                browsePath.val =
+                    SuperController.singleton.NormalizePath(
+                        request.ResourceRef);
+            }
+            catch (Exception exception)
+            {
+                loadError =
+                    "Could not load SubScene: " +
+                    DescribeException(exception);
+            }
+            if (loadError.Length != 0)
+            {
+                FinishAtomActionError(request, startedAt, loadError);
+                yield break;
+            }
+
+            LoadingWaitResult wait = new LoadingWaitResult();
+            yield return WaitForVaMLoading("SubScene loading", wait);
+            if (wait.Error.Length != 0)
+            {
+                FinishAtomActionError(request, startedAt, wait.Error);
+                yield break;
+            }
+
+            FinishAtomActionOk(request, startedAt, "SubScene loaded.");
         }
 
         private void ExecuteSelectAtom(
@@ -1334,6 +1996,9 @@ namespace VAMPip
             JSONArray capabilities = new JSONArray();
             capabilities.Add("atom-roster");
             capabilities.Add("atom-select");
+            capabilities.Add("atom-add");
+            capabilities.Add("atom-preset-apply");
+            capabilities.Add("subscene-load");
             capabilities.Add("scene-load");
             capabilities.Add("person-roster");
             capabilities.Add("person-preset-apply");

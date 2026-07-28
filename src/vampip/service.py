@@ -15,15 +15,20 @@ import uuid
 
 from vampip.analysis import family_id, package_id
 from vampip.bridge import (
+    ATOM_TYPE_ALLOWLIST,
+    bridge_directory,
     read_bridge_status,
     read_bridge_request,
     read_scene_status,
+    request_add_atom,
     request_add_person,
+    request_atom_preset,
     request_person_preset,
     request_rescan,
     request_scene_load,
     request_select_atom,
     request_select_person,
+    request_subscene_load,
 )
 from vampip.catalog import (
     catalog_facets as load_catalog_facets,
@@ -210,11 +215,16 @@ _OTHER_WORKSPACE_CATEGORIES: tuple[dict[str, object], ...] = (
         "target_kind": "subscene",
         "operation": "load-subscene",
         "required_capability": "subscene-load",
-        "risk": "high",
-        "risk_reason": "Creates or replaces a SubScene atom and its contents.",
+        "risk": "critical",
+        "risk_reason": (
+            "Creates or replaces a SubScene and may load executable plugin code."
+        ),
         "browseable": True,
-        "live_action": False,
+        "live_action": "SubScene" in ATOM_TYPE_ALLOWLIST,
         "merge_supported": False,
+        "target_atom_type": "SubScene",
+        "create_supported": "SubScene" in ATOM_TYPE_ALLOWLIST,
+        "create_capability": "atom-add",
     },
     {
         "id": "custom-unity-assets",
@@ -754,6 +764,7 @@ class ManagerService:
         )
         for atom_type_key in preset_atom_types:
             atom_type = atom_labels.get(atom_type_key, atom_type_key)
+            supported = atom_type in ATOM_TYPE_ALLOWLIST
             total, local = category_counts(("Preset Atom",), (atom_type,))
             categories.append(
                 {
@@ -766,13 +777,20 @@ class ManagerService:
                     "target_atom_type": atom_type,
                     "operation": "apply-atom-preset",
                     "required_capability": "atom-preset-apply",
-                    "risk": "high",
+                    "risk": "critical",
                     "risk_reason": (
-                        f"May replace state on a {atom_type} atom or create one."
+                        f"May replace a {atom_type} atom and load executable plugins."
                     ),
                     "browseable": True,
-                    "live_action": False,
+                    "live_action": supported,
                     "merge_supported": True,
+                    "create_supported": supported,
+                    "create_capability": "atom-add",
+                    "unsupported_reason": (
+                        None
+                        if supported
+                        else "This atom type is not in VaM's native allowlist."
+                    ),
                     "count": total,
                     "local_count": local,
                     "packaged_count": total - local,
@@ -985,6 +1003,73 @@ class ManagerService:
             raise ValueError("target_uid must contain 1 to 200 printable characters")
         return uid
 
+    @staticmethod
+    def _validate_category_id(category_id: object) -> str:
+        if not isinstance(category_id, str):
+            raise TypeError("category_id must be a string")
+        value = category_id.strip()
+        if (
+            not value
+            or len(value) > 200
+            or any(ord(character) < 32 or ord(character) == 127 for character in value)
+        ):
+            raise ValueError(
+                "category_id must contain 1 to 200 printable characters"
+            )
+        return value
+
+    def _workspace_category(self, category_id: object) -> dict[str, object]:
+        value = self._validate_category_id(category_id)
+        with connect(self.state_dir) as connection:
+            categories = self._workspace_category_descriptors(connection)
+        category = next(
+            (
+                descriptor
+                for descriptor in categories
+                if str(descriptor.get("id") or "") == value
+            ),
+            None,
+        )
+        if category is None:
+            raise ValueError(f"unknown workspace category: {value}")
+        return category
+
+    def _validate_live_atom_target(
+        self,
+        scene: dict[str, object],
+        target_uid: object,
+        *,
+        expected_atom_type: str,
+        create_if_missing: bool,
+    ) -> tuple[str, bool]:
+        uid = self._validate_target_uid(target_uid)
+        existing = next(
+            (
+                atom
+                for atom in scene.get("atoms", [])
+                if isinstance(atom, dict) and str(atom.get("uid") or "") == uid
+            ),
+            None,
+        )
+        if existing is not None:
+            if create_if_missing:
+                raise ValueError(
+                    "create_if_missing requires target_uid to be absent"
+                )
+            actual_type = str(existing.get("type") or "")
+            if actual_type != expected_atom_type:
+                raise ValueError(
+                    f"Atom {uid} has type {actual_type or '<unknown>'}; "
+                    f"expected {expected_atom_type}"
+                )
+            return uid, True
+        if not create_if_missing:
+            raise ValueError(f"Atom is no longer available: {uid}")
+        capabilities = {str(value) for value in scene.get("capabilities", [])}
+        if "atom-add" not in capabilities:
+            raise ValueError("the loaded VAM-PIP bridge does not provide atom-add")
+        return uid, False
+
     def _ensure_bridge_mailbox_idle(self) -> None:
         request = read_bridge_request(self.vam_root)
         if request is None:
@@ -996,11 +1081,18 @@ class ManagerService:
             )
 
     def _queue_bridge_request(self, writer: Callable[[], str]) -> str:
-        """Publish one ordered request after an atomic in-process idle check."""
+        """Publish one ordered request after an atomic cross-process check."""
 
         with self._bridge_mailbox_lock:
-            self._ensure_bridge_mailbox_idle()
-            return writer()
+            # This is deliberately distinct from state_dir/manager.lock.
+            # Live actions can reconcile packages before publication; a
+            # dedicated mailbox lock avoids reversing that filesystem lock's
+            # order while still serializing managers that use different
+            # state directories for the same VaM installation.
+            lock_dir = bridge_directory(self.vam_root) / ".vampip-mailbox-lock"
+            with manager_lock(lock_dir):
+                self._ensure_bridge_mailbox_idle()
+                return writer()
 
     def _try_queue_bridge_request(
         self,
@@ -1061,6 +1153,7 @@ class ManagerService:
         target_uid: str | None = None,
         days: float = 3,
         merge: bool = False,
+        create_if_missing: bool = False,
         confirm_replace: bool = False,
         confirm_critical: bool = False,
     ) -> dict[str, object]:
@@ -1073,6 +1166,7 @@ class ManagerService:
                 target_uid=target_uid,
                 days=days,
                 merge=merge,
+                create_if_missing=create_if_missing,
                 confirm_replace=confirm_replace,
                 confirm_critical=confirm_critical,
             )
@@ -1095,6 +1189,7 @@ class ManagerService:
                 target_uid=target_uid,
                 days=days,
                 merge=merge,
+                create_if_missing=False,
                 confirm_replace=False,
                 confirm_critical=confirm_critical,
                 expected_target_kind="person",
@@ -1107,6 +1202,7 @@ class ManagerService:
         target_uid: str | None,
         days: float,
         merge: bool,
+        create_if_missing: bool,
         confirm_replace: bool,
         confirm_critical: bool,
         expected_target_kind: str | None = None,
@@ -1121,6 +1217,8 @@ class ManagerService:
             raise TypeError("days must be a number")
         if not isinstance(merge, bool):
             raise TypeError("merge must be a boolean")
+        if not isinstance(create_if_missing, bool):
+            raise TypeError("create_if_missing must be a boolean")
         if not isinstance(confirm_replace, bool):
             raise TypeError("confirm_replace must be a boolean")
         if not isinstance(confirm_critical, bool):
@@ -1153,6 +1251,14 @@ class ManagerService:
             target_kind = "person"
             operation = "apply-person-preset"
             category_id = str(person_spec["id"])
+        elif resource_type.casefold() == "preset atom":
+            target_kind = "atom"
+            operation = "apply-atom-preset"
+            category_id = _atom_preset_category_id(atom_type)
+        elif resource_type.casefold() == "subscenes":
+            target_kind = "subscene"
+            operation = "load-subscene"
+            category_id = "subscenes"
         elif resource_type.casefold() == "scene":
             target_kind = "none"
             operation = "load-scene"
@@ -1168,6 +1274,10 @@ class ManagerService:
             "Preset_"
         )
         if person_spec is not None:
+            if create_if_missing:
+                raise ValueError(
+                    "create_if_missing is not supported for Person presets"
+                )
             if person_spec["risk"] == "critical" and not confirm_critical:
                 raise ValueError(
                     "confirm_critical must be true before applying "
@@ -1231,6 +1341,154 @@ class ManagerService:
                 "lease": lease,
             }
 
+        if target_kind == "atom":
+            if atom_type not in ATOM_TYPE_ALLOWLIST:
+                raise ValueError(
+                    f"Preset Atom for {atom_type or '<unknown>'} is browse-only "
+                    "because the atom type is not in VaM's native allowlist"
+                )
+            if not confirm_critical:
+                raise ValueError(
+                    "confirm_critical must be true before applying an Atom preset"
+                )
+            if create_if_missing and merge:
+                raise ValueError(
+                    "merge is not supported when create_if_missing is true"
+                )
+            scene = self._require_live_capability(
+                "atom-preset-apply",
+                action_label="an Atom preset can be applied",
+            )
+            uid, target_exists = self._validate_live_atom_target(
+                scene,
+                target_uid,
+                expected_atom_type=atom_type,
+                create_if_missing=create_if_missing,
+            )
+            if target_exists and not merge and not confirm_replace:
+                raise ValueError(
+                    "confirm_replace must be true when replacing an existing Atom"
+                )
+            resource_ref = self._catalog_resource_reference(
+                location,
+                required_prefix=f"Custom/Atom/{atom_type}/",
+                extension=".vap",
+                require_preset_basename=True,
+            )
+            lease = self.lease_resource(
+                resource_id,
+                days=float(days),
+                label=f"{atom_type} preset: {label}",
+                apply=location.packaged,
+                bridge_rescan=False,
+            )
+            rescan = self._lease_requires_bridge_rescan(
+                lease,
+                packaged=location.packaged,
+            )
+            request_id, bridge_message = self._try_queue_bridge_request(
+                lambda: request_atom_preset(
+                    self.vam_root,
+                    target_uid=uid,
+                    atom_type=atom_type,
+                    resource_ref=resource_ref,
+                    rescan=rescan,
+                    merge=merge,
+                    create_if_missing=create_if_missing,
+                )
+            )
+            return {
+                "resource_id": resource_id,
+                "category": category_id,
+                "operation": operation,
+                "target_uid": uid,
+                "target_atom_type": atom_type,
+                "target_existed": target_exists,
+                "create_if_missing": create_if_missing,
+                "resource_ref": resource_ref,
+                "merge": merge,
+                "rescan": rescan,
+                "bridge_request": request_id,
+                "bridge_busy": bridge_message is not None,
+                "bridge_message": bridge_message,
+                "lease": lease,
+            }
+
+        if target_kind == "subscene":
+            if "SubScene" not in ATOM_TYPE_ALLOWLIST:
+                raise ValueError(
+                    "SubScenes are browse-only because SubScene is not in "
+                    "VaM's native allowlist"
+                )
+            if atom_type != "SubScene":
+                raise ValueError(
+                    "the selected SubScene catalog resource has an invalid atom type"
+                )
+            if merge:
+                raise ValueError("merge is not supported when loading a SubScene")
+            if not confirm_critical:
+                raise ValueError(
+                    "confirm_critical must be true before loading a SubScene"
+                )
+            scene = self._require_live_capability(
+                "subscene-load",
+                action_label="a SubScene can be loaded",
+            )
+            uid, target_exists = self._validate_live_atom_target(
+                scene,
+                target_uid,
+                expected_atom_type="SubScene",
+                create_if_missing=create_if_missing,
+            )
+            if target_exists and not confirm_replace:
+                raise ValueError(
+                    "confirm_replace must be true when replacing an existing SubScene"
+                )
+            resource_ref = self._catalog_resource_reference(
+                location,
+                required_prefix="Custom/SubScene/",
+                extension=".json",
+                require_preset_basename=False,
+            )
+            lease = self.lease_resource(
+                resource_id,
+                days=float(days),
+                label=f"SubScene: {label}",
+                apply=location.packaged,
+                bridge_rescan=False,
+            )
+            rescan = self._lease_requires_bridge_rescan(
+                lease,
+                packaged=location.packaged,
+            )
+            request_id, bridge_message = self._try_queue_bridge_request(
+                lambda: request_subscene_load(
+                    self.vam_root,
+                    target_uid=uid,
+                    resource_ref=resource_ref,
+                    rescan=rescan,
+                    create_if_missing=create_if_missing,
+                )
+            )
+            return {
+                "resource_id": resource_id,
+                "category": category_id,
+                "operation": operation,
+                "target_uid": uid,
+                "target_atom_type": "SubScene",
+                "target_existed": target_exists,
+                "create_if_missing": create_if_missing,
+                "resource_ref": resource_ref,
+                "merge": False,
+                "rescan": rescan,
+                "bridge_request": request_id,
+                "bridge_busy": bridge_message is not None,
+                "bridge_message": bridge_message,
+                "lease": lease,
+            }
+
+        if create_if_missing:
+            raise ValueError("create_if_missing is not accepted when loading a Scene")
         if target_uid is not None:
             raise ValueError("target_uid is not accepted when loading a Scene")
         if not merge and not confirm_replace:
@@ -1310,6 +1568,84 @@ class ManagerService:
             return {
                 "operation": "add-person",
                 "target_uid": uid,
+                "already_exists": False,
+                "bridge_request": request_id,
+                "bridge_busy": bridge_message is not None,
+                "bridge_message": bridge_message,
+            }
+
+    def add_atom(
+        self,
+        category_id: str,
+        target_uid: str,
+    ) -> dict[str, object]:
+        """Idempotently add the allowlisted atom type owned by a category."""
+
+        category = self._workspace_category(category_id)
+        operation = str(category.get("operation") or "")
+        if not bool(category.get("live_action")) or operation not in {
+            "apply-atom-preset",
+            "load-subscene",
+        }:
+            raise ValueError(
+                f"workspace category {category['id']} is browse-only in this version"
+            )
+        atom_type = str(category.get("target_atom_type") or "")
+        if operation == "apply-atom-preset":
+            if atom_type not in ATOM_TYPE_ALLOWLIST:
+                raise ValueError(
+                    f"workspace category {category['id']} has an unsupported atom type"
+                )
+        elif atom_type != "SubScene" or atom_type not in ATOM_TYPE_ALLOWLIST:
+            raise ValueError(
+                "the SubScene category has an invalid or unsupported atom type"
+            )
+
+        uid = self._validate_target_uid(target_uid)
+        with self._bridge_mailbox_lock:
+            self._ensure_bridge_mailbox_idle()
+            scene = self._require_live_capability(
+                "atom-add",
+                action_label="an Atom can be added",
+            )
+            existing = next(
+                (
+                    atom
+                    for atom in scene.get("atoms", [])
+                    if isinstance(atom, dict)
+                    and str(atom.get("uid") or "") == uid
+                ),
+                None,
+            )
+            if existing is not None:
+                actual_type = str(existing.get("type") or "")
+                if actual_type != atom_type:
+                    raise ValueError(
+                        f"Atom {uid} has type {actual_type or '<unknown>'}; "
+                        f"expected {atom_type}"
+                    )
+                return {
+                    "operation": "add-atom",
+                    "category": str(category["id"]),
+                    "target_uid": uid,
+                    "target_atom_type": atom_type,
+                    "already_exists": True,
+                    "bridge_request": None,
+                    "bridge_busy": False,
+                    "bridge_message": None,
+                }
+            request_id, bridge_message = self._try_queue_bridge_request(
+                lambda: request_add_atom(
+                    self.vam_root,
+                    atom_type=atom_type,
+                    target_uid=uid,
+                )
+            )
+            return {
+                "operation": "add-atom",
+                "category": str(category["id"]),
+                "target_uid": uid,
+                "target_atom_type": atom_type,
                 "already_exists": False,
                 "bridge_request": request_id,
                 "bridge_busy": bridge_message is not None,

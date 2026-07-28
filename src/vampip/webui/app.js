@@ -355,6 +355,10 @@ const app = {
   personPollAt: 0,
   selectedPersonUid: "",
   selectedAtomUid: "",
+  atomTargetMode: "existing",
+  newAtomUid: "",
+  pendingAtomUid: "",
+  atomMutationInFlight: false,
   applyingWorkspaceResources: new Set(),
   workspaceCategories: [],
   workspaceCategoriesError: null,
@@ -440,6 +444,13 @@ function cacheElements() {
     "person-live-detail",
     "atom-context",
     "atom-target",
+    "atom-target-mode",
+    "atom-mode-existing",
+    "atom-mode-create",
+    "atom-existing-controls",
+    "atom-create-controls",
+    "atom-new-uid",
+    "add-atom-button",
     "select-atom-button",
     "atom-live-state",
     "atom-live-title",
@@ -547,8 +558,29 @@ function bindEvents() {
   elements.atomTarget.addEventListener("change", () => {
     app.selectedAtomUid = elements.atomTarget.value;
     renderAtomContext();
+    if (app.view === "workspace") renderLibrary();
   });
   elements.selectAtomButton.addEventListener("click", selectAtomInVam);
+  elements.addAtomButton.addEventListener("click", addAtomInVam);
+  for (const modeInput of [
+    elements.atomModeExisting,
+    elements.atomModeCreate,
+  ]) {
+    modeInput.addEventListener("change", () => {
+      if (!modeInput.checked || modeInput.disabled) return;
+      app.atomTargetMode = modeInput.value;
+      if (app.atomTargetMode === "create" && !app.newAtomUid) {
+        app.newAtomUid = suggestedAtomUid(currentWorkspaceCategory());
+      }
+      renderAtomContext();
+      if (app.view === "workspace") renderLibrary();
+    });
+  }
+  elements.atomNewUid.addEventListener("input", () => {
+    app.newAtomUid = elements.atomNewUid.value;
+    renderAtomContext();
+    if (app.view === "workspace") renderLibrary();
+  });
   elements.assetCategoryList.addEventListener("click", (event) => {
     const categoryButton = event.target.closest("[data-workspace-category]");
     if (categoryButton) {
@@ -704,11 +736,8 @@ async function loadActivity({ refreshOnTerminal = true } = {}) {
     renderLiveState(app.status || {});
     const workspaceCategory =
       app.view === "workspace" ? currentWorkspaceCategory() : null;
-    const bridgeState = String(
-      (app.person?.bridge && app.person.bridge.state) || "",
-    ).toLowerCase();
     const shouldPollScene =
-      PERSON_BRIDGE_BUSY_STATES.has(bridgeState) ||
+      snapshotBridgeBusy() ||
       Boolean(
         workspaceCategory &&
           (workspaceCategory.liveAction ||
@@ -1056,6 +1085,13 @@ function normalizeWorkspaceCategories(payload) {
           false,
         ),
         mergeSupported: booleanValue(entry.merge_supported, false),
+        createSupported: booleanValue(
+          entry.create_supported ?? entry.createSupported,
+          false,
+        ),
+        createCapability: String(
+          entry.create_capability || entry.createCapability || "",
+        ).trim(),
         requiredCapability: String(
           entry.required_capability ||
             entry.capability ||
@@ -1197,13 +1233,53 @@ function workspaceSupportBadge(label, state) {
 function workspaceApplyModes(category) {
   if (!category || !category.liveAction) return [];
   if (
-    !["load-scene", "load-preset", "apply-person-preset"].includes(
-      category.operation,
-    )
+    ![
+      "load-scene",
+      "load-preset",
+      "apply-person-preset",
+      "apply-atom-preset",
+      "load-subscene",
+    ].includes(category.operation)
   ) {
     return [];
   }
-  return category.mergeSupported ? ["replace", "merge"] : ["replace"];
+  const creatingManagedTarget =
+    categoryUsesManagedAtomTarget(category) &&
+    app.atomTargetMode === "create";
+  return category.mergeSupported && !creatingManagedTarget
+    ? ["replace", "merge"]
+    : ["replace"];
+}
+
+function syncWorkspaceApplyModeControls(category) {
+  const supportedModes = new Set(workspaceApplyModes(category));
+  const creatingManagedTarget =
+    categoryUsesManagedAtomTarget(category) &&
+    app.atomTargetMode === "create";
+  for (const input of [
+    elements.assetModeReplace,
+    elements.assetModeMerge,
+  ]) {
+    const supported = supportedModes.has(input.value);
+    input.disabled = !supported;
+    input.closest("label").title = supported
+      ? `${prettyType(input.value)} this ${category.noun}`
+      : input.value === "merge" && creatingManagedTarget
+        ? "Create new uses Replace because BrowserAssist cannot merge into a target that does not exist yet"
+        : category.liveAction
+          ? `${prettyType(input.value)} is not supported for ${category.label}`
+          : `${category.label} is browse-only with the current manager`;
+  }
+  if (!supportedModes.has(app.workspaceApplyMode)) {
+    app.workspaceApplyMode = supportedModes.has("replace")
+      ? "replace"
+      : supportedModes.has("merge")
+        ? "merge"
+        : "replace";
+  }
+  elements.assetModeReplace.checked = app.workspaceApplyMode === "replace";
+  elements.assetModeMerge.checked = app.workspaceApplyMode === "merge";
+  elements.assetApplyMode.hidden = supportedModes.size === 0;
 }
 
 function renderWorkspaceCategorySummary() {
@@ -1251,29 +1327,7 @@ function renderWorkspaceCategorySummary() {
   }
   elements.assetCategoryNote.textContent = note;
 
-  const supportedModes = new Set(workspaceApplyModes(category));
-  for (const input of [
-    elements.assetModeReplace,
-    elements.assetModeMerge,
-  ]) {
-    const supported = supportedModes.has(input.value);
-    input.disabled = !supported;
-    input.closest("label").title = supported
-      ? `${prettyType(input.value)} this ${category.noun}`
-      : category.liveAction
-        ? `${prettyType(input.value)} is not supported for ${category.label}`
-        : `${category.label} is browse-only with the current manager`;
-  }
-  if (!supportedModes.has(app.workspaceApplyMode)) {
-    app.workspaceApplyMode = supportedModes.has("replace")
-      ? "replace"
-      : supportedModes.has("merge")
-        ? "merge"
-        : "replace";
-  }
-  elements.assetModeReplace.checked = app.workspaceApplyMode === "replace";
-  elements.assetModeMerge.checked = app.workspaceApplyMode === "merge";
-  elements.assetApplyMode.hidden = supportedModes.size === 0;
+  syncWorkspaceApplyModeControls(category);
   elements.personContext.hidden = category.targetKind !== "person";
   elements.atomContext.hidden = !ATOM_TARGET_KINDS.has(category.targetKind);
   renderPersonContext();
@@ -1289,6 +1343,7 @@ function setWorkspaceCategory(categoryId) {
   app.items = [];
   app.total = 0;
   app.offset = 0;
+  prepareAtomTarget(category);
   renderWorkspaceCategoryNavigation();
   renderWorkspaceCategorySummary();
   updateWorkspaceSearchPlaceholder();
@@ -1337,6 +1392,78 @@ function atomsForCategory(category = currentWorkspaceCategory()) {
     : atoms;
 }
 
+function categoryUsesManagedAtomTarget(category = currentWorkspaceCategory()) {
+  return Boolean(
+    category &&
+      category.liveAction &&
+      ["apply-atom-preset", "load-subscene"].includes(category.operation),
+  );
+}
+
+function categorySupportsTargetCreation(
+  category = currentWorkspaceCategory(),
+) {
+  return Boolean(
+    categoryUsesManagedAtomTarget(category) && category.createSupported,
+  );
+}
+
+function categoryCreateCapability(category = currentWorkspaceCategory()) {
+  if (!categorySupportsTargetCreation(category)) return "";
+  return String(category.createCapability || "atom-add").trim();
+}
+
+function suggestedAtomUid(category = currentWorkspaceCategory()) {
+  const typeName =
+    String(category?.targetAtomType || "").trim() ||
+    (category?.targetKind === "subscene" ? "SubScene" : "Atom");
+  const base =
+    typeName
+      .replace(/[^a-z0-9_-]+/gi, "")
+      .replace(/^[-_]+|[-_]+$/g, "") || "Atom";
+  const used = new Set(atomList().map((atom) => atom.uid.toLowerCase()));
+  if (!used.has(base.toLowerCase())) return base;
+  let suffix = 2;
+  while (used.has(`${base}${suffix}`.toLowerCase())) suffix += 1;
+  return `${base}${suffix}`;
+}
+
+function atomUidIsValid(value) {
+  const uid = String(value || "").trim();
+  return (
+    uid.length > 0 &&
+    uid.length <= 200 &&
+    !Array.from(uid).some((character) => {
+      const code = character.charCodeAt(0);
+      return code < 32 || code === 127;
+    })
+  );
+}
+
+function activeAtomTargetUid(category = currentWorkspaceCategory()) {
+  if (!categoryUsesManagedAtomTarget(category)) return app.selectedAtomUid;
+  return app.atomTargetMode === "create"
+    ? app.newAtomUid.trim()
+    : app.selectedAtomUid;
+}
+
+function prepareAtomTarget(category = currentWorkspaceCategory()) {
+  const compatible = atomsForCategory(category);
+  if (compatible.length) {
+    if (!compatible.some((atom) => atom.uid === app.selectedAtomUid)) {
+      app.selectedAtomUid =
+        compatible.find((atom) => Boolean(atom.selected))?.uid ||
+        compatible[0].uid;
+    }
+    app.atomTargetMode = "existing";
+  } else if (categorySupportsTargetCreation(category)) {
+    app.atomTargetMode = "create";
+  } else {
+    app.atomTargetMode = "existing";
+  }
+  app.newAtomUid = suggestedAtomUid(category);
+}
+
 function personCapabilities(snapshot = app.person) {
   return new Set(
     asArray(snapshot && snapshot.capabilities)
@@ -1355,6 +1482,12 @@ function personVamRunning(snapshot = app.person) {
   return Boolean(app.status && app.status.vam && app.status.vam.running);
 }
 
+function snapshotBridgeBusy(snapshot = app.person) {
+  if (snapshot && snapshot.bridge_busy === true) return true;
+  const state = String(snapshot?.bridge?.state || "").toLowerCase();
+  return PERSON_BRIDGE_BUSY_STATES.has(state);
+}
+
 function personControlKey() {
   const snapshot = app.person || {};
   return JSON.stringify({
@@ -1362,6 +1495,7 @@ function personControlKey() {
     vamRunning: personVamRunning(snapshot),
     available: Boolean(snapshot.available),
     loading: Boolean(snapshot.loading),
+    bridgeBusy: snapshotBridgeBusy(snapshot),
     selected: app.selectedPersonUid,
     capabilities: Array.from(personCapabilities(snapshot)).sort(),
     persons: personList(snapshot).map((person) => [
@@ -1396,7 +1530,11 @@ function acceptPersonSnapshot(snapshot) {
 
   const atoms = atomList(snapshot);
   const knownAtoms = new Set(atoms.map((atom) => atom.uid));
-  if (!knownAtoms.has(app.selectedAtomUid)) {
+  if (app.pendingAtomUid && knownAtoms.has(app.pendingAtomUid)) {
+    app.selectedAtomUid = app.pendingAtomUid;
+    app.pendingAtomUid = "";
+    app.atomTargetMode = "existing";
+  } else if (!knownAtoms.has(app.selectedAtomUid)) {
     const requested = String(snapshot.selected_uid || "").trim();
     const selected = atoms.find((atom) => Boolean(atom.selected));
     app.selectedAtomUid = knownAtoms.has(requested)
@@ -1452,7 +1590,7 @@ function renderPersonContext() {
   const gameRunning = personVamRunning(snapshot);
   const bridge = snapshot.bridge || {};
   const bridgeState = String(bridge.state || "").toLowerCase();
-  const bridgeBusy = PERSON_BRIDGE_BUSY_STATES.has(bridgeState);
+  const bridgeBusy = snapshotBridgeBusy(snapshot);
 
   elements.personTarget.replaceChildren();
   if (persons.length) {
@@ -1576,10 +1714,27 @@ function renderAtomContext() {
   const snapshot = app.person || {};
   const capabilities = personCapabilities(snapshot);
   const atoms = atomsForCategory(category);
+  const managedTarget = categoryUsesManagedAtomTarget(category);
+  const creationSupported = categorySupportsTargetCreation(category);
+  const createCapability = categoryCreateCapability(category);
   const known = new Set(atoms.map((atom) => atom.uid));
   if (!known.has(app.selectedAtomUid)) {
     const selected = atoms.find((atom) => Boolean(atom.selected));
     app.selectedAtomUid = selected?.uid || atoms[0]?.uid || "";
+  }
+  if (!managedTarget) {
+    app.atomTargetMode = "existing";
+  } else if (!creationSupported && app.atomTargetMode === "create") {
+    app.atomTargetMode = "existing";
+  } else if (
+    creationSupported &&
+    !atoms.length &&
+    app.atomTargetMode === "existing"
+  ) {
+    app.atomTargetMode = "create";
+  }
+  if (managedTarget && !app.newAtomUid) {
+    app.newAtomUid = suggestedAtomUid(category);
   }
 
   elements.atomTarget.replaceChildren();
@@ -1600,13 +1755,47 @@ function renderAtomContext() {
         : "Start VaM to inspect atoms";
     elements.atomTarget.append(new Option(label, ""));
   }
-  elements.atomTarget.disabled = !atoms.length || Boolean(snapshot.loading);
-
-  const bridgeState = String(snapshot.bridge?.state || "").toLowerCase();
-  const bridgeBusy = PERSON_BRIDGE_BUSY_STATES.has(bridgeState);
+  const bridgeBusy = snapshotBridgeBusy(snapshot);
   const canSelect = capabilities.has("atom-select");
+  const canApply =
+    !category.requiredCapability ||
+    capabilities.has(category.requiredCapability);
+  const canAddAtom =
+    categoryUsesManagedAtomTarget(category) &&
+    creationSupported &&
+    (!createCapability || capabilities.has(createCapability));
+  const creating = managedTarget && app.atomTargetMode === "create";
+  syncWorkspaceApplyModeControls(category);
+  const newUid = app.newAtomUid.trim();
+  const newUidValid = atomUidIsValid(newUid);
+  const uidAlreadyExists = atomList(snapshot).some(
+    (atom) => atom.uid.toLowerCase() === newUid.toLowerCase(),
+  );
+  const targetControlsBusy =
+    app.atomMutationInFlight ||
+    Boolean(snapshot.loading) ||
+    bridgeBusy ||
+    app.applyingWorkspaceResources.size > 0;
+
+  elements.atomTarget.disabled = !atoms.length || targetControlsBusy;
+  elements.atomTargetMode.hidden = !managedTarget;
+  elements.atomModeExisting.disabled = !atoms.length || targetControlsBusy;
+  elements.atomModeExisting.checked = !creating;
+  elements.atomModeCreate.disabled = !creationSupported || targetControlsBusy;
+  elements.atomModeCreate.checked = creating;
+  elements.atomExistingControls.hidden = creating;
+  elements.atomCreateControls.hidden = !creating;
+  if (elements.atomNewUid.value !== app.newAtomUid) {
+    elements.atomNewUid.value = app.newAtomUid;
+  }
+  elements.atomNewUid.disabled =
+    targetControlsBusy ||
+    !creationSupported ||
+    !personVamRunning(snapshot) ||
+    !snapshot.available;
+
   elements.selectAtomButton.disabled =
-    app.personMutationInFlight ||
+    app.atomMutationInFlight ||
     !personVamRunning(snapshot) ||
     !snapshot.available ||
     Boolean(snapshot.loading) ||
@@ -1618,6 +1807,29 @@ function renderAtomContext() {
     : !app.selectedAtomUid
       ? "Choose a compatible atom first"
       : "";
+  elements.addAtomButton.hidden = !categoryUsesManagedAtomTarget(category);
+  if (elements.addAtomButton.getAttribute("aria-busy") !== "true") {
+    elements.addAtomButton.textContent = category.targetAtomType
+      ? `Add ${category.targetAtomType}`
+      : "Add atom now";
+  }
+  elements.addAtomButton.disabled =
+    app.atomMutationInFlight ||
+    !personVamRunning(snapshot) ||
+    !snapshot.available ||
+    Boolean(snapshot.loading) ||
+    bridgeBusy ||
+    !canAddAtom ||
+    !newUidValid ||
+    uidAlreadyExists;
+  elements.addAtomButton.title =
+    createCapability && !capabilities.has(createCapability)
+      ? "The loaded bridge does not support adding this atom type"
+      : !newUidValid
+        ? "Enter a printable UID between 1 and 200 characters"
+        : uidAlreadyExists
+          ? "An atom already uses this UID"
+          : "";
 
   const state = elements.atomLiveState;
   state.classList.remove("is-ready", "is-warning", "is-error");
@@ -1639,20 +1851,52 @@ function renderAtomContext() {
     state.classList.add("is-warning");
     title = snapshot.loading ? "VaM is loading the scene" : "Bridge action in progress";
     detail = String(snapshot.bridge?.message || "Atom selection will resume shortly.");
-  } else if (!canSelect) {
+  } else if (!category.liveAction) {
+    state.classList.add("is-warning");
+    title = "This category is browse-only";
+    detail =
+      "The atom roster can help you inspect the scene, but this manager does not expose a live load for the category.";
+  } else if (!canApply) {
     state.classList.add("is-warning");
     title = "Bridge update required";
-    detail = "This bridge does not advertise atom-select.";
-  } else if (!atoms.length) {
+    detail = `This bridge does not advertise ${category.requiredCapability}.`;
+  } else if (creating && !newUidValid) {
+    state.classList.add("is-warning");
+    title = "Choose a new atom UID";
+    detail = "The UID must contain 1 to 200 printable characters.";
+  } else if (
+    creating &&
+    createCapability &&
+    !capabilities.has(createCapability)
+  ) {
+    state.classList.add("is-warning");
+    title = "This bridge cannot create the target";
+    detail =
+      `Switch to an existing compatible atom, or update the bridge for ${createCapability} support.`;
+  } else if (creating && uidAlreadyExists) {
+    state.classList.add("is-warning");
+    title = "That UID already exists";
+    detail = "Switch to Existing or choose another UID.";
+  } else if (!creating && !atoms.length) {
     state.classList.add("is-warning");
     title = "No compatible target atoms";
-    detail = `The current scene has no target matching ${category.label}.`;
+    detail = creationSupported
+      ? "Choose Create new to make the required target while loading."
+      : managedTarget
+        ? "This category can only load into an existing compatible atom."
+        : `The current scene has no target matching ${category.label}.`;
   } else {
     state.classList.add("is-ready");
-    title = `Ready for ${app.selectedAtomUid}`;
-    detail = category.liveAction
-      ? "Choose an asset below to load it onto this atom."
-      : "Select the atom in VaM while browsing this asset family.";
+    title = creating
+      ? `Ready to create ${newUid}`
+      : `Ready for ${app.selectedAtomUid}`;
+    detail = creating
+      ? category.operation === "load-subscene"
+        ? "Loading a SubScene below will create this SubScene atom and fill it."
+        : "Load a preset below to create the typed atom and apply it, or add the empty atom now."
+      : canSelect
+        ? "Choose an asset below to load it onto this target, or select it in VaM."
+        : "Choose an asset below to load it onto this target.";
   }
   elements.atomLiveTitle.textContent = title;
   elements.atomLiveDetail.textContent = detail;
@@ -1686,8 +1930,8 @@ async function selectPersonInVam() {
 
 async function selectAtomInVam() {
   const targetUid = app.selectedAtomUid;
-  if (!targetUid || app.personMutationInFlight) return;
-  app.personMutationInFlight = true;
+  if (!targetUid || app.atomMutationInFlight) return;
+  app.atomMutationInFlight = true;
   setButtonBusy(elements.selectAtomButton, true, "Selecting…");
   renderAtomContext();
   try {
@@ -1704,8 +1948,63 @@ async function selectAtomInVam() {
   } catch (error) {
     toast("Could not select atom", errorMessage(error), "error");
   } finally {
-    app.personMutationInFlight = false;
+    app.atomMutationInFlight = false;
     setButtonBusy(elements.selectAtomButton, false);
+    renderAtomContext();
+  }
+}
+
+async function addAtomInVam() {
+  const category = currentWorkspaceCategory();
+  const targetUid = app.newAtomUid.trim();
+  const createCapability = categoryCreateCapability(category);
+  if (
+    !category ||
+    !categoryUsesManagedAtomTarget(category) ||
+    !categorySupportsTargetCreation(category) ||
+    !atomUidIsValid(targetUid) ||
+    atomList().some(
+      (atom) => atom.uid.toLowerCase() === targetUid.toLowerCase(),
+    ) ||
+    (createCapability &&
+      !personCapabilities().has(createCapability)) ||
+    app.atomMutationInFlight
+  ) {
+    return;
+  }
+  const confirmed = await showDialog({
+    eyebrow: "Add typed atom",
+    title: `Add “${targetUid}”?`,
+    message: `VaM will add a ${category.targetAtomType || "compatible"} atom to the current scene. The atom remains empty until you load a preset or configure it.`,
+    confirmLabel: "Add atom",
+    icon: "warning",
+  });
+  if (!confirmed) return;
+
+  app.atomMutationInFlight = true;
+  renderAtomContext();
+  setButtonBusy(elements.addAtomButton, true, "Adding…");
+  try {
+    const result = await api("/api/vam/atom/add", {
+      method: "POST",
+      body: {
+        category_id: category.id,
+        target_uid: targetUid,
+      },
+    });
+    requireBridgeQueue(result, "Add atom");
+    app.pendingAtomUid = String(result.target_uid || result.uid || targetUid);
+    toast(
+      "Atom queued",
+      result.message ||
+        `${app.pendingAtomUid} will be added as ${category.targetAtomType || "the category’s atom type"}.`,
+    );
+    await loadPersons({ quiet: true });
+  } catch (error) {
+    toast("Could not add atom", errorMessage(error), "error");
+  } finally {
+    app.atomMutationInFlight = false;
+    setButtonBusy(elements.addAtomButton, false);
     renderAtomContext();
   }
 }
@@ -2297,10 +2596,21 @@ function workspaceApplyAvailability(item, category = currentWorkspaceCategory())
   ).toLowerCase();
   const resourceId = Number(item.id);
   const gameRunning = personVamRunning(snapshot);
-  const bridgeState = String(
-    (snapshot.bridge && snapshot.bridge.state) || "",
-  ).toLowerCase();
   const key = `${category?.id || "asset"}:${resourceId}`;
+  const managedAtomTarget = categoryUsesManagedAtomTarget(category);
+  const creatingAtomTarget =
+    managedAtomTarget && app.atomTargetMode === "create";
+  const creationSupported = categorySupportsTargetCreation(category);
+  const createCapability = categoryCreateCapability(category);
+  const capabilities = personCapabilities(snapshot);
+  const atomTargetUid = activeAtomTargetUid(category);
+  const compatibleAtoms = atomsForCategory(category);
+  const atomTargetExists = compatibleAtoms.some(
+    (atom) => atom.uid === atomTargetUid,
+  );
+  const anyUidCollision = atomList(snapshot).some(
+    (atom) => atom.uid.toLowerCase() === atomTargetUid.toLowerCase(),
+  );
   let reason = "";
 
   if (state === "missing") {
@@ -2317,18 +2627,43 @@ function workspaceApplyAvailability(item, category = currentWorkspaceCategory())
     reason = "The bridge is not publishing a fresh scene snapshot";
   } else if (
     category.requiredCapability &&
-    !personCapabilities(snapshot).has(category.requiredCapability)
+    !capabilities.has(category.requiredCapability)
   ) {
     reason = `Update and reload the bridge to enable ${category.requiredCapability}`;
   } else if (snapshot.loading) {
     reason = "Wait for VaM to finish loading the scene";
-  } else if (PERSON_BRIDGE_BUSY_STATES.has(bridgeState)) {
+  } else if (snapshotBridgeBusy(snapshot)) {
     reason = "Wait for the current bridge action to finish";
+  } else if (app.atomMutationInFlight) {
+    reason = "Wait for the current atom action to finish";
   } else if (
     (category.targetKind === "person" &&
       (!selected || !persons.some((person) => person.uid === selected)))
   ) {
     reason = "Choose an available Person target first";
+  } else if (managedAtomTarget && !atomTargetUid) {
+    reason = creatingAtomTarget
+      ? "Enter a new target UID first"
+      : "Choose a compatible target atom first";
+  } else if (
+    managedAtomTarget &&
+    creatingAtomTarget &&
+    !atomUidIsValid(atomTargetUid)
+  ) {
+    reason = "Enter a printable UID between 1 and 200 characters";
+  } else if (managedAtomTarget && creatingAtomTarget && !creationSupported) {
+    reason = "This category can only use an existing compatible target";
+  } else if (managedAtomTarget && !creatingAtomTarget && !atomTargetExists) {
+    reason = "Choose an available compatible target atom";
+  } else if (managedAtomTarget && creatingAtomTarget && anyUidCollision) {
+    reason = "Another atom already uses this UID";
+  } else if (
+    managedAtomTarget &&
+    creatingAtomTarget &&
+    createCapability &&
+    !capabilities.has(createCapability)
+  ) {
+    reason = `Update the bridge for ${createCapability} support, or use an existing target`;
   } else if (app.applyingWorkspaceResources.has(key)) {
     reason = "This asset is already being queued";
   }
@@ -2338,6 +2673,14 @@ function workspaceApplyAvailability(item, category = currentWorkspaceCategory())
     label = "Package not installed";
   } else if (category?.operation === "load-scene") {
     label = app.workspaceApplyMode === "merge" ? "Merge scene" : "Replace scene";
+  } else if (category?.operation === "load-subscene") {
+    label = creatingAtomTarget ? "Create & load SubScene" : "Load SubScene";
+  } else if (category?.operation === "apply-atom-preset") {
+    label = creatingAtomTarget
+      ? "Create atom & load"
+      : app.workspaceApplyMode === "merge"
+        ? "Merge preset"
+        : "Load preset";
   } else if (app.workspaceApplyMode === "merge") {
     label = state === "active" || state === "local" ? "Merge" : "Enable & merge";
   } else {
@@ -2373,15 +2716,24 @@ async function confirmSceneLoad(item, merge) {
   });
 }
 
-async function confirmRiskyAssetLoad(item, category) {
+async function confirmRiskyAssetLoad(item, category, merge) {
   const critical = category.risk === "critical";
+  const managedTarget = categoryUsesManagedAtomTarget(category);
+  const targetUid = managedTarget ? activeAtomTargetUid(category) : "";
+  const targetNote = managedTarget
+    ? app.atomTargetMode === "create"
+      ? ` A new ${category.targetAtomType || "compatible"} atom named “${targetUid}” will be created.`
+      : ` Existing atom “${targetUid}” will be changed.`
+    : "";
   return showDialog({
     eyebrow: critical ? "Critical live action" : "High-impact live action",
     title: `Load “${resourceTitle(item)}”?`,
     message:
-      category.riskReason ||
-      `This ${category.noun} can make broad or executable changes to the selected target.`,
-    confirmLabel: app.workspaceApplyMode === "merge" ? "Merge asset" : "Load asset",
+      `${
+        category.riskReason ||
+        `This ${category.noun} can make broad or executable changes to the selected target.`
+      }${targetNote}`,
+    confirmLabel: merge ? "Merge asset" : "Load asset",
     icon: critical ? "danger" : "warning",
   });
 }
@@ -2390,7 +2742,12 @@ async function applyWorkspaceResource(item, category, sourceButton) {
   const resourceId = Number(item.id);
   if (!Number.isInteger(resourceId) || resourceId < 1 || !category) return;
 
-  const merge = app.workspaceApplyMode === "merge";
+  const managedTarget = categoryUsesManagedAtomTarget(category);
+  const createIfMissing =
+    managedTarget && app.atomTargetMode === "create";
+  const merge =
+    !createIfMissing && app.workspaceApplyMode === "merge";
+  const atomTargetUid = managedTarget ? activeAtomTargetUid(category) : "";
   let confirmedReplace = false;
   let confirmedRisk = false;
   if (category.operation === "load-scene") {
@@ -2398,12 +2755,16 @@ async function applyWorkspaceResource(item, category, sourceButton) {
     if (!confirmed) return;
     confirmedReplace = !merge;
   } else if (["high", "critical"].includes(category.risk)) {
-    confirmedRisk = Boolean(await confirmRiskyAssetLoad(item, category));
+    confirmedRisk = Boolean(
+      await confirmRiskyAssetLoad(item, category, merge),
+    );
     if (!confirmedRisk) return;
+    confirmedReplace = managedTarget && !createIfMissing && !merge;
   }
 
   const key = `${category.id}:${resourceId}`;
   app.applyingWorkspaceResources.add(key);
+  if (managedTarget) renderAtomContext();
   setButtonBusy(sourceButton, true, "Queuing…");
   try {
     const body = {
@@ -2411,22 +2772,32 @@ async function applyWorkspaceResource(item, category, sourceButton) {
       merge,
       days: 3,
       confirm_critical: confirmedRisk,
+      confirm_replace: confirmedReplace,
+      create_if_missing: createIfMissing,
     };
     if (category.targetKind === "person") {
       body.target_uid = app.selectedPersonUid;
+    } else if (managedTarget) {
+      body.target_uid = atomTargetUid;
     }
-    if (confirmedReplace) body.confirm_replace = true;
 
     const result = await api("/api/vam/resource/apply", {
       method: "POST",
       body,
     });
     requireBridgeQueue(result, `${prettyType(category.noun)} load`);
+    if (createIfMissing) app.pendingAtomUid = atomTargetUid;
     const requestId =
       result.request_id || result.action_id || result.bridge_request || "";
     const detail =
       result.message ||
-      `Queued ${category.targetKind === "person" ? `for ${app.selectedPersonUid}` : "for VaM"}. VAM-PIP will enable required packages, rescan when needed, and load the asset${
+      `Queued ${
+        category.targetKind === "person"
+          ? `for ${app.selectedPersonUid}`
+          : managedTarget
+            ? `for ${atomTargetUid}`
+            : "for VaM"
+      }. VAM-PIP will enable required packages, rescan when needed, and load the asset${
         requestId ? ` · request ${String(requestId).slice(0, 8)}` : ""
       }.`;
     toast(`${prettyType(category.noun)} queued`, detail);
@@ -2440,6 +2811,7 @@ async function applyWorkspaceResource(item, category, sourceButton) {
   } finally {
     app.applyingWorkspaceResources.delete(key);
     setButtonBusy(sourceButton, false);
+    if (managedTarget) renderAtomContext();
     if (app.view === "workspace") renderLibrary();
   }
 }

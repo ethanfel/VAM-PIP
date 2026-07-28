@@ -510,12 +510,15 @@ while a large switch is running.
 
 Mutating endpoints cover scans, catalog imports, session-default imports,
 pins, leases, reconciliation, deactivation, settings, VaM launch, atom
-selection, Person add/select, and catalogue-backed resource application at
-`/api/vam/resource/apply`. The generic apply route currently dispatches only
-the eleven allowlisted Person preset types and Scene replace/merge. Other
-workspace categories are browse-only. The older `/api/vam/person/apply`
-remains as a narrower compatibility route. The HTTP layer only validates and
-translates requests; it delegates behavior to `ManagerService`.
+selection/creation, Person add/select, and catalogue-backed resource
+application at `/api/vam/resource/apply`. The generic apply route dispatches
+the eleven allowlisted Person preset types, Scene replace/merge, typed native
+atom presets, and SubScenes. `/api/vam/atom/add` creates only the native type
+derived from a server-owned live category. Unsupported atom types and the
+remaining workspace categories stay browse-only. The older
+`/api/vam/person/apply` remains as a narrower compatibility route. The HTTP
+layer only validates and translates requests; it delegates behavior to
+`ManagerService`.
 
 The token is generated with `secrets.token_urlsafe(32)` and stored in
 `manager_settings`. The launch URL carries it in a fragment. The UI moves it to
@@ -606,21 +609,53 @@ Scene loading uses the same mailbox:
 }
 ```
 
-The web API accepts only a numeric catalogue resource ID plus typed options
-and, for Person presets, a target UID. `ManagerService` resolves that ID to an
-installed archive member or safe loose file, creates the exact dependency
-lease, enables it, and derives `resourceRef`; the browser cannot provide the
-reference. Non-merge Scene loading additionally requires
-`confirm_replace: true` at the API boundary.
-Critical General and Person Plugin presets require
-`confirm_critical: true`.
+Typed atom presets and SubScenes use the same resource-ID-derived contract:
+
+```json
+{
+  "protocol": 2,
+  "requestId": "9d9a02b2afbd449ba7d8297108c58b29",
+  "command": "applyAtomPreset",
+  "createdAtUtc": "2026-07-28T12:02:00+00:00",
+  "targetUid": "WindowCamera2",
+  "atomType": "WindowCamera",
+  "resourceRef": "Creator.Camera.1:/Custom/Atom/WindowCamera/Preset_Close.vap",
+  "rescan": true,
+  "merge": false,
+  "createIfMissing": true
+}
+```
+
+`loadSubscene` carries the same target, resource, rescan, and
+`createIfMissing` fields, fixes the target type to `SubScene`, and does not
+offer merge mode.
+
+The generic resource web API accepts only a numeric catalogue resource ID plus
+typed options and, for targeted resources, a target UID. Standalone native
+atom creation accepts a server-owned category ID and caller-chosen UID rather
+than an atom type. `ManagerService` derives the allowlisted type and resolves
+the resource ID to an installed archive member or safe loose file, creates the
+exact dependency lease, enables it, and derives `resourceRef`; the browser
+cannot provide a reference, type, storable, or action.
+
+Create mode is a strict execution-time precondition, not permission to reuse a
+target: both the service snapshot and bridge reject the request if its UID is
+already occupied. The final mailbox idle-check and atomic publication are
+serialized by an advisory lock shared across manager processes as well as the
+in-process gate.
+
+Non-merge Scene loading additionally requires `confirm_replace: true` at the
+API boundary. Critical General and Person Plugin presets, native atom presets,
+and SubScenes require `confirm_critical: true`.
 
 Both Python and C# require Person presets to be `.vap` files named `Preset_*`
-below the preset kind's static `Custom/Atom/Person/.../` prefix. Scene
-references must be `.json` files below `Saves/scene/`. Both layers reject
-traversal, absolute/URI/control-character forms, backslashes, malformed
-package identities, and mismatched prefixes. The plugin confirms every file
-through `FileManagerSecure`.
+below the preset kind's static `Custom/Atom/Person/.../` prefix. Native atom
+presets must be `Preset_*.vap` below the matching
+`Custom/Atom/<AllowlistedType>/` prefix. SubScenes must be `.json` below
+`Custom/SubScene/`; Scene references must be `.json` below `Saves/scene/`.
+Both layers reject traversal, absolute/URI/control-character forms,
+backslashes, malformed package identities, and mismatched prefixes. The
+plugin confirms every file through `FileManagerSecure`.
 
 The session plugin:
 
@@ -634,9 +669,14 @@ The session plugin:
 - maps each Person preset kind to one fixed prefix and one fixed native preset
   storable, sets its validated `presetBrowsePath`, and invokes only
   `LoadPreset` or `MergeLoadPreset`;
+- validates non-Person preset types against a shared native allowlist, targets
+  that exact type or creates it only while its UID remains unused, and invokes
+  only its fixed `Preset` storable;
+- targets `SubScene` or creates it only while its UID remains unused, then sets
+  only the fixed `SubScene.browsePath` URL;
 - loads Scenes only through `SuperController.Load` or `LoadMerge`;
-- lists/selects atoms and idempotently creates a Person with a caller-chosen
-  UID;
+- lists/selects atoms and idempotently creates allowlisted atoms with a
+  caller-chosen UID;
 - never enables, disables, deletes, or launches anything.
 
 Protocol 2 retains the `browserAssist` field for compatibility, but the bridge

@@ -146,26 +146,41 @@ The bridge cannot rename, enable, disable, or delete package/content files and
 accepts no process commands or network connections. Its only writes are its
 own status and scene-snapshot mailbox files. Protocol 2 accepts core package
 rescans and a small registry of bounded live operations: list/select atoms,
-idempotently add/select a Person, apply one of eleven native Person preset
-families, and replace or merge a Scene.
+idempotently create allowlisted native atoms, add/select a Person, apply
+matching native atom or Person presets, load a SubScene into a typed target,
+and replace or merge a Scene.
 
 The Linux manager completes archive renames and its inventory update before
 publishing `request.json`. The generic resource HTTP endpoint accepts only a
 numeric catalogue resource ID, typed booleans, and an optional target UID. The
-manager resolves the exact installed archive member or safe loose file;
-clients cannot provide a path, storable ID, or action name. Scene replacement
-requires a strict `confirm_replace: true` value at the service boundary.
-General and Person Plugin presets require a separate strict
-`confirm_critical: true` value.
+standalone atom-creation endpoint accepts a server-owned category ID and
+caller-chosen UID. The manager derives the allowlisted atom type and resolves
+the exact installed archive member or safe loose file; clients cannot provide
+a path, atom type, storable ID, or action name.
+
+Scene replacement requires a strict `confirm_replace: true` value at the
+service boundary. General and Person Plugin presets, non-Person atom presets,
+and SubScenes require a separate strict `confirm_critical: true` value because
+the selected content can include executable plugin state.
 
 The Python writer and C# reader both allow Person `.vap` files named
 `Preset_*` only below a static kind-specific `Custom/Atom/Person/.../`
-directory. Scenes must be `.json` files below `Saves/scene/`. They reject
-absolute paths, URIs, traversal, backslashes, control characters, mismatched
-prefixes, and malformed package references. The plugin also requires
-`FileManagerSecure.FileExists`, revalidates live atom types, and invokes only
-fixed preset storables/actions or `SuperController.Load`/`LoadMerge`. It
-contains no arbitrary storable/action surface.
+directory. Non-Person atom presets must be `Preset_*.vap` below the matching
+`Custom/Atom/<AllowlistedType>/` directory. SubScenes must be `.json` below
+`Custom/SubScene/`, and Scenes must be `.json` below `Saves/scene/`. They
+reject absolute paths, URIs, traversal, backslashes, control characters,
+mismatched prefixes, and malformed package references.
+
+The plugin also requires `FileManagerSecure.FileExists`, revalidates live atom
+types, and invokes only the fixed `Preset` or `SubScene` storables, the static
+Person-preset registry, or `SuperController.Load`/`LoadMerge`. It contains no
+arbitrary storable/action surface.
+
+Create-new is checked twice. The manager requires the UID to be absent from a
+fresh scene roster, and the bridge refuses the load if the UID is occupied by
+execution time. Existing-target replacement therefore cannot be reached using
+a create-mode confirmation. A shared advisory lock also serializes the final
+mailbox idle-check and publication across manager processes.
 
 The C# plugin performs rescans synchronously on Unity's main thread, defers
 during scene loading, coalesces compatible rescan requests, serializes all
@@ -182,6 +197,9 @@ the web UI enables a live action.
 | Hide undesired packages | Applied | Deferred |
 | Release/expire a lease | Reconciled fully | Removal deferred |
 | Apply Person preset | Unavailable; browse only | Enabled closure, rescan, then replace/merge |
+| Create native atom | Unavailable | Allowed only for a shared static atom-type allowlist |
+| Apply native atom preset | Unavailable; browse only | Enabled closure, critical confirmation, then typed replace/merge |
+| Load SubScene | Unavailable; browse only | Enabled closure, critical confirmation, then load into an existing/new `SubScene` atom |
 | Load or merge Scene | Unavailable; browse only | Enabled closure, rescan, then confirmed load/merge |
 | Add/select Person or select atom | Unavailable | Allowed through an idempotent/bounded command |
 | Apply managed-mode deactivation | Allowed | Refused |
@@ -379,7 +397,7 @@ can freeze VaM briefly.
 | Partial multi-file switch | Prewritten canonical plan, batched `fsync`ed append-only progress, filesystem identity inspection, preflighted rollback, best-effort automatic reverse rollback | SIGKILL can leave a rename ahead of a progress batch; archive directories are not `fsync`ed, and no transaction spans every rename |
 | SQLite/filesystem split state | Baseline and mode updates are deliberately ordered around switches | No transaction spans SQLite and archive renames; a crash requires checking both |
 | Live package removal | Running VaM gets enable-only plans | A false-negative process probe can make an unsafe disable possible |
-| Bridge abuse | Allowlisted commands, server-side catalogue resolution, duplicate/single-flight handling, dual kind/path validation, fixed preset/Scene actions, fresh atom-roster heartbeat, loading deferral, five-second rescan rate limit | A same-user process with token or mailbox access can still request a valid preset or Scene change or periodic rescan; a VaM plugin already has comparable scene authority |
+| Bridge abuse | Allowlisted commands and native atom types, server-side catalogue resolution, process-shared mailbox locking, duplicate/single-flight handling, strict create-new preconditions, dual kind/path validation, fixed preset/SubScene/Scene actions, fresh atom-roster heartbeat, loading deferral, five-second rescan rate limit | A same-user process with token or mailbox access can still request a valid atom, preset, SubScene, or Scene change or periodic rescan; a VaM plugin already has comparable scene authority |
 | BrowserAssist volatility | Pre-read 64 MiB size check, before/after fingerprint snapshot, schema validation, savepoint, preservation of exact installed hidden-package rows | A concurrently growing file is read before rejection and can exceed 64 MiB in memory; metadata for hidden resources remains last-good until BrowserAssist sees them again |
 | Malformed session defaults | Fixed preset path, 16 MiB read bound, strict JSON/slot/reference validation, complete package resolution before activation | The preset expresses availability intent only; VaM remains responsible for executing the selected plugins |
 | Malicious package payload | No archive extraction; targeted bounded thumbnail/reference reads | VaM itself executes plugins; VAM-PIP does not establish package trust |

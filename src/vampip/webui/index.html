@@ -6,8 +6,8 @@
     <meta name="color-scheme" content="dark">
     <meta name="theme-color" content="#111316">
     <title>VAM-PIP Manager</title>
-    <link rel="stylesheet" href="/styles.css?v=0.4.0">
-    <script src="/app.js?v=0.4.0" defer></script>
+    <link rel="stylesheet" href="/styles.css?v=0.5.0">
+    <script src="/app.js?v=0.5.0" defer></script>
   </head>
   <body>
     <a class="skip-link" href="#main-content">Skip to library</a>
@@ -288,7 +288,20 @@
                   <p class="eyebrow">Live target</p>
                   <h3 id="atom-context-title">Target atom</h3>
                 </div>
-                <div class="person-target-controls">
+                <fieldset class="target-mode" id="atom-target-mode">
+                  <legend>Target behavior</legend>
+                  <label>
+                    <input id="atom-mode-existing" type="radio" name="atom-target-mode" value="existing" checked>
+                    <span>Existing</span>
+                  </label>
+                  <label>
+                    <input id="atom-mode-create" type="radio" name="atom-target-mode" value="create">
+                    <span>Create new</span>
+                  </label>
+                </fieldset>
+              </div>
+
+              <div class="person-target-controls" id="atom-existing-controls">
                   <label class="person-target-field" for="atom-target">
                     <span>Scene atom</span>
                     <select id="atom-target" aria-describedby="atom-live-detail">
@@ -304,7 +317,28 @@
                   >
                     Select in VaM
                   </button>
-                </div>
+              </div>
+
+              <div class="person-target-controls" id="atom-create-controls" hidden>
+                <label class="person-target-field" for="atom-new-uid">
+                  <span>New atom UID</span>
+                  <input
+                    id="atom-new-uid"
+                    type="text"
+                    maxlength="200"
+                    autocomplete="off"
+                    aria-describedby="atom-live-detail"
+                    placeholder="NewAtom"
+                  >
+                </label>
+                <button
+                  class="secondary-button"
+                  id="add-atom-button"
+                  type="button"
+                  hidden
+                >
+                  Add atom now
+                </button>
               </div>
 
               <div class="person-live-state" id="atom-live-state" role="status" aria-live="polite">

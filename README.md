@@ -21,7 +21,7 @@ leaving managed mode restores that baseline.
 
 ## Current status
 
-Version 0.4.0 is functional but should still be treated as an early release.
+Version 0.5.0 is functional but should still be treated as an early release.
 Package switching is deliberately conservative:
 
 - entering managed mode requires explicit confirmation;
@@ -162,13 +162,17 @@ families. Every category says whether it is:
 - loadable through the current bridge;
 - waiting for a typed live-state implementation.
 
-This version can load or merge a Scene, list and select live atoms, add/select
-a Person, and replace or merge all eleven native Person preset families:
-Appearance, Animation, Breast Physics, Clothing, General, Glute Physics, Hair,
-Morphs, Person Plugins, Pose, and Skin. Replacing a Scene requires explicit
-confirmation in both the browser and API. General and Person Plugin presets
-also require a separate critical-action confirmation because they can replace
-broad state or load executable code.
+This version can load or merge a Scene; list, select, and create allowlisted
+native atoms; replace or merge matching non-Person atom presets; and load a
+SubScene into a matching existing or newly created `SubScene` atom. It can
+also add/select a Person and replace or merge all eleven native Person preset
+families: Appearance, Animation, Breast Physics, Clothing, General, Glute
+Physics, Hair, Morphs, Person Plugins, Pose, and Skin.
+
+Replacing a Scene requires explicit confirmation in both the browser and API.
+General and Person Plugin presets, non-Person atom presets, and SubScenes also
+require a separate critical-action confirmation because their contents can
+replace broad state or load executable plugin code.
 
 For every live resource action VAM-PIP:
 
@@ -177,12 +181,19 @@ For every live resource action VAM-PIP:
 3. enables required packages without hiding anything from the running game;
 4. asks VaM to rescan and performs one statically allowlisted operation.
 
-The browser never submits a resource path, storable name, or action name.
-SubScenes, non-Person atom presets, individual clothing, Custom Unity Assets,
-and raw plugins are already browseable but remain action-disabled until their
-target state and safety options have explicit contracts. In particular, raw
-plugins execute code and the BrowserAssist catalogue mixes entry scripts with
-helper source files.
+The browser never submits a resource path, storable name, atom type, or action
+name. It submits the server-owned category ID for standalone atom creation and
+a numeric resource ID for every load. Preset categories whose atom type is not
+in the audited native allowlist remain browse-only.
+
+“Create new” is also enforced inside the VaM bridge: if that UID becomes
+occupied before the request executes, the load fails instead of changing the
+newly appeared atom.
+
+Individual clothing, Custom Unity Assets, and raw plugins are browseable but
+remain action-disabled until their target state and safety options have
+explicit contracts. In particular, raw plugins execute code and the
+BrowserAssist catalogue mixes entry scripts with helper source files.
 
 See [the external workspace map](docs/EXTERNAL-WORKSPACE.md) and the
 [Person-specific capability map](docs/PERSON-WORKSPACE.md) for the exact

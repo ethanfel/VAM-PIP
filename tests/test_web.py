@@ -156,8 +156,8 @@ class WebSecurityTests(unittest.TestCase):
             "frame-ancestors 'none'", response.getheader("Content-Security-Policy")
         )
         document = response.read().decode("utf-8")
-        self.assertIn("/styles.css?v=0.4.0", document)
-        self.assertIn("/app.js?v=0.4.0", document)
+        self.assertIn("/styles.css?v=0.5.0", document)
+        self.assertIn("/app.js?v=0.5.0", document)
 
     def test_session_plugin_endpoints_report_and_import_defaults(self) -> None:
         preset_path = write_web_session_defaults(self.vam_root)
@@ -325,6 +325,7 @@ class WebSecurityTests(unittest.TestCase):
                 "resource_id": 42,
                 "days": 2,
                 "merge": False,
+                "create_if_missing": True,
                 "confirm_replace": True,
                 # The server deliberately ignores caller-selected paths.
                 "resource_ref": "/tmp/attacker-selected.json",
@@ -348,6 +349,7 @@ class WebSecurityTests(unittest.TestCase):
             target_uid=None,
             days=2.0,
             merge=False,
+            create_if_missing=True,
             confirm_replace=True,
             confirm_critical=False,
         )
@@ -361,6 +363,9 @@ class WebSecurityTests(unittest.TestCase):
         )
         self.server.service.select_atom = mock.Mock(
             return_value={"bridge_request": "atom-select"}
+        )
+        self.server.service.add_atom = mock.Mock(
+            return_value={"bridge_request": "atom-add"}
         )
         headers = {
             "X-VAMPIP-Token": self.token,
@@ -385,6 +390,28 @@ class WebSecurityTests(unittest.TestCase):
                 getattr(self.server.service, method_name).assert_called_once_with(
                     "Target"
                 )
+
+        body = json.dumps(
+            {
+                "category_id": "preset-atom-empty-deadbeef",
+                "target_uid": "Target",
+                # A caller cannot substitute its own atom type.
+                "atom_type": "Person",
+            }
+        ).encode("utf-8")
+        self.connection.request(
+            "POST",
+            "/api/vam/atom/add",
+            body=body,
+            headers={**headers, "Content-Length": str(len(body))},
+        )
+        response = self.connection.getresponse()
+        self.assertEqual(response.status, 200)
+        response.read()
+        self.server.service.add_atom.assert_called_once_with(
+            "preset-atom-empty-deadbeef",
+            "Target",
+        )
 
     def test_generic_apply_requires_strict_boolean_options(self) -> None:
         body = json.dumps(
@@ -430,6 +457,50 @@ class WebSecurityTests(unittest.TestCase):
         self.assertEqual(response.status, 400)
         document = self.response_json(response)
         self.assertIn("confirm_critical must be a boolean", document["error"])
+
+        body = json.dumps(
+            {
+                "resource_id": 42,
+                "create_if_missing": "false",
+                "confirm_critical": True,
+            }
+        ).encode("utf-8")
+        self.connection.request(
+            "POST",
+            "/api/vam/resource/apply",
+            body=body,
+            headers={
+                "X-VAMPIP-Token": self.token,
+                "Content-Type": "application/json",
+                "Content-Length": str(len(body)),
+            },
+        )
+        response = self.connection.getresponse()
+        self.assertEqual(response.status, 400)
+        document = self.response_json(response)
+        self.assertIn("create_if_missing must be a boolean", document["error"])
+
+    def test_atom_add_requires_catalog_category_and_target_strings(self) -> None:
+        for document, message in (
+            ({"category_id": 7, "target_uid": "Target"}, "category_id"),
+            ({"category_id": "subscenes", "target_uid": None}, "target_uid"),
+        ):
+            with self.subTest(document=document):
+                body = json.dumps(document).encode("utf-8")
+                self.connection.request(
+                    "POST",
+                    "/api/vam/atom/add",
+                    body=body,
+                    headers={
+                        "X-VAMPIP-Token": self.token,
+                        "Content-Type": "application/json",
+                        "Content-Length": str(len(body)),
+                    },
+                )
+                response = self.connection.getresponse()
+                self.assertEqual(response.status, 400)
+                payload = self.response_json(response)
+                self.assertIn(message, payload["error"])
 
     def test_person_apply_validates_resource_identity_shape(self) -> None:
         body = json.dumps({"resource_id": True, "target_uid": "Person"}).encode("utf-8")

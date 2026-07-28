@@ -6,17 +6,22 @@ import tempfile
 import unittest
 
 from vampip.bridge import (
+    ATOM_TYPE_ALLOWLIST,
     PERSON_PRESET_PREFIXES,
+    SUBSCENE_RESOURCE_PREFIX,
     bridge_directory,
     read_bridge_request,
     read_bridge_status,
     read_scene_status,
+    request_add_atom,
     request_add_person,
+    request_atom_preset,
     request_person_preset,
     request_rescan,
     request_scene_load,
     request_select_atom,
     request_select_person,
+    request_subscene_load,
 )
 
 
@@ -189,6 +194,172 @@ class BridgeProtocolTests(unittest.TestCase):
                     request_add_person(self.vam_root, invalid_uid)
                 with self.assertRaises(ValueError):
                     request_select_atom(self.vam_root, invalid_uid)
+
+    def test_add_atom_request_uses_exact_native_allowlist(self) -> None:
+        request_id = request_add_atom(
+            self.vam_root,
+            "WindowCamera",
+            "External Camera",
+        )
+        request = self.read_request()
+        self.assertEqual(request["requestId"], request_id)
+        self.assertEqual(request["command"], "addAtom")
+        self.assertEqual(request["atomType"], "WindowCamera")
+        self.assertEqual(request["targetUid"], "External Camera")
+        self.assertIn("SubScene", ATOM_TYPE_ALLOWLIST)
+        self.assertNotIn("Person", ATOM_TYPE_ALLOWLIST)
+
+        for invalid_type in (
+            "",
+            "Person",
+            "windowcamera",
+            "Author.CustomAtom",
+            "Button|Capsule",
+            " WindowCamera",
+        ):
+            with self.subTest(invalid_type=invalid_type):
+                with self.assertRaises(ValueError):
+                    request_add_atom(
+                        self.vam_root,
+                        invalid_type,
+                        "External Camera",
+                    )
+        with self.assertRaises(TypeError):
+            request_add_atom(
+                self.vam_root,
+                1,  # type: ignore[arg-type]
+                "External Camera",
+            )
+
+    def test_atom_preset_request_is_type_scoped_and_bounded(self) -> None:
+        local_ref = "Custom/Atom/WindowCamera/Preset_Framing.vap"
+        request_id = request_atom_preset(
+            self.vam_root,
+            "External Camera",
+            "WindowCamera",
+            local_ref,
+            rescan=False,
+            merge=False,
+            create_if_missing=True,
+        )
+        request = self.read_request()
+        self.assertEqual(request["requestId"], request_id)
+        self.assertEqual(request["command"], "applyAtomPreset")
+        self.assertEqual(request["targetUid"], "External Camera")
+        self.assertEqual(request["atomType"], "WindowCamera")
+        self.assertEqual(request["resourceRef"], local_ref)
+        self.assertIs(request["rescan"], False)
+        self.assertIs(request["merge"], False)
+        self.assertIs(request["createIfMissing"], True)
+
+        package_ref = (
+            "Author.WebTools.4:/"
+            "Custom/Atom/WebBrowser/Author/Preset_Search.vap"
+        )
+        request_atom_preset(
+            self.vam_root,
+            "Browser",
+            "WebBrowser",
+            package_ref,
+        )
+        self.assertEqual(self.read_request()["resourceRef"], package_ref)
+
+        for invalid_ref in (
+            "Custom/Atom/WebBrowser/Preset_Search.vap",
+            "Custom/Atom/WindowCamera/Search.vap",
+            "Custom/Atom/WindowCamera/Preset_Search.json",
+            "Custom/Atom/WindowCamera/../Preset_Search.vap",
+        ):
+            with self.subTest(invalid_ref=invalid_ref):
+                with self.assertRaises(ValueError):
+                    request_atom_preset(
+                        self.vam_root,
+                        "External Camera",
+                        "WindowCamera",
+                        invalid_ref,
+                    )
+        with self.assertRaises(ValueError):
+            request_atom_preset(
+                self.vam_root,
+                "Person",
+                "Person",
+                "Custom/Atom/Person/Preset_Look.vap",
+            )
+        with self.assertRaisesRegex(ValueError, "cannot both be true"):
+            request_atom_preset(
+                self.vam_root,
+                "External Camera",
+                "WindowCamera",
+                local_ref,
+                merge=True,
+                create_if_missing=True,
+            )
+        for option in ("rescan", "merge", "create_if_missing"):
+            with self.subTest(option=option):
+                kwargs = {option: 1}
+                with self.assertRaises(TypeError):
+                    request_atom_preset(
+                        self.vam_root,
+                        "External Camera",
+                        "WindowCamera",
+                        local_ref,
+                        **kwargs,  # type: ignore[arg-type]
+                    )
+
+    def test_subscene_request_accepts_only_subscene_resources(self) -> None:
+        local_ref = f"{SUBSCENE_RESOURCE_PREFIX}Apartment.json"
+        request_id = request_subscene_load(
+            self.vam_root,
+            "Apartment",
+            local_ref,
+            rescan=False,
+            create_if_missing=True,
+        )
+        request = self.read_request()
+        self.assertEqual(request["requestId"], request_id)
+        self.assertEqual(request["command"], "loadSubscene")
+        self.assertEqual(request["targetUid"], "Apartment")
+        self.assertEqual(request["resourceRef"], local_ref)
+        self.assertIs(request["rescan"], False)
+        self.assertIs(request["createIfMissing"], True)
+
+        package_ref = (
+            "Author.Rooms.2:/Custom/SubScene/Rooms/Apartment.JSON"
+        )
+        request_subscene_load(
+            self.vam_root,
+            "Apartment",
+            package_ref,
+        )
+        self.assertEqual(self.read_request()["resourceRef"], package_ref)
+
+        for invalid_ref in (
+            "Saves/scene/Apartment.json",
+            "Custom/SubScene/../Apartment.json",
+            "Custom/SubScene/Apartment.vap",
+            "Author.Rooms:/Custom/SubScene/Apartment.json",
+        ):
+            with self.subTest(invalid_ref=invalid_ref):
+                with self.assertRaises(ValueError):
+                    request_subscene_load(
+                        self.vam_root,
+                        "Apartment",
+                        invalid_ref,
+                    )
+        with self.assertRaises(TypeError):
+            request_subscene_load(
+                self.vam_root,
+                "Apartment",
+                local_ref,
+                rescan=1,  # type: ignore[arg-type]
+            )
+        with self.assertRaises(TypeError):
+            request_subscene_load(
+                self.vam_root,
+                "Apartment",
+                local_ref,
+                create_if_missing=1,  # type: ignore[arg-type]
+            )
 
     def test_scene_load_request_accepts_allowlisted_local_and_package_refs(
         self,
@@ -364,18 +535,34 @@ class BridgeSourceTests(unittest.TestCase):
         ).read_bytes()
         self.assertEqual(packaged, documented)
 
+    def test_packaged_and_documented_bridge_readmes_match(self) -> None:
+        repository = Path(__file__).resolve().parents[1]
+        packaged = (
+            repository / "src" / "vampip" / "bridge_assets" / "README.md"
+        ).read_bytes()
+        documented = (
+            repository / "bridge" / "vam" / "README.md"
+        ).read_bytes()
+        self.assertEqual(packaged, documented)
+
     def test_bridge_source_has_narrow_protocol_two_surface(self) -> None:
         repository = Path(__file__).resolve().parents[1]
         source = (
             repository / "src" / "vampip" / "bridge_assets" / "VAMPipBridge.cs"
         ).read_text(encoding="utf-8")
         self.assertIn("ProtocolVersion = 2", source)
-        self.assertIn('BridgeVersion = "0.3.0"', source)
+        self.assertIn('BridgeVersion = "0.4.0"', source)
         self.assertIn('"applyPersonPreset"', source)
+        self.assertIn('"addAtom"', source)
+        self.assertIn('"applyAtomPreset"', source)
+        self.assertIn('"loadSubscene"', source)
         self.assertIn('"loadScene"', source)
         self.assertIn('"selectAtom"', source)
         self.assertIn('"atom-roster"', source)
         self.assertIn('"atom-select"', source)
+        self.assertIn('"atom-add"', source)
+        self.assertIn('"atom-preset-apply"', source)
+        self.assertIn('"subscene-load"', source)
         self.assertIn('"scene-load"', source)
         self.assertIn('"person-roster"', source)
         self.assertIn('"person-preset-apply"', source)
@@ -411,7 +598,36 @@ class BridgeSourceTests(unittest.TestCase):
         self.assertIn("NormalizePath(", source)
         self.assertIn('"MergeLoadPreset"', source)
         self.assertIn('"LoadPreset"', source)
-        self.assertIn('AddAtomByType(\n                            "Person"', source)
+        self.assertIn("IsAllowedAtomType(", source)
+        self.assertIn("AllowedAtomTypes", source)
+        self.assertIn("atomType.IndexOf('|') < 0", source)
+        self.assertIn(
+            "AddAtomByType(\n                            atomType",
+            source,
+        )
+        self.assertIn('GetStorableByID("Preset")', source)
+        self.assertIn('GetStorableByID("SubScene")', source)
+        self.assertIn('GetUrlJSONParam("browsePath")', source)
+        self.assertIn("request.CreateIfMissing", source)
+        self.assertIn(
+            "request.CreateIfMissing && request.Merge",
+            source,
+        )
+        strict_create_check = source.index("if (createIfMissing)")
+        existing_type_check = source.index(
+            "if (existing.type != atomType)",
+            strict_create_check,
+        )
+        self.assertLess(strict_create_check, existing_type_check)
+        strict_create_block = source[
+            strict_create_check:existing_type_check
+        ]
+        self.assertIn(
+            "createIfMissing requires targetUid to be absent",
+            strict_create_block,
+        )
+        self.assertIn("yield break;", strict_create_block)
+        self.assertIn("MaximumOperationWaitSeconds", source)
         self.assertIn("SelectController(", source)
         self.assertIn("FileManagerSecure.NormalizePath(request.ResourceRef)", source)
         self.assertIn("SuperController.singleton.LoadMerge(normalizedPath)", source)

@@ -8,6 +8,7 @@ import unittest
 from unittest import mock
 import zipfile
 
+from vampip.bridge import read_bridge_request, request_select_atom
 from vampip.database import connect
 from vampip.inventory import scan
 from vampip.manager_state import list_leases
@@ -16,6 +17,11 @@ from vampip.service import LiveActionBusyError, ManagerService
 
 HAIR_MEMBER = "Custom/Atom/Person/Hair/Example/Preset_Soft Bob.vap"
 SCENE_MEMBER = "Saves/scene/Example Scene.json"
+EMPTY_PRESET_MEMBER = "Custom/Atom/Empty/Example/Preset_Empty.vap"
+SUBSCENE_MEMBER = "Custom/SubScene/Example/Room.json"
+UNSUPPORTED_ATOM_PRESET_MEMBER = (
+    "Custom/Atom/PackageDefinedWidget/Preset_Unsafe.vap"
+)
 PERSON_PRESET_MEMBERS = {
     "Preset Appearance": (
         "appearance",
@@ -77,6 +83,12 @@ def make_hair_var(path: Path) -> None:
         for _, member in PERSON_PRESET_MEMBERS.values():
             archive.writestr(member, json.dumps({"storables": []}))
         archive.writestr(SCENE_MEMBER, json.dumps({"atoms": []}))
+        archive.writestr(EMPTY_PRESET_MEMBER, json.dumps({"storables": []}))
+        archive.writestr(SUBSCENE_MEMBER, json.dumps({"storables": []}))
+        archive.writestr(
+            UNSUPPORTED_ATOM_PRESET_MEMBER,
+            json.dumps({"storables": []}),
+        )
 
 
 class PersonWorkspaceTests(unittest.TestCase):
@@ -152,6 +164,13 @@ class PersonWorkspaceTests(unittest.TestCase):
                 {"uid": "Person", "type": "Person", "selected": True},
                 {"uid": "Person 2", "type": "Person", "selected": False},
                 {"uid": "Light", "type": "InvisibleLight", "selected": False},
+                {"uid": "Empty Target", "type": "Empty", "selected": False},
+                {
+                    "uid": "SubScene Target",
+                    "type": "SubScene",
+                    "selected": False,
+                },
+                {"uid": "Wrong Target", "type": "Button", "selected": False},
             ],
             "persons": [
                 {"uid": "Person", "selected": True},
@@ -159,8 +178,11 @@ class PersonWorkspaceTests(unittest.TestCase):
             ],
             "capabilities": [
                 "atom-roster",
+                "atom-add",
+                "atom-preset-apply",
                 "atom-select",
                 "scene-load",
+                "subscene-load",
                 "person-roster",
                 "person-preset-appearance",
                 "person-preset-animation",
@@ -453,6 +475,11 @@ class PersonWorkspaceTests(unittest.TestCase):
             "Custom/Atom/Empty/Preset_Example.vap",
             atom_type="Empty",
         )
+        self.insert_resource(
+            "Preset Atom",
+            UNSUPPORTED_ATOM_PRESET_MEMBER,
+            atom_type="PackageDefinedWidget",
+        )
 
         document = self.service.workspace_categories()
         categories = {
@@ -470,12 +497,410 @@ class PersonWorkspaceTests(unittest.TestCase):
         )
         self.assertEqual(atom_category["resource_types"], ["Preset Atom"])
         self.assertEqual(atom_category["count"], 1)
-        self.assertFalse(atom_category["live_action"])
+        self.assertTrue(atom_category["live_action"])
+        self.assertTrue(atom_category["create_supported"])
+        self.assertEqual(atom_category["risk"], "critical")
+        unsupported = next(
+            category
+            for category in document["categories"]
+            if category.get("target_atom_type") == "PackageDefinedWidget"
+        )
+        self.assertFalse(unsupported["live_action"])
+        self.assertFalse(unsupported["create_supported"])
+
+        subscenes = categories["subscenes"]
+        self.assertTrue(subscenes["live_action"])
+        self.assertTrue(subscenes["create_supported"])
+        self.assertEqual(subscenes["target_atom_type"], "SubScene")
+        self.assertEqual(subscenes["risk"], "critical")
 
         search = self.service.search_resources(category="preset-appearance")
         self.assertEqual(search["category"], "preset-appearance")
         self.assertEqual(search["total"], 1)
         self.assertEqual(search["items"][0]["id"], appearance_id)
+
+    def test_atom_preset_apply_is_catalog_derived_confirmed_and_target_safe(
+        self,
+    ) -> None:
+        resource_id = self.insert_resource(
+            "Preset Atom",
+            EMPTY_PRESET_MEMBER,
+            atom_type="Empty",
+        )
+        unsupported_id = self.insert_resource(
+            "Preset Atom",
+            UNSUPPORTED_ATOM_PRESET_MEMBER,
+            atom_type="PackageDefinedWidget",
+        )
+        wrong_prefix_id = self.insert_resource(
+            "Preset Atom",
+            EMPTY_PRESET_MEMBER,
+            atom_type="Button",
+            key="button-with-empty-path",
+        )
+        lease_result = {
+            "applied": True,
+            "reconcile": {"enable": 1},
+        }
+        with (
+            mock.patch.object(self.service, "persons", return_value=self.roster()),
+            mock.patch.object(
+                self.service,
+                "lease_resource",
+                return_value=lease_result,
+            ) as lease,
+            mock.patch(
+                "vampip.service.request_atom_preset",
+                side_effect=("existing-request", "create-request"),
+            ) as request,
+        ):
+            with self.assertRaisesRegex(TypeError, "create_if_missing"):
+                self.service.apply_resource(
+                    resource_id,
+                    target_uid="New Empty",
+                    create_if_missing=1,  # type: ignore[arg-type]
+                    confirm_critical=True,
+                )
+            with self.assertRaisesRegex(ValueError, "confirm_critical"):
+                self.service.apply_resource(
+                    resource_id,
+                    target_uid="Empty Target",
+                    confirm_replace=True,
+                )
+            with self.assertRaisesRegex(ValueError, "confirm_replace"):
+                self.service.apply_resource(
+                    resource_id,
+                    target_uid="Empty Target",
+                    confirm_critical=True,
+                )
+            with self.assertRaisesRegex(ValueError, "no longer available"):
+                self.service.apply_resource(
+                    resource_id,
+                    target_uid="Missing Empty",
+                    confirm_critical=True,
+                    confirm_replace=True,
+                )
+            with self.assertRaisesRegex(
+                ValueError,
+                "create_if_missing requires target_uid to be absent",
+            ):
+                self.service.apply_resource(
+                    resource_id,
+                    target_uid="Wrong Target",
+                    create_if_missing=True,
+                    confirm_critical=True,
+                )
+            with self.assertRaisesRegex(ValueError, "expected Empty"):
+                self.service.apply_resource(
+                    resource_id,
+                    target_uid="Wrong Target",
+                    confirm_replace=True,
+                    confirm_critical=True,
+                )
+            with self.assertRaisesRegex(
+                ValueError,
+                "create_if_missing requires target_uid to be absent",
+            ):
+                self.service.apply_resource(
+                    resource_id,
+                    target_uid="Empty Target",
+                    create_if_missing=True,
+                    confirm_critical=True,
+                )
+            with self.assertRaisesRegex(
+                ValueError,
+                "merge is not supported when create_if_missing is true",
+            ):
+                self.service.apply_resource(
+                    resource_id,
+                    target_uid="New Empty",
+                    merge=True,
+                    create_if_missing=True,
+                    confirm_critical=True,
+                )
+            with self.assertRaisesRegex(
+                ValueError,
+                "merge is not supported when create_if_missing is true",
+            ):
+                self.service.apply_resource(
+                    resource_id,
+                    target_uid="Empty Target",
+                    merge=True,
+                    create_if_missing=True,
+                    confirm_critical=True,
+                )
+            with self.assertRaisesRegex(ValueError, "native allowlist"):
+                self.service.apply_resource(
+                    unsupported_id,
+                    target_uid="Missing Unsafe",
+                    create_if_missing=True,
+                    confirm_critical=True,
+                )
+            with self.assertRaisesRegex(ValueError, "outside Custom/Atom/Button"):
+                self.service.apply_resource(
+                    wrong_prefix_id,
+                    target_uid="Wrong Target",
+                    merge=True,
+                    confirm_critical=True,
+                )
+            existing = self.service.apply_resource(
+                resource_id,
+                target_uid="Empty Target",
+                confirm_replace=True,
+                confirm_critical=True,
+            )
+            created = self.service.apply_resource(
+                resource_id,
+                target_uid="New Empty",
+                create_if_missing=True,
+                confirm_critical=True,
+            )
+
+        category_id = next(
+            category["id"]
+            for category in self.service.workspace_categories()["categories"]
+            if category.get("target_atom_type") == "Empty"
+        )
+        self.assertEqual(existing["category"], category_id)
+        self.assertTrue(existing["target_existed"])
+        self.assertFalse(created["target_existed"])
+        self.assertTrue(created["create_if_missing"])
+        self.assertEqual(
+            lease.call_args_list,
+            [
+                mock.call(
+                    resource_id,
+                    days=3.0,
+                    label="Empty preset: Empty",
+                    apply=True,
+                    bridge_rescan=False,
+                ),
+                mock.call(
+                    resource_id,
+                    days=3.0,
+                    label="Empty preset: Empty",
+                    apply=True,
+                    bridge_rescan=False,
+                ),
+            ],
+        )
+        self.assertEqual(
+            request.call_args_list,
+            [
+                mock.call(
+                    self.vam_root,
+                    target_uid="Empty Target",
+                    atom_type="Empty",
+                    resource_ref=f"Creator.HairPack.1:/{EMPTY_PRESET_MEMBER}",
+                    rescan=True,
+                    merge=False,
+                    create_if_missing=False,
+                ),
+                mock.call(
+                    self.vam_root,
+                    target_uid="New Empty",
+                    atom_type="Empty",
+                    resource_ref=f"Creator.HairPack.1:/{EMPTY_PRESET_MEMBER}",
+                    rescan=True,
+                    merge=False,
+                    create_if_missing=True,
+                ),
+            ],
+        )
+
+    def test_subscene_apply_requires_critical_and_replacement_confirmation(
+        self,
+    ) -> None:
+        resource_id = self.insert_resource(
+            "SubScenes",
+            SUBSCENE_MEMBER,
+            atom_type="SubScene",
+        )
+        lease_result = {
+            "applied": True,
+            "reconcile": {"enable": 0},
+        }
+        with (
+            mock.patch.object(self.service, "persons", return_value=self.roster()),
+            mock.patch.object(
+                self.service,
+                "lease_resource",
+                return_value=lease_result,
+            ) as lease,
+            mock.patch(
+                "vampip.service.request_subscene_load",
+                side_effect=("existing-request", "create-request"),
+            ) as request,
+        ):
+            with self.assertRaisesRegex(ValueError, "confirm_critical"):
+                self.service.apply_resource(
+                    resource_id,
+                    target_uid="SubScene Target",
+                    confirm_replace=True,
+                )
+            with self.assertRaisesRegex(ValueError, "confirm_replace"):
+                self.service.apply_resource(
+                    resource_id,
+                    target_uid="SubScene Target",
+                    confirm_critical=True,
+                )
+            with self.assertRaisesRegex(ValueError, "no longer available"):
+                self.service.apply_resource(
+                    resource_id,
+                    target_uid="Missing SubScene",
+                    confirm_critical=True,
+                )
+            with self.assertRaisesRegex(
+                ValueError,
+                "create_if_missing requires target_uid to be absent",
+            ):
+                self.service.apply_resource(
+                    resource_id,
+                    target_uid="Wrong Target",
+                    create_if_missing=True,
+                    confirm_critical=True,
+                )
+            with self.assertRaisesRegex(ValueError, "expected SubScene"):
+                self.service.apply_resource(
+                    resource_id,
+                    target_uid="Wrong Target",
+                    confirm_replace=True,
+                    confirm_critical=True,
+                )
+            with self.assertRaisesRegex(
+                ValueError,
+                "create_if_missing requires target_uid to be absent",
+            ):
+                self.service.apply_resource(
+                    resource_id,
+                    target_uid="SubScene Target",
+                    create_if_missing=True,
+                    confirm_critical=True,
+                )
+            with self.assertRaisesRegex(ValueError, "merge is not supported"):
+                self.service.apply_resource(
+                    resource_id,
+                    target_uid="SubScene Target",
+                    merge=True,
+                    confirm_critical=True,
+                )
+            existing = self.service.apply_resource(
+                resource_id,
+                target_uid="SubScene Target",
+                confirm_replace=True,
+                confirm_critical=True,
+            )
+            created = self.service.apply_resource(
+                resource_id,
+                target_uid="New SubScene",
+                create_if_missing=True,
+                confirm_critical=True,
+            )
+
+        self.assertEqual(existing["category"], "subscenes")
+        self.assertTrue(existing["target_existed"])
+        self.assertFalse(created["target_existed"])
+        self.assertFalse(existing["rescan"])
+        self.assertEqual(
+            lease.call_args_list,
+            [
+                mock.call(
+                    resource_id,
+                    days=3.0,
+                    label="SubScene: Room",
+                    apply=True,
+                    bridge_rescan=False,
+                ),
+                mock.call(
+                    resource_id,
+                    days=3.0,
+                    label="SubScene: Room",
+                    apply=True,
+                    bridge_rescan=False,
+                ),
+            ],
+        )
+        self.assertEqual(
+            request.call_args_list,
+            [
+                mock.call(
+                    self.vam_root,
+                    target_uid="SubScene Target",
+                    resource_ref=f"Creator.HairPack.1:/{SUBSCENE_MEMBER}",
+                    rescan=False,
+                    create_if_missing=False,
+                ),
+                mock.call(
+                    self.vam_root,
+                    target_uid="New SubScene",
+                    resource_ref=f"Creator.HairPack.1:/{SUBSCENE_MEMBER}",
+                    rescan=False,
+                    create_if_missing=True,
+                ),
+            ],
+        )
+
+    def test_atom_add_derives_allowlisted_type_only_from_category(self) -> None:
+        self.insert_resource(
+            "Preset Atom",
+            EMPTY_PRESET_MEMBER,
+            atom_type="Empty",
+        )
+        self.insert_resource(
+            "Preset Atom",
+            UNSUPPORTED_ATOM_PRESET_MEMBER,
+            atom_type="PackageDefinedWidget",
+        )
+        categories = self.service.workspace_categories()["categories"]
+        empty_category = next(
+            str(category["id"])
+            for category in categories
+            if category.get("target_atom_type") == "Empty"
+        )
+        unsupported_category = next(
+            str(category["id"])
+            for category in categories
+            if category.get("target_atom_type") == "PackageDefinedWidget"
+        )
+
+        with (
+            mock.patch.object(self.service, "persons", return_value=self.roster()),
+            mock.patch(
+                "vampip.service.request_add_atom",
+                side_effect=("empty-request", "subscene-request"),
+            ) as request,
+        ):
+            existing = self.service.add_atom(empty_category, "Empty Target")
+            created = self.service.add_atom(empty_category, "New Empty")
+            subscene = self.service.add_atom("subscenes", "New SubScene")
+            with self.assertRaisesRegex(ValueError, "expected Empty"):
+                self.service.add_atom(empty_category, "Wrong Target")
+            with self.assertRaisesRegex(ValueError, "browse-only"):
+                self.service.add_atom(unsupported_category, "Unsafe")
+            with self.assertRaisesRegex(ValueError, "browse-only"):
+                self.service.add_atom("preset-hair", "Not A Person")
+            with self.assertRaisesRegex(ValueError, "unknown workspace category"):
+                self.service.add_atom("not-a-category", "Anything")
+
+        self.assertTrue(existing["already_exists"])
+        self.assertIsNone(existing["bridge_request"])
+        self.assertEqual(created["target_atom_type"], "Empty")
+        self.assertEqual(subscene["target_atom_type"], "SubScene")
+        self.assertEqual(
+            request.call_args_list,
+            [
+                mock.call(
+                    self.vam_root,
+                    atom_type="Empty",
+                    target_uid="New Empty",
+                ),
+                mock.call(
+                    self.vam_root,
+                    atom_type="SubScene",
+                    target_uid="New SubScene",
+                ),
+            ],
+        )
 
     def test_scene_replace_requires_confirmation_but_merge_does_not(self) -> None:
         resource_id = self.insert_resource(
@@ -599,6 +1024,68 @@ class PersonWorkspaceTests(unittest.TestCase):
                 )
         with connect(self.state) as connection:
             self.assertEqual(list_leases(connection), [])
+
+    def test_two_service_instances_cannot_overwrite_bridge_mailbox(self) -> None:
+        second_service = ManagerService(
+            self.addons,
+            self.state.parent / "second-state",
+            vam_root=self.vam_root,
+            process_probe=lambda: list(self.pids),
+        )
+        first_writer_entered = threading.Event()
+        release_first_writer = threading.Event()
+        second_started = threading.Event()
+        second_writer_called = threading.Event()
+        results: dict[str, str] = {}
+        errors: dict[str, BaseException] = {}
+
+        def first_writer() -> str:
+            first_writer_entered.set()
+            if not release_first_writer.wait(2):
+                raise TimeoutError("test did not release first mailbox writer")
+            return request_select_atom(self.vam_root, "Light")
+
+        def second_writer() -> str:
+            second_writer_called.set()
+            return request_select_atom(self.vam_root, "Empty Target")
+
+        def run_first() -> None:
+            try:
+                results["first"] = self.service._queue_bridge_request(first_writer)
+            except BaseException as error:
+                errors["first"] = error
+
+        def run_second() -> None:
+            second_started.set()
+            try:
+                results["second"] = second_service._queue_bridge_request(
+                    second_writer
+                )
+            except BaseException as error:
+                errors["second"] = error
+
+        first_thread = threading.Thread(target=run_first)
+        first_thread.start()
+        self.assertTrue(first_writer_entered.wait(2))
+        second_thread = threading.Thread(target=run_second)
+        second_thread.start()
+        self.assertTrue(second_started.wait(2))
+        second_wrote_while_first_held_lock = second_writer_called.wait(0.1)
+        release_first_writer.set()
+        first_thread.join(2)
+        second_thread.join(2)
+
+        self.assertFalse(first_thread.is_alive())
+        self.assertFalse(second_thread.is_alive())
+        self.assertFalse(second_wrote_while_first_held_lock)
+        self.assertFalse(second_writer_called.is_set())
+        self.assertNotIn("first", errors)
+        self.assertIsInstance(errors.get("second"), LiveActionBusyError)
+        request = read_bridge_request(self.vam_root)
+        self.assertIsNotNone(request)
+        assert request is not None
+        self.assertEqual(request["requestId"], results["first"])
+        self.assertEqual(request["targetUid"], "Light")
 
     def test_reconcile_holds_mailbox_lock_across_switch_and_request(self) -> None:
         from vampip import service as service_module
