@@ -59,6 +59,69 @@ class WorkspaceWebUITests(unittest.TestCase):
         self.assertNotIn('params.set("type", "Preset Hair")', self.javascript)
         self.assertNotIn('api("/api/vam/person/apply"', self.javascript)
 
+    def test_individual_clothing_uses_desired_state_and_live_revision(self) -> None:
+        self.assertIn(
+            'category.operation === "set-person-clothing"',
+            self.javascript,
+        )
+        self.assertIn(
+            'params.set("target_uid", app.selectedPersonUid)',
+            self.javascript,
+        )
+        block_start = self.javascript.index(
+            "async function setPersonClothing("
+        )
+        block_end = self.javascript.index(
+            "function workspaceApplyAvailability(", block_start
+        )
+        block = self.javascript[block_start:block_end]
+        self.assertIn('api("/api/vam/person/clothing"', block)
+        self.assertIn("resource_id: resourceId", block)
+        self.assertIn("target_uid: app.selectedPersonUid", block)
+        self.assertIn("active: availability.desiredActive", block)
+        self.assertIn("revision: availability.revision", block)
+        for forbidden in (
+            "resource_ref:",
+            "resource_path:",
+            "clothing_uid:",
+            "storable:",
+            "action:",
+        ):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, block)
+
+        availability_start = self.javascript.index(
+            "function clothingActionAvailability("
+        )
+        availability_end = self.javascript.index(
+            "async function setPersonClothing(", availability_start
+        )
+        availability = self.javascript[
+            availability_start:availability_end
+        ]
+        for guard in (
+            "category.requiredCapability",
+            "!snapshot.available",
+            "!liveClothing.ready",
+            "item.clothing_compatible",
+            "item.clothing_locked",
+            "item.clothing_revision",
+            "liveClothing?.revision",
+            'typeof item.worn !== "boolean"',
+        ):
+            with self.subTest(guard=guard):
+                self.assertIn(guard, availability)
+        self.assertIn(
+            "item.worn !== true && item.clothing_compatible !== true",
+            availability,
+        )
+        self.assertIn("person.clothing?.revision", self.javascript)
+        self.assertIn(
+            "if (isIndividualClothingCategory()) {\n"
+            "        await loadLibrary();",
+            self.javascript,
+        )
+
     def test_scene_replace_requires_explicit_confirmation(self) -> None:
         self.assertIn("Replace current scene", self.javascript)
         self.assertIn("confirm_replace: confirmedReplace", self.javascript)

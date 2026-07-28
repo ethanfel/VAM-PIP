@@ -33,6 +33,7 @@ _REQUIRED_RESOURCE_COLUMNS = {
     "favorite",
     "hidden",
     "tags_json",
+    "clothing_versions_json",
     "imported_utc",
 }
 _REQUIRED_SOURCE_COLUMNS = {
@@ -108,6 +109,7 @@ class _CatalogRecord:
     favorite: bool
     hidden: bool
     tags: tuple[dict[str, str], ...]
+    clothing_versions: tuple[dict[str, object], ...]
 
 
 def _root_text(root: Path | str) -> str:
@@ -266,6 +268,99 @@ def _normalize_versions(value: object) -> tuple[str, ...]:
             return (1, version.casefold())
 
     return tuple(sorted(versions, key=key))
+
+
+def _bounded_metadata_text(value: object, *, maximum: int) -> str:
+    if not isinstance(value, str):
+        return ""
+    text = value.strip()
+    if (
+        not text
+        or len(text) > maximum
+        or any(ord(character) < 32 or ord(character) == 127 for character in text)
+    ):
+        return ""
+    return text
+
+
+def _bounded_identity_text(value: object, *, maximum: int) -> str:
+    """Bound an exact runtime identity without trimming significant spaces."""
+
+    if not isinstance(value, str):
+        return ""
+    if (
+        not value.strip()
+        or len(value) > maximum
+        or any(ord(character) < 32 or ord(character) == 127 for character in value)
+    ):
+        return ""
+    return value
+
+
+def _normalize_clothing_versions(
+    value: object,
+) -> tuple[dict[str, object], ...]:
+    """Keep BrowserAssist's version-specific clothing identity metadata."""
+
+    if not isinstance(value, list):
+        return ()
+    versions: dict[str, dict[str, object]] = {}
+    for item in value[:128]:
+        if not isinstance(item, dict):
+            continue
+        raw_version = item.get("varVersion")
+        if isinstance(raw_version, bool) or isinstance(raw_version, (dict, list)):
+            continue
+        version = str(raw_version).strip()
+        if not version or len(version) > 100:
+            continue
+        clothing = item.get("clothing")
+        if not isinstance(clothing, dict):
+            continue
+        uid = _bounded_identity_text(clothing.get("uid"), maximum=1000)
+        if not uid:
+            continue
+        tags_text = _bounded_metadata_text(clothing.get("tags"), maximum=4096)
+        tags: list[str] = []
+        seen_tags: set[str] = set()
+        for raw_tag in tags_text.split(",") if tags_text else ():
+            tag = raw_tag.strip()
+            identity = tag.casefold()
+            if not tag or identity in seen_tags:
+                continue
+            seen_tags.add(identity)
+            tags.append(tag)
+            if len(tags) >= 128:
+                break
+        is_real_item: bool | None = None
+        if "isRealItem" in clothing:
+            is_real_item = _boolish(clothing.get("isRealItem"))
+        versions[version] = {
+            "version": version,
+            "item_type": _bounded_metadata_text(
+                clothing.get("itemType"),
+                maximum=100,
+            ),
+            "uid": uid,
+            "display_name": _bounded_metadata_text(
+                clothing.get("displayName"),
+                maximum=500,
+            ),
+            "creator": _bounded_metadata_text(
+                clothing.get("creatorName"),
+                maximum=500,
+            ),
+            "tags": tags,
+            "is_real_item": is_real_item,
+        }
+
+    def key(version: str) -> tuple[int, int | str]:
+        try:
+            return (0, int(version))
+        except ValueError:
+            return (1, version.casefold())
+
+    return tuple(versions[version] for version in sorted(versions, key=key))
 
 
 def _normalize_tags(value: object) -> tuple[dict[str, str], ...]:
@@ -432,6 +527,9 @@ def _packaged_records(
                     favorite=_boolish(user.get("baFavourite")),
                     hidden=_boolish(user.get("baHidden")),
                     tags=_normalize_tags(user.get("Tags")),
+                    clothing_versions=_normalize_clothing_versions(
+                        row.get("clothingVersions")
+                    ),
                 )
             )
     return records, matched_user
@@ -472,6 +570,7 @@ def _local_records(
                     favorite=_boolish(row.get("baFavourite")),
                     hidden=_boolish(row.get("baHidden")),
                     tags=_normalize_tags(row.get("Tags")),
+                    clothing_versions=(),
                 )
             )
     return records
@@ -524,8 +623,9 @@ def import_browserassist(
             INSERT INTO catalog_resources (
                 root, source, resource_key, creator, package_name,
                 versions_json, resource_path, resource_type, atom_type,
-                favorite, hidden, tags_json, imported_utc
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                favorite, hidden, tags_json, clothing_versions_json,
+                imported_utc
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(root, source, resource_key) DO UPDATE SET
                 creator = excluded.creator,
                 package_name = excluded.package_name,
@@ -536,6 +636,7 @@ def import_browserassist(
                 favorite = excluded.favorite,
                 hidden = excluded.hidden,
                 tags_json = excluded.tags_json,
+                clothing_versions_json = excluded.clothing_versions_json,
                 imported_utc = excluded.imported_utc
             """,
             [
@@ -557,6 +658,11 @@ def import_browserassist(
                     int(record.hidden),
                     json.dumps(
                         record.tags,
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    ),
+                    json.dumps(
+                        record.clothing_versions,
                         ensure_ascii=False,
                         separators=(",", ":"),
                     ),
@@ -730,7 +836,7 @@ def _display_name(resource_path: str) -> str:
 
 def _resource_document(row: sqlite3.Row) -> dict[str, object]:
     tags = _json_list(row["tags_json"])
-    return {
+    document: dict[str, object] = {
         "id": row["id"],
         "source": row["source"],
         "key": row["resource_key"],
@@ -745,6 +851,32 @@ def _resource_document(row: sqlite3.Row) -> dict[str, object]:
         "hidden": bool(row["hidden"]),
         "tags": tags,
     }
+    clothing_versions = _json_list(row["clothing_versions_json"])
+    if clothing_versions:
+        document["clothing_versions"] = clothing_versions
+    return document
+
+
+def _select_clothing_metadata(
+    item: dict[str, object],
+) -> dict[str, object] | None:
+    versions = item.get("clothing_versions")
+    if not isinstance(versions, list):
+        return None
+    selected_version = item.get("selected_version")
+    if selected_version is not None:
+        selected_text = str(selected_version).casefold()
+        for entry in versions:
+            if (
+                isinstance(entry, dict)
+                and str(entry.get("version") or "").casefold() == selected_text
+            ):
+                return dict(entry)
+        return None
+    for entry in reversed(versions):
+        if isinstance(entry, dict):
+            return dict(entry)
+    return None
 
 
 def _escape_like(value: str) -> str:
@@ -879,6 +1011,7 @@ def search_resources(
             "resource_type",
             "atom_type",
             "tags_json",
+            "clothing_versions_json",
         )
         where.append(
             "("
@@ -949,6 +1082,10 @@ def search_resources(
         )
         for row, item in zip(rows, items):
             item.update(resolver.resource_state(row))
+            clothing = _select_clothing_metadata(item)
+            if clothing is not None:
+                item["clothing"] = clothing
+            item.pop("clothing_versions", None)
     return {
         "items": items,
         "total": total,
@@ -1238,7 +1375,7 @@ class _ResourceResolver:
         package_name = str(row["package_name"])
         location = self.resolve_row(row)
         if location is not None:
-            return {
+            state: dict[str, object] = {
                 "package_ref": location.package_ref,
                 "selected_version": location.version_text,
                 "enabled": location.enabled,
@@ -1246,6 +1383,19 @@ class _ResourceResolver:
                 "missing_reason": None,
                 "local": location.local_path is not None,
             }
+            if str(row["resource_type"]).casefold() in {
+                "clothing (female)",
+                "clothing (male)",
+            }:
+                resource_path = str(
+                    location.archive_member or location.resource_path
+                ).replace("\\", "/")
+                state["resolved_resource_ref"] = (
+                    f"{location.package_ref}:/{resource_path}"
+                    if location.package_ref
+                    else resource_path
+                )
+            return state
         if not creator and not package_name:
             return {
                 "package_ref": None,

@@ -188,7 +188,7 @@ const WORKSPACE_CATEGORY_FALLBACK = Object.freeze([
     noun: "clothing item",
     description:
       "Individual female clothing definitions. The catalogue can find them, but worn state comes from VaM.",
-    operation: "toggle-clothing-item",
+    operation: "set-person-clothing",
     required_capability: "person-clothing-item-toggle",
     risk: "medium",
     browseable: true,
@@ -204,7 +204,7 @@ const WORKSPACE_CATEGORY_FALLBACK = Object.freeze([
     noun: "clothing item",
     description:
       "Individual male clothing definitions. Target compatibility must be confirmed by the live Person.",
-    operation: "toggle-clothing-item",
+    operation: "set-person-clothing",
     required_capability: "person-clothing-item-toggle",
     risk: "medium",
     browseable: true,
@@ -558,7 +558,13 @@ function bindEvents() {
   elements.personTarget.addEventListener("change", () => {
     app.selectedPersonUid = elements.personTarget.value;
     renderPersonContext();
-    if (app.view === "workspace") renderLibrary();
+    if (app.view === "workspace") {
+      if (isIndividualClothingCategory()) {
+        loadLibrary();
+      } else {
+        renderLibrary();
+      }
+    }
   });
   elements.selectPersonButton.addEventListener("click", selectPersonInVam);
   elements.addPersonButton.addEventListener("click", addPersonInVam);
@@ -1320,9 +1326,9 @@ function renderWorkspaceCategorySummary() {
   if (!note && category.id === "clothing-item-presets") {
     note =
       "An item style belongs to a specific worn clothing item. VAM-PIP will not guess that relationship from its folder name.";
-  } else if (!note && category.operation === "toggle-clothing-item") {
+  } else if (!note && category.operation === "set-person-clothing") {
     note =
-      "The offline catalogue cannot tell which items this Person is wearing. Item toggles stay disabled until VaM publishes that live state.";
+      "The offline catalogue cannot tell which items this Person is wearing. Wear/remove controls stay disabled until VaM publishes that live state.";
   } else if (!note && !category.liveAction) {
     note =
       "This category is indexed now, but loading is intentionally disabled until the bridge validates this exact resource type.";
@@ -1592,6 +1598,9 @@ function personControlKey() {
     persons: personList(snapshot).map((person) => [
       person.uid,
       Boolean(person.selected),
+      person.clothing?.revision || "",
+      person.clothing?.gender || "",
+      Boolean(person.clothing?.truncated),
     ]),
     atoms: atomList(snapshot).map((atom) => [
       atom.uid,
@@ -1659,7 +1668,11 @@ async function loadPersons({ quiet = false } = {}) {
     renderPersonContext();
     renderAtomContext();
     if (app.view === "workspace" && previousKey !== personControlKey()) {
-      renderLibrary();
+      if (isIndividualClothingCategory()) {
+        await loadLibrary();
+      } else {
+        renderLibrary();
+      }
     }
   }
   return app.person;
@@ -2515,6 +2528,12 @@ async function loadLibrary({ append = false } = {}) {
           params.append("type", resourceType);
         }
       }
+      if (
+        category.operation === "set-person-clothing" &&
+        app.selectedPersonUid
+      ) {
+        params.set("target_uid", app.selectedPersonUid);
+      }
     }
   }
 
@@ -2901,6 +2920,18 @@ function createResourceCard(item) {
       `state-badge ${state === "active" || state === "local" ? "is-active" : "is-hidden"}`,
     ),
   );
+  if (
+    app.view === "workspace" &&
+    isIndividualClothingCategory() &&
+    typeof item.worn === "boolean"
+  ) {
+    badges.append(
+      badge(
+        item.worn ? "Worn" : "Not worn",
+        `state-badge ${item.worn ? "is-active" : "is-hidden"}`,
+      ),
+    );
+  }
   preview.append(badges);
 
   const body = createElement("div", "card-body");
@@ -2920,7 +2951,9 @@ function createResourceCard(item) {
   body.append(subtitle);
 
   const metadata = createElement("div", "card-meta");
-  const tags = normalizeTags(item.tags || item.tags_json);
+  const tags = normalizeTags(
+    item.clothing?.tags || item.tags || item.tags_json,
+  );
   const atomType = item.atom_type || item.atomType;
   if (atomType) metadata.append(badge(String(atomType), "meta-pill"));
   for (const tag of tags.slice(0, atomType ? 2 : 3)) {
@@ -2934,6 +2967,24 @@ function createResourceCard(item) {
   const actions = createElement("div", "card-actions");
   const workspaceCategory =
     app.view === "workspace" ? currentWorkspaceCategory() : null;
+  if (
+    workspaceCategory?.operation === "set-person-clothing"
+  ) {
+    const availability = clothingActionAvailability(item, workspaceCategory);
+    const clothingButton = button(
+      availability.label,
+      item.worn === true ? "secondary-button" : "primary-button",
+    );
+    clothingButton.disabled = !availability.allowed;
+    clothingButton.title = availability.reason;
+    clothingButton.addEventListener("click", () =>
+      setPersonClothing(item, workspaceCategory, clothingButton),
+    );
+    actions.append(clothingButton);
+    body.append(actions);
+    card.append(preview, body);
+    return card;
+  }
   if (workspaceCategory && workspaceCategory.liveAction) {
     const availability = workspaceApplyAvailability(item, workspaceCategory);
     const applyButton = button(
@@ -2992,6 +3043,162 @@ function createResourceCard(item) {
 
   card.append(preview, body);
   return card;
+}
+
+function isIndividualClothingCategory(
+  category = currentWorkspaceCategory(),
+) {
+  return category?.operation === "set-person-clothing";
+}
+
+function selectedPersonSnapshot(snapshot = app.person || {}) {
+  return (
+    personList(snapshot).find(
+      (person) => person.uid === app.selectedPersonUid,
+    ) || null
+  );
+}
+
+function clothingActionAvailability(
+  item,
+  category = currentWorkspaceCategory(),
+) {
+  const snapshot = app.person || {};
+  const person = selectedPersonSnapshot(snapshot);
+  const liveClothing =
+    person?.clothing && typeof person.clothing === "object"
+      ? person.clothing
+      : null;
+  const capabilities = personCapabilities(snapshot);
+  const resourceId = Number(item.id);
+  const itemRevision = String(item.clothing_revision || "");
+  const liveRevision = String(liveClothing?.revision || "");
+  const key = `${category?.id || "clothing"}:${resourceId}`;
+  const state = String(
+    item.state || (itemIsActive(item) ? "active" : "hidden"),
+  ).toLowerCase();
+  let reason = "";
+
+  if (!category || category.operation !== "set-person-clothing") {
+    reason = "This is not an individual clothing category";
+  } else if (
+    app.workspaceCategoriesSource !== "server" ||
+    app.workspaceCategoriesError
+  ) {
+    reason = "Wait for the manager’s current clothing capability map";
+  } else if (!category.liveAction) {
+    reason = "This manager exposes clothing as browse-only";
+  } else if (state === "missing") {
+    reason = "The package containing this clothing item is not installed";
+  } else if (
+    !itemIsValid(item) ||
+    !Number.isInteger(resourceId) ||
+    resourceId < 1
+  ) {
+    reason = "This catalogue entry cannot be resolved safely";
+  } else if (app.personError) {
+    reason = "The live VaM bridge is unavailable";
+  } else if (!personVamRunning(snapshot)) {
+    reason = "Start VaM before changing clothing";
+  } else if (!snapshot.available) {
+    reason = "The bridge is not publishing a fresh scene snapshot";
+  } else if (!person || !app.selectedPersonUid) {
+    reason = "Choose an available Person target first";
+  } else if (
+    category.requiredCapability &&
+    !capabilities.has(category.requiredCapability)
+  ) {
+    reason = `Update and reload the bridge to enable ${category.requiredCapability}`;
+  } else if (snapshot.loading) {
+    reason = "Wait for VaM to finish loading the scene";
+  } else if (snapshotBridgeBusy(snapshot)) {
+    reason = "Wait for the current bridge action to finish";
+  } else if (!liveClothing || !liveClothing.ready) {
+    reason = "The selected Person has no ready clothing state";
+  } else if (item.worn !== true && item.clothing_compatible !== true) {
+    reason = "This item is incompatible with the Person’s current gender";
+  } else if (typeof item.worn !== "boolean") {
+    reason = "The worn-item snapshot is incomplete; refresh before changing it";
+  } else if (
+    !/^[0-9a-f]{32}$/i.test(itemRevision) ||
+    itemRevision !== liveRevision
+  ) {
+    reason = "The clothing state changed; wait for this card to refresh";
+  } else if (item.worn === true && item.clothing_locked === true) {
+    reason = "This item is locked in VaM";
+  } else if (app.applyingWorkspaceResources.has(key)) {
+    reason = "This clothing change is already being queued";
+  }
+
+  let label = item.worn === true
+    ? "Remove"
+    : state === "active" || state === "local"
+      ? "Wear"
+      : "Enable & wear";
+  if (item.worn === true && item.clothing_locked === true) {
+    label = "Locked in VaM";
+  } else if (typeof item.worn !== "boolean") {
+    label = "State unavailable";
+  }
+  return {
+    allowed: reason === "",
+    label,
+    reason,
+    revision: itemRevision,
+    desiredActive: item.worn !== true,
+  };
+}
+
+async function setPersonClothing(item, category, sourceButton) {
+  const availability = clothingActionAvailability(item, category);
+  if (!availability.allowed) {
+    if (availability.reason) {
+      toast("Clothing state changed", availability.reason, "error");
+    }
+    return;
+  }
+  const resourceId = Number(item.id);
+  const key = `${category.id}:${resourceId}`;
+  app.applyingWorkspaceResources.add(key);
+  setButtonBusy(
+    sourceButton,
+    true,
+    availability.desiredActive ? "Wearing…" : "Removing…",
+  );
+  try {
+    const result = await api("/api/vam/person/clothing", {
+      method: "POST",
+      body: {
+        resource_id: resourceId,
+        target_uid: app.selectedPersonUid,
+        active: availability.desiredActive,
+        revision: availability.revision,
+        days: 3,
+      },
+    });
+    requireBridgeQueue(result, "Clothing change");
+    toast(
+      availability.desiredActive ? "Clothing queued" : "Removal queued",
+      `${
+        availability.desiredActive ? "Wear" : "Remove"
+      } “${resourceTitle(item)}” for ${app.selectedPersonUid}.`,
+    );
+    await refreshAll({ force: true });
+  } catch (error) {
+    toast(
+      `Could not change ${resourceTitle(item)}`,
+      errorMessage(error),
+      "error",
+    );
+    if (/revision|stale/i.test(errorMessage(error))) {
+      await loadPersons({ quiet: true });
+      await loadLibrary();
+    }
+  } finally {
+    app.applyingWorkspaceResources.delete(key);
+    setButtonBusy(sourceButton, false);
+    if (app.view === "workspace") renderLibrary();
+  }
 }
 
 function workspaceApplyAvailability(item, category = currentWorkspaceCategory()) {
@@ -4343,6 +4550,11 @@ function packageRoot(item) {
 }
 
 function resourceTitle(item) {
+  const clothingName =
+    item.clothing &&
+    typeof item.clothing === "object" &&
+    item.clothing.display_name;
+  if (clothingName) return String(clothingName);
   const direct =
     item.title ||
     item.name ||

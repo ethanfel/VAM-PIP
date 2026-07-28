@@ -5,7 +5,8 @@ manager enables packages and resolves dependencies. The bridge asks VaM to
 rescan packages, publishes bounded atom and Person rosters, and can load an
 allowlisted scene or SubScene, apply one allowlisted Person or generic atom
 preset, safely load one Custom Unity Asset, add one allowlisted native atom,
-or select one existing atom on VaM's Unity main thread.
+wear or remove one exact clothing item, or select one existing atom on VaM's
+Unity main thread.
 
 ## Install
 
@@ -117,6 +118,37 @@ The more general alias selects any existing roster atom by exact UID:
 ```
 
 It does not expose arbitrary storables or actions.
+
+An individual clothing request is:
+
+```json
+{
+  "protocol": 2,
+  "requestId": "unique-clothing-1",
+  "command": "setPersonClothingResource",
+  "targetUid": "Person",
+  "resourceRef": "creator.clothes.3:/Custom/Clothing/Female/Dress.vam",
+  "desiredState": "worn",
+  "revision": "0123456789abcdef0123456789abcdef",
+  "rescan": true
+}
+```
+
+`desiredState` must be exactly `worn` or `removed`; this is a desired-state
+operation, not a toggle. The revision is the 32-hex value published for that
+Person's clothing snapshot in `scene.json`. The manager derives `resourceRef`
+from a numeric catalogue ID. For packaged clothing it remains the exact
+package-qualified
+`creator.package.version:/Custom/Clothing/Female-or-Male/item.vam`
+identity—not BrowserAssist's clothing UID, a display name, or a client-supplied
+path. Local references below the same female/male directories are also valid.
+
+The bridge independently requires an exact `.vam` reference below
+`Custom/Clothing/Female/` or `Custom/Clothing/Male/`, an exact Person target,
+the same native `geometry` instance, and a current revision. It rejects wear
+when the resource category is incompatible with the Person's current gender,
+and rejects a state change when the item is locked. A rescan, when needed,
+finishes before the checks and assignment.
 
 Generic non-Person atom creation uses an exact, case-sensitive static allowlist
 of atom types verified against VaM 1.22. Packaged/custom atom types remain
@@ -283,7 +315,7 @@ The bridge writes `status.json`:
 ```json
 {
   "protocol": 2,
-  "bridgeVersion": "0.5.0",
+  "bridgeVersion": "0.6.0",
   "instanceId": "id-created-when-the-plugin-started",
   "requestId": "a-new-unique-id",
   "lastCompletedRequestId": "a-new-unique-id",
@@ -316,6 +348,7 @@ The bridge writes `status.json`:
     "person-preset-plugins",
     "person-preset-pose",
     "person-preset-skin",
+    "person-clothing-item-toggle",
     "person-add",
     "person-select"
   ]
@@ -344,7 +377,7 @@ The bridge refreshes `scene.json` once per second:
 ```json
 {
   "protocol": 2,
-  "bridgeVersion": "0.5.0",
+  "bridgeVersion": "0.6.0",
   "instanceId": "id-created-when-the-plugin-started",
   "updatedAtUtc": "2026-07-28T12:00:02.0000000Z",
   "loading": false,
@@ -372,7 +405,22 @@ The bridge refreshes `scene.json` once per second:
     }
   ],
   "persons": [
-    {"uid": "Person", "selected": true},
+    {
+      "uid": "Person",
+      "selected": true,
+      "clothing": {
+        "ready": true,
+        "gender": "Female",
+        "activeResourceRefs": [
+          "creator.clothes.3:/Custom/Clothing/Female/Dress.vam"
+        ],
+        "lockedResourceRefs": [],
+        "activeCount": 1,
+        "lockedCount": 0,
+        "truncated": false,
+        "revision": "0123456789abcdef0123456789abcdef"
+      }
+    },
     {"uid": "Person#2", "selected": false}
   ],
   "capabilities": [
@@ -397,6 +445,7 @@ The bridge refreshes `scene.json` once per second:
     "person-preset-plugins",
     "person-preset-pose",
     "person-preset-skin",
+    "person-clothing-item-toggle",
     "person-add",
     "person-select"
   ]
@@ -409,6 +458,16 @@ the matching `person-preset-<kind>` capability before exposing a specific
 preset action; an older bridge that advertises only the generic marker does
 not establish support for every preset kind.
 
+Clothing publication is bounded to 256 exact resource references per Person
+and 1,024 across the roster. `activeCount`, `lockedCount`, and `truncated`
+make omissions visible. The external manager strips the raw active and locked
+reference arrays from its public scene API after using them to annotate
+catalogue rows. If `truncated` is true, an unpublished reference is unknown,
+not evidence that the item is removed, so the browser disables that action.
+The revision is bound to the exact Person and `geometry` instances and their
+semantic clothing, lock, and gender state. A stale write fails before VaM
+changes the clothing boolean.
+
 ## Safety contract
 
 - Write `request.json` only after all same-filesystem
@@ -420,7 +479,13 @@ not establish support for every preset kind.
   are tightly constrained VaM `.vap` references in mapped Person preset
   directories or `Custom/Atom/<allowlisted-type>/`, and `.json` references
   below `Custom/SubScene/` or `Saves/scene/`. CUA inputs are only
-  `.assetbundle` or `.scene` references below `Custom/Assets/`.
+  `.assetbundle` or `.scene` references below `Custom/Assets/`. Clothing
+  inputs are exact `.vam` references below `Custom/Clothing/Female/` or
+  `Custom/Clothing/Male/`.
+- Clothing changes require a current, target-specific snapshot revision.
+  Gender-incompatible wear and locked changes fail closed. The external
+  workspace also disables an action when bounded-publication truncation leaves
+  that item's current state unknown.
 - The generic atom and SubScene resource containers can include plugin
   configurations. Path/type validation does not establish that their semantic
   contents are trusted or side-effect free.

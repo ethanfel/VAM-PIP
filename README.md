@@ -169,7 +169,8 @@ also load raw Custom Unity Asset bundles into an existing or new
 `CustomUnityAsset`, expose VaM's bounded contained-asset choices, add/select a
 Person, and replace or merge all eleven native Person preset families:
 Appearance, Animation, Breast Physics, Clothing, General, Glute Physics, Hair,
-Morphs, Person Plugins, Pose, and Skin.
+Morphs, Person Plugins, Pose, and Skin. It can also wear or remove individual
+female and male clothing items on a selected Person.
 
 Replacing a Scene requires explicit confirmation in both the browser and API.
 General and Person Plugin presets, non-Person atom presets, SubScenes, and raw
@@ -200,10 +201,22 @@ operation, but cannot unload code already active in the VaM session.
 Single-choice bundles load immediately; multi-choice bundles expose a
 bridge-issued, stale-safe numeric picker without accepting a raw asset name.
 
-Individual clothing and raw plugins are browseable but remain action-disabled
-until their target state and safety options have explicit contracts. In
-particular, raw plugins execute code and the BrowserAssist catalogue mixes
-entry scripts with helper source files.
+Individual clothing uses an equally narrow desired-state contract. The
+browser submits only a numeric catalogue ID, target Person UID, `Wear` or
+`Remove`, the revision it observed, and an optional lease duration. The
+manager resolves the catalogue ID to the exact installed, package-qualified
+`.vam` resource reference; a BrowserAssist clothing UID is display metadata,
+not action identity. VaM
+publishes bounded worn and locked references plus the Person's current gender.
+The manager and bridge reject stale revisions, incompatible wear requests,
+and locked changes. If bounded publication is truncated, the workspace treats
+an unpublished item's state as unknown and disables its action.
+
+Raw plugins remain browseable but action-disabled. They execute code, and the
+BrowserAssist catalogue mixes entry scripts with helper source files. Trusted
+plugin entry-point classification and explicit code-loading confirmation are
+the next workspace target, followed by save/export workflows and then bounded
+live controls.
 
 See [the external workspace map](docs/EXTERNAL-WORKSPACE.md) and the
 [Person-specific capability map](docs/PERSON-WORKSPACE.md) for the exact

@@ -7,7 +7,7 @@ import sqlite3
 from typing import Iterator
 
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 SCHEMA = """
@@ -102,6 +102,7 @@ CREATE TABLE IF NOT EXISTS catalog_resources (
     favorite INTEGER NOT NULL DEFAULT 0,
     hidden INTEGER NOT NULL DEFAULT 0,
     tags_json TEXT NOT NULL DEFAULT '[]',
+    clothing_versions_json TEXT NOT NULL DEFAULT '[]',
     imported_utc TEXT NOT NULL,
     UNIQUE(root, source, resource_key)
 );
@@ -163,6 +164,17 @@ def connect(state_dir: Path) -> Iterator[sqlite3.Connection]:
     if "enabled" not in columns:
         connection.execute(
             "ALTER TABLE package_files ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1"
+        )
+    catalog_columns = {
+        row["name"]
+        for row in connection.execute("PRAGMA table_info(catalog_resources)")
+    }
+    if "clothing_versions_json" not in catalog_columns:
+        connection.execute(
+            """
+            ALTER TABLE catalog_resources
+            ADD COLUMN clothing_versions_json TEXT NOT NULL DEFAULT '[]'
+            """
         )
     connection.execute(
         """

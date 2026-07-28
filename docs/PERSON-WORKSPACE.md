@@ -28,9 +28,10 @@ every resource can be applied in the same way.
 | Person plugins | `Preset Plugins` | Replace or merge through `PluginPresets` | Generic preset pipeline; scripts may have their own dependencies |
 | Pose | `Preset Pose` | Replace or merge through `PosePresets` | Generic preset pipeline |
 | Skin | `Preset Skin` | Replace or merge through `SkinPresets` | Generic preset pipeline |
-| Individual clothing | `Clothing (Female)` and `Clothing (Male)` | Toggle `geometry`'s exact `clothing:<resource>` boolean | Requires per-version clothing UID metadata in VAM-PIP's catalogue |
+| Individual clothing | `Clothing (Female)` and `Clothing (Male)` | Set `geometry`'s exact `clothing:<resource>` boolean to worn or removed | Implemented with catalogue-derived package-qualified resource identity and revisioned live state |
 | Clothing item styles | `Clothing Item Presets` | Load an active item's own preset manager | Requires a reliable clothing-item relationship and separate material/physics options |
-| Worn hair and clothing | Not represented reliably by the offline catalogue | Publish bounded state from the target Person's `geometry` | Later live-state schema |
+| Worn clothing | Not represented reliably by the offline catalogue | Publish bounded worn and locked resource references from the target Person's `geometry` | Implemented for individual clothing actions |
+| Worn hair | Not represented reliably by the offline catalogue | Publish bounded state from the target Person's `geometry` | Later live-state schema |
 | Individual morph sliders | Preset files only | Publish UID, label, region, current value, and min/max; set a bounded numeric value | Later revisioned live-control schema |
 | Materials, pose, and physics controls | Preset files only | Publish an allowlisted typed control schema | Later; do not expose arbitrary storables |
 
@@ -40,6 +41,24 @@ Preset loading uses VaM's own preset managers. VAM-PIP sets the validated
 manager resolves a numeric catalogue ID to an exact installed local or
 package-qualified resource; the browser never supplies a path or storable
 name.
+
+Individual clothing follows the same ownership boundary. BrowserAssist's
+per-version clothing metadata supplies useful labels, creators, tags, and
+item-type information, but its clothing UID is not globally unique and is not
+the action identity. VAM-PIP instead preserves and resolves the exact
+installed `.vam` resource. For packaged clothing that identity remains the
+full `creator.package.version:/Custom/Clothing/Female-or-Male/item.vam`
+reference through the manager and bridge.
+
+The browser asks for the desired state, `Wear` or `Remove`; it does not ask
+VaM to invert whatever state happens to exist at execution time. Each Person
+snapshot includes a clothing revision, gender, bounded worn references,
+bounded locked references, and a truncation marker. Both the manager and
+bridge validate the revision against the same target Person and native
+`geometry`. Wear fails when the item's female/male category is incompatible
+with the current gender. Any state-changing request for a locked item fails.
+When publication is truncated, the browser treats an absent item as unknown
+rather than incorrectly presenting it as not worn.
 
 ## Why there is no generic “call VaM” endpoint
 
@@ -64,14 +83,15 @@ mutation are deliberately outside the initial external workspace.
 
 The useful order is:
 
-1. broad preset browsing and loading plus Person add/select;
-2. preserve BrowserAssist clothing metadata and add individual clothing
-   wear/remove with live worn-state reporting;
-3. expose individual morphs through a bounded, revisioned schema;
-4. add curated material, pose, and physics controls based on observed VaM
-   storables;
-5. add save/export workflows only after their overwrite and screenshot
-   semantics are explicit.
+1. completed: broad preset browsing and loading plus Person add/select;
+2. completed: individual clothing wear/remove with exact resource identity,
+   revisioned worn state, lock reporting, and gender checks;
+3. next: classify trusted raw plugin entry points and add an explicitly
+   confirmed code-loading workflow;
+4. add save/export workflows after their overwrite and screenshot semantics
+   are explicit;
+5. later: expose individual morphs and curated material, pose, and physics
+   controls through bounded, revisioned schemas.
 
 This keeps the first workspace broadly useful without locking the protocol to
 the shape of one example such as Hair.

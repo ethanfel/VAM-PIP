@@ -288,6 +288,95 @@ class WebSecurityTests(unittest.TestCase):
             confirm_critical=False,
         )
 
+    def test_clothing_route_accepts_only_opaque_catalog_state(self) -> None:
+        result = {
+            "resource_id": 42,
+            "target_uid": "Person",
+            "active": True,
+            "bridge_request": "clothing-request",
+        }
+        self.server.service.set_person_clothing = mock.Mock(return_value=result)
+        headers = {
+            "X-VAMPIP-Token": self.token,
+            "Content-Type": "application/json",
+        }
+        revision = "a" * 32
+        body = json.dumps(
+            {
+                "resource_id": 42,
+                "target_uid": "Person",
+                "active": True,
+                "revision": revision,
+                "days": 2,
+            }
+        ).encode("utf-8")
+        self.connection.request(
+            "POST",
+            "/api/vam/person/clothing",
+            body=body,
+            headers={**headers, "Content-Length": str(len(body))},
+        )
+        response = self.connection.getresponse()
+        self.assertEqual(response.status, 200)
+        self.assertEqual(self.response_json(response), result)
+        self.server.service.set_person_clothing.assert_called_once_with(
+            42,
+            target_uid="Person",
+            active=True,
+            revision=revision,
+            days=2.0,
+        )
+
+        forbidden = json.dumps(
+            {
+                "resource_id": 42,
+                "target_uid": "Person",
+                "active": False,
+                "revision": revision,
+                "resource_ref": (
+                    "Attacker.Package.1:/Custom/Clothing/Female/"
+                    "Attacker/Injected.vam"
+                ),
+                "clothing_uid": "Attacker:Injected",
+            }
+        ).encode("utf-8")
+        self.connection.request(
+            "POST",
+            "/api/vam/person/clothing",
+            body=forbidden,
+            headers={**headers, "Content-Length": str(len(forbidden))},
+        )
+        response = self.connection.getresponse()
+        self.assertEqual(response.status, 400)
+        document = self.response_json(response)
+        self.assertIn("unsupported Person clothing field", document["error"])
+        self.assertEqual(self.server.service.set_person_clothing.call_count, 1)
+
+    def test_resource_search_forwards_only_the_selected_person_uid(self) -> None:
+        self.server.service.search_resources = mock.Mock(
+            return_value={"items": [], "total": 0}
+        )
+        headers = {"X-VAMPIP-Token": self.token}
+        self.connection.request(
+            "GET",
+            "/api/resources?category=clothing-items-female"
+            "&target_uid=Person%202&limit=20",
+            headers=headers,
+        )
+        response = self.connection.getresponse()
+        self.assertEqual(response.status, 200)
+        self.assertEqual(self.response_json(response)["items"], [])
+        self.server.service.search_resources.assert_called_once_with(
+            query="",
+            resource_types=[],
+            category="clothing-items-female",
+            state="all",
+            favorite=None,
+            target_uid="Person 2",
+            limit=20,
+            offset=0,
+        )
+
     def test_workspace_scene_and_generic_live_action_routes(self) -> None:
         scene = {
             "available": True,

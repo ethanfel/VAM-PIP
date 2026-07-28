@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import json
 from pathlib import Path
 import tempfile
@@ -22,6 +23,9 @@ SUBSCENE_MEMBER = "Custom/SubScene/Example/Room.json"
 CUA_BUNDLE_MEMBER = "Custom/Assets/Example/Props.assetbundle"
 CUA_SCENE_MEMBER = "Custom/Assets/Example/Environment.scene"
 CUA_WRONG_SUFFIX_MEMBER = "Custom/Assets/Example/NotABundle.json"
+CLOTHING_MEMBER = (
+    "Custom/Clothing/Female/Example/Everyday/Everyday Shirt.vam"
+)
 UNSUPPORTED_ATOM_PRESET_MEMBER = (
     "Custom/Atom/PackageDefinedWidget/Preset_Unsafe.vap"
 )
@@ -91,6 +95,15 @@ def make_hair_var(path: Path) -> None:
         archive.writestr(CUA_BUNDLE_MEMBER, b"asset bundle")
         archive.writestr(CUA_SCENE_MEMBER, b"asset bundle")
         archive.writestr(CUA_WRONG_SUFFIX_MEMBER, b"not an asset bundle")
+        archive.writestr(
+            CLOTHING_MEMBER,
+            json.dumps(
+                {
+                    "itemType": "ClothingFemale",
+                    "uid": "Example:Everyday Shirt",
+                }
+            ),
+        )
         archive.writestr(
             UNSUPPORTED_ATOM_PRESET_MEMBER,
             json.dumps({"storables": []}),
@@ -224,6 +237,229 @@ class PersonWorkspaceTests(unittest.TestCase):
                 "person-select",
             ],
         }
+
+    @staticmethod
+    def clothing_roster(
+        *,
+        gender: str = "Female",
+        active_refs: list[str] | None = None,
+        locked_refs: list[str] | None = None,
+        revision: str = "a" * 32,
+        truncated: bool = False,
+    ) -> dict[str, object]:
+        roster = PersonWorkspaceTests.roster()
+        roster["capabilities"].append("person-clothing-item-toggle")
+        for person in roster["persons"]:
+            person["clothing"] = {
+                "ready": True,
+                "gender": gender,
+                "activeResourceRefs": list(active_refs or []),
+                "lockedResourceRefs": list(locked_refs or []),
+                "activeCount": len(active_refs or []),
+                "lockedCount": len(locked_refs or []),
+                "truncated": truncated,
+                "revision": revision,
+            }
+        return roster
+
+    def test_individual_clothing_search_joins_private_live_state(self) -> None:
+        resource_id = self.insert_resource(
+            "Clothing (Female)",
+            CLOTHING_MEMBER,
+            key="female-clothing",
+        )
+        resource_ref = f"Creator.HairPack.1:/{CLOTHING_MEMBER}"
+        roster = self.clothing_roster(
+            active_refs=[resource_ref],
+            locked_refs=[resource_ref],
+        )
+
+        with mock.patch.object(
+            self.service,
+            "_scene_snapshot",
+            return_value=roster,
+        ) as scene:
+            result = self.service.search_resources(
+                category="clothing-items-female",
+                target_uid="Person",
+            )
+
+        scene.assert_called_once_with(include_clothing_refs=True)
+        self.assertEqual(result["category"], "clothing-items-female")
+        item = next(value for value in result["items"] if value["id"] == resource_id)
+        self.assertTrue(item["worn"])
+        self.assertTrue(item["clothing_locked"])
+        self.assertTrue(item["clothing_compatible"])
+        self.assertEqual(item["clothing_revision"], "a" * 32)
+        self.assertNotIn("resolved_resource_ref", item)
+
+    def test_public_scene_never_exposes_exact_clothing_join_keys(self) -> None:
+        self.pids.append(1234)
+        raw_person = self.clothing_roster(
+            active_refs=[f"Creator.HairPack.1:/{CLOTHING_MEMBER}"],
+            locked_refs=[f"Creator.HairPack.1:/{CLOTHING_MEMBER}"],
+        )["persons"][0]
+        scene = {
+            "instanceId": "bridge-instance",
+            "updatedAtUtc": datetime.now(timezone.utc).isoformat(),
+            "loading": False,
+            "selectedUid": "Person",
+            "atoms": [],
+            "persons": [raw_person],
+            "capabilities": ["person-clothing-item-toggle"],
+        }
+        with (
+            mock.patch(
+                "vampip.service.read_bridge_status",
+                return_value={"instanceId": "bridge-instance", "state": "ok"},
+            ),
+            mock.patch("vampip.service.read_bridge_request", return_value=None),
+            mock.patch("vampip.service.read_scene_status", return_value=scene),
+        ):
+            public = self.service.scene()
+
+        clothing = public["persons"][0]["clothing"]
+        self.assertNotIn("activeResourceRefs", clothing)
+        self.assertNotIn("lockedResourceRefs", clothing)
+        self.assertEqual(clothing["revision"], "a" * 32)
+
+    def test_clothing_wear_and_remove_are_desired_state_actions(self) -> None:
+        resource_id = self.insert_resource(
+            "Clothing (Female)",
+            CLOTHING_MEMBER,
+            key="toggle-female-clothing",
+        )
+        resource_ref = f"Creator.HairPack.1:/{CLOTHING_MEMBER}"
+        lease_result = {
+            "applied": True,
+            "reconcile": {"enable": 1},
+        }
+        with (
+            mock.patch.object(
+                self.service,
+                "_scene_snapshot",
+                return_value=self.clothing_roster(),
+            ),
+            mock.patch.object(
+                self.service,
+                "lease_resource",
+                return_value=lease_result,
+            ) as lease,
+            mock.patch(
+                "vampip.service.request_person_clothing",
+                return_value="wear-request",
+            ) as request,
+        ):
+            worn = self.service.set_person_clothing(
+                resource_id,
+                target_uid="Person",
+                active=True,
+                revision="a" * 32,
+                days=4,
+            )
+
+        self.assertEqual(worn["bridge_request"], "wear-request")
+        self.assertTrue(worn["rescan"])
+        lease.assert_called_once_with(
+            resource_id,
+            days=4.0,
+            label="Clothing: Everyday Shirt",
+            apply=True,
+            bridge_rescan=False,
+        )
+        request.assert_called_once_with(
+            self.vam_root,
+            target_uid="Person",
+            resource_ref=resource_ref,
+            active=True,
+            revision="a" * 32,
+            rescan=True,
+        )
+
+        with (
+            mock.patch.object(
+                self.service,
+                "_scene_snapshot",
+                return_value=self.clothing_roster(
+                    gender="Male",
+                    active_refs=[resource_ref],
+                ),
+            ),
+            mock.patch.object(self.service, "lease_resource") as remove_lease,
+            mock.patch(
+                "vampip.service.request_person_clothing",
+                return_value="remove-request",
+            ) as remove_request,
+        ):
+            removed = self.service.set_person_clothing(
+                resource_id,
+                target_uid="Person",
+                active=False,
+                revision="a" * 32,
+            )
+
+        self.assertEqual(removed["bridge_request"], "remove-request")
+        self.assertFalse(removed["rescan"])
+        self.assertIsNone(removed["lease"])
+        remove_lease.assert_not_called()
+        remove_request.assert_called_once_with(
+            self.vam_root,
+            target_uid="Person",
+            resource_ref=resource_ref,
+            active=False,
+            revision="a" * 32,
+            rescan=False,
+        )
+
+    def test_clothing_changes_fail_closed_on_stale_gender_and_lock(self) -> None:
+        resource_id = self.insert_resource(
+            "Clothing (Female)",
+            CLOTHING_MEMBER,
+            key="guarded-female-clothing",
+        )
+        resource_ref = f"Creator.HairPack.1:/{CLOTHING_MEMBER}"
+
+        with mock.patch.object(
+            self.service,
+            "_scene_snapshot",
+            return_value=self.clothing_roster(),
+        ):
+            with self.assertRaisesRegex(ValueError, "revision is stale"):
+                self.service.set_person_clothing(
+                    resource_id,
+                    target_uid="Person",
+                    active=True,
+                    revision="b" * 32,
+                )
+
+        with mock.patch.object(
+            self.service,
+            "_scene_snapshot",
+            return_value=self.clothing_roster(gender="Male"),
+        ):
+            with self.assertRaisesRegex(ValueError, "incompatible"):
+                self.service.set_person_clothing(
+                    resource_id,
+                    target_uid="Person",
+                    active=True,
+                    revision="a" * 32,
+                )
+
+        with mock.patch.object(
+            self.service,
+            "_scene_snapshot",
+            return_value=self.clothing_roster(
+                active_refs=[resource_ref],
+                locked_refs=[resource_ref],
+            ),
+        ):
+            with self.assertRaisesRegex(ValueError, "locked in VaM"):
+                self.service.set_person_clothing(
+                    resource_id,
+                    target_uid="Person",
+                    active=False,
+                    revision="a" * 32,
+                )
 
     def test_hidden_hair_is_leased_enabled_and_queued_as_one_composite_action(
         self,

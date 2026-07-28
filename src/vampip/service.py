@@ -25,6 +25,7 @@ from vampip.bridge import (
     request_atom_preset,
     request_custom_unity_asset_choice,
     request_custom_unity_asset_load,
+    request_person_clothing,
     request_person_preset,
     request_rescan,
     request_scene_load,
@@ -267,12 +268,12 @@ _OTHER_WORKSPACE_CATEGORIES: tuple[dict[str, object], ...] = (
         "group": "person",
         "resource_types": ("Clothing (Female)",),
         "target_kind": "person",
-        "operation": "toggle-clothing-item",
+        "operation": "set-person-clothing",
         "required_capability": "person-clothing-item-toggle",
         "risk": "medium",
         "risk_reason": "Changes the selected Person's active clothing items.",
         "browseable": True,
-        "live_action": False,
+        "live_action": True,
         "merge_supported": False,
     },
     {
@@ -281,12 +282,12 @@ _OTHER_WORKSPACE_CATEGORIES: tuple[dict[str, object], ...] = (
         "group": "person",
         "resource_types": ("Clothing (Male)",),
         "target_kind": "person",
-        "operation": "toggle-clothing-item",
+        "operation": "set-person-clothing",
         "required_capability": "person-clothing-item-toggle",
         "risk": "medium",
         "risk_reason": "Changes the selected Person's active clothing items.",
         "browseable": True,
-        "live_action": False,
+        "live_action": True,
         "merge_supported": False,
     },
     {
@@ -535,12 +536,12 @@ class ManagerService:
             "operation": operation,
         }
 
-    def persons(self) -> dict[str, object]:
-        """Return the bridge-published scene snapshot without manager locks.
-
-        The historical method name is retained for callers of
-        ``/api/vam/persons``. New clients should use :meth:`scene`.
-        """
+    def _scene_snapshot(
+        self,
+        *,
+        include_clothing_refs: bool,
+    ) -> dict[str, object]:
+        """Return one fresh bridge scene, optionally retaining private join keys."""
 
         pids = list(self._running_pids())
         bridge = read_bridge_status(self.vam_root)
@@ -581,6 +582,22 @@ class ManagerService:
             and bridge
             and scene.get("instanceId") == bridge.get("instanceId")
         )
+        persons = list(scene.get("persons") or []) if available and scene else []
+        if not include_clothing_refs:
+            public_persons: list[object] = []
+            for person in persons:
+                if not isinstance(person, dict):
+                    public_persons.append(person)
+                    continue
+                public_person = dict(person)
+                clothing = public_person.get("clothing")
+                if isinstance(clothing, dict):
+                    public_clothing = dict(clothing)
+                    public_clothing.pop("activeResourceRefs", None)
+                    public_clothing.pop("lockedResourceRefs", None)
+                    public_person["clothing"] = public_clothing
+                public_persons.append(public_person)
+            persons = public_persons
         return {
             "available": available,
             "vam_running": bool(pids),
@@ -589,9 +606,7 @@ class ManagerService:
                 str(scene.get("selectedUid") or "") if available and scene else ""
             ),
             "atoms": (list(scene.get("atoms") or []) if available and scene else []),
-            "persons": (
-                list(scene.get("persons") or []) if available and scene else []
-            ),
+            "persons": persons,
             "capabilities": (
                 list(scene.get("capabilities") or []) if available and scene else []
             ),
@@ -600,6 +615,16 @@ class ManagerService:
                 scene.get("updatedAtUtc") if available and scene else None
             ),
         }
+
+    def persons(self) -> dict[str, object]:
+        """Return the public bridge-published scene snapshot without locks.
+
+        The historical method name is retained for callers of
+        ``/api/vam/persons``. Exact clothing resource refs remain private join
+        keys inside the manager.
+        """
+
+        return self._scene_snapshot(include_clothing_refs=False)
 
     def scene(self) -> dict[str, object]:
         """Return the canonical bridge-published live scene snapshot."""
@@ -825,6 +850,7 @@ class ManagerService:
         category: str = "",
         state: str = "all",
         favorite: bool | None = None,
+        target_uid: str | None = None,
         limit: int = 100,
         offset: int = 0,
     ) -> dict[str, object]:
@@ -875,9 +901,79 @@ class ManagerService:
                 else:
                     item["state"] = "active" if bool(item.get("enabled")) else "hidden"
                     item["active"] = bool(item.get("enabled"))
+            clothing_items = [
+                item
+                for item in result["items"]
+                if str(item.get("resource_type") or "").casefold()
+                in {"clothing (female)", "clothing (male)"}
+            ]
+            if clothing_items and target_uid:
+                self._annotate_clothing_state(clothing_items, target_uid)
+            for item in clothing_items:
+                item.pop("resolved_resource_ref", None)
             if category_id:
                 result["category"] = category_id
         return result
+
+    def _annotate_clothing_state(
+        self,
+        items: list[dict[str, object]],
+        target_uid: str,
+    ) -> None:
+        """Join exact resolved catalogue refs to one live Person snapshot."""
+
+        uid = self._validate_target_uid(target_uid)
+        scene = self._scene_snapshot(include_clothing_refs=True)
+        if not bool(scene.get("available")):
+            return
+        person = next(
+            (
+                value
+                for value in scene.get("persons", [])
+                if isinstance(value, dict)
+                and str(value.get("uid") or "") == uid
+            ),
+            None,
+        )
+        if person is None:
+            return
+        clothing = person.get("clothing")
+        if not isinstance(clothing, dict):
+            return
+        revision = str(clothing.get("revision") or "")
+        if re.fullmatch(r"[0-9a-fA-F]{32}", revision) is None:
+            return
+        raw_active = clothing.get("activeResourceRefs")
+        active_refs = {
+            str(value).replace("\\", "/").casefold()
+            for value in raw_active
+            if isinstance(value, str) and value
+        } if isinstance(raw_active, list) else set()
+        raw_locked = clothing.get("lockedResourceRefs")
+        locked_refs = {
+            str(value).replace("\\", "/").casefold()
+            for value in raw_locked
+            if isinstance(value, str) and value
+        } if isinstance(raw_locked, list) else set()
+        gender = str(clothing.get("gender") or "").casefold()
+        truncated = bool(clothing.get("truncated"))
+        for item in items:
+            resource_ref = item.get("resolved_resource_ref")
+            if not isinstance(resource_ref, str) or not resource_ref:
+                continue
+            worn = resource_ref.replace("\\", "/").casefold() in active_refs
+            resource_type = str(item.get("resource_type") or "").casefold()
+            compatible = (
+                gender in {"female", "both"}
+                if resource_type == "clothing (female)"
+                else gender in {"male", "both"}
+            )
+            item["clothing_revision"] = revision
+            item["worn"] = True if worn else (None if truncated else False)
+            item["clothing_locked"] = (
+                resource_ref.replace("\\", "/").casefold() in locked_refs
+            )
+            item["clothing_compatible"] = compatible
 
     def catalog_facets(self) -> dict[str, object]:
         with connect(self.state_dir) as connection:
@@ -1148,8 +1244,13 @@ class ManagerService:
         capability: str,
         *,
         action_label: str,
+        include_clothing_refs: bool = False,
     ) -> dict[str, object]:
-        scene = self.scene()
+        scene = (
+            self._scene_snapshot(include_clothing_refs=True)
+            if include_clothing_refs
+            else self.scene()
+        )
         if not scene["vam_running"]:
             raise ValueError(f"VaM must be running before {action_label}")
         if not scene["available"]:
@@ -1185,6 +1286,179 @@ class ManagerService:
                 confirm_replace=confirm_replace,
                 confirm_critical=confirm_critical,
             )
+
+    def set_person_clothing(
+        self,
+        resource_id: int,
+        *,
+        target_uid: str,
+        active: bool,
+        revision: str,
+        days: float = 3,
+    ) -> dict[str, object]:
+        """Wear or remove one catalog-selected clothing item idempotently."""
+
+        if (
+            isinstance(resource_id, bool)
+            or not isinstance(resource_id, int)
+            or resource_id < 1
+        ):
+            raise ValueError("resource_id must be a positive integer")
+        uid = self._validate_target_uid(target_uid)
+        if not isinstance(active, bool):
+            raise TypeError("active must be a boolean")
+        if not isinstance(revision, str) or re.fullmatch(
+            r"[0-9a-fA-F]{32}",
+            revision,
+        ) is None:
+            raise ValueError(
+                "revision must contain exactly 32 hexadecimal characters"
+            )
+        if isinstance(days, bool) or not isinstance(days, (int, float)):
+            raise TypeError("days must be a number")
+
+        with self._bridge_mailbox_lock:
+            self._ensure_bridge_mailbox_idle()
+            with connect(self.state_dir) as connection:
+                self._rows(connection, refresh=False)
+                row = connection.execute(
+                    """
+                    SELECT resource_type, atom_type, resource_path
+                    FROM catalog_resources
+                    WHERE id = ? AND root = ?
+                    """,
+                    (resource_id, str(self.vam_root)),
+                ).fetchone()
+                if row is None:
+                    raise ValueError(f"unknown catalog resource: {resource_id}")
+                resource_type = str(row["resource_type"]).casefold()
+                prefixes = {
+                    "clothing (female)": "Custom/Clothing/Female/",
+                    "clothing (male)": "Custom/Clothing/Male/",
+                }
+                required_prefix = prefixes.get(resource_type)
+                if required_prefix is None:
+                    raise ValueError(
+                        f"{row['resource_type'] or 'this resource type'} "
+                        "is not an individual clothing item"
+                    )
+                atom_type = str(row["atom_type"] or "")
+                if atom_type and atom_type.casefold() != "person":
+                    raise ValueError(
+                        "the selected clothing item targets a different atom type"
+                    )
+                location = resolve_resource_archive(
+                    connection,
+                    self.vam_root,
+                    resource_id,
+                    addon_root=self.addon_dir,
+                )
+            if location is None:
+                raise ValueError(
+                    "the selected catalog clothing resource is not installed"
+                )
+
+            scene = self._require_live_capability(
+                "person-clothing-item-toggle",
+                action_label="an individual clothing item can be changed",
+                include_clothing_refs=True,
+            )
+            person = next(
+                (
+                    value
+                    for value in scene.get("persons", [])
+                    if isinstance(value, dict)
+                    and str(value.get("uid") or "") == uid
+                ),
+                None,
+            )
+            if person is None:
+                raise ValueError(f"Person atom is no longer available: {uid}")
+            clothing = person.get("clothing")
+            if not isinstance(clothing, dict):
+                raise ValueError(
+                    "the selected Person has no live clothing snapshot"
+                )
+            live_revision = str(clothing.get("revision") or "")
+            if live_revision != revision:
+                raise ValueError(
+                    "the Person clothing revision is stale; refresh and try again"
+                )
+
+            resource_ref = self._catalog_resource_reference(
+                location,
+                required_prefix=required_prefix,
+                extension=".vam",
+                require_preset_basename=False,
+            )
+            gender = str(clothing.get("gender") or "").casefold()
+            compatible = (
+                gender in {"female", "both"}
+                if resource_type == "clothing (female)"
+                else gender in {"male", "both"}
+            )
+            if active and not compatible:
+                raise ValueError(
+                    "the selected clothing item is incompatible with the "
+                    "Person's current gender"
+                )
+            locked_refs = {
+                str(value).replace("\\", "/").casefold()
+                for value in clothing.get("lockedResourceRefs", [])
+                if isinstance(value, str) and value
+            }
+            if (
+                not active
+                and resource_ref.replace("\\", "/").casefold() in locked_refs
+            ):
+                raise ValueError(
+                    "the selected clothing item is locked in VaM and cannot "
+                    "be removed externally"
+                )
+            lease: dict[str, object] | None = None
+            rescan = False
+            if active:
+                label = Path(
+                    str(row["resource_path"]).replace("\\", "/")
+                ).stem
+                lease = self.lease_resource(
+                    resource_id,
+                    days=float(days),
+                    label=f"Clothing: {label}",
+                    apply=location.packaged,
+                    bridge_rescan=False,
+                )
+                rescan = self._lease_requires_bridge_rescan(
+                    lease,
+                    packaged=location.packaged,
+                )
+
+            request_id, bridge_message = self._try_queue_bridge_request(
+                lambda: request_person_clothing(
+                    self.vam_root,
+                    target_uid=uid,
+                    resource_ref=resource_ref,
+                    active=active,
+                    revision=revision,
+                    rescan=rescan,
+                )
+            )
+            return {
+                "resource_id": resource_id,
+                "category": (
+                    "clothing-items-female"
+                    if resource_type == "clothing (female)"
+                    else "clothing-items-male"
+                ),
+                "operation": "set-person-clothing",
+                "target_uid": uid,
+                "active": active,
+                "rescan": rescan,
+                "bridge_request": request_id,
+                "bridge_busy": bridge_message is not None,
+                "bridge_message": bridge_message,
+                "lease": lease,
+            }
 
     def apply_person_resource(
         self,

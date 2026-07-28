@@ -17,7 +17,7 @@ namespace VAMPip
     public class VAMPipBridge : MVRScript
     {
         private const int ProtocolVersion = 2;
-        private const string BridgeVersion = "0.5.0";
+        private const string BridgeVersion = "0.6.0";
 
         private const string PluginDataRoot = "Saves\\PluginData";
         private const string DataRoot = "Saves\\PluginData\\VAMPip";
@@ -30,6 +30,8 @@ namespace VAMPip
         private const int MaximumCuaChoicesPerAtom = 128;
         private const int MaximumCuaChoicesGlobally = 512;
         private const int MaximumCuaChoiceLabelLength = 256;
+        private const int MaximumClothingRefsPerPerson = 256;
+        private const int MaximumClothingRefsGlobally = 1024;
         private const float PollIntervalSeconds = 0.5f;
         private const float ScenePublishIntervalSeconds = 1.0f;
         private const float MinimumRescanIntervalSeconds = 5.0f;
@@ -45,6 +47,8 @@ namespace VAMPip
             "loadCustomUnityAsset";
         private const string CommandSelectCustomUnityAssetChoice =
             "selectCustomUnityAssetChoice";
+        private const string CommandSetPersonClothingResource =
+            "setPersonClothingResource";
         private const string CommandSelectPerson = "selectPerson";
         private const string CommandSelectAtom = "selectAtom";
         private const string CommandLoadScene = "loadScene";
@@ -125,6 +129,8 @@ namespace VAMPip
             public bool CreateIfMissing;
             public int ChoiceIndex;
             public string ChoiceToken;
+            public bool ClothingActive;
+            public string ClothingRevision;
         }
 
         private sealed class AtomCreationResult
@@ -158,6 +164,24 @@ namespace VAMPip
             public string Error;
         }
 
+        private sealed class ActiveClothingEntry
+        {
+            public DAZClothingItem Item;
+            public string ResourceRef;
+            public string Uid;
+            public string InternalUid;
+            public string PackageUid;
+            public bool Locked;
+        }
+
+        private sealed class PersonClothingSnapshot
+        {
+            public Atom Atom;
+            public DAZCharacterSelector Geometry;
+            public string GenerationKey;
+            public string Revision;
+        }
+
         private bool _operational;
         private bool _requestInProgress;
         private bool _skipPendingProcessing;
@@ -175,6 +199,9 @@ namespace VAMPip
         private readonly Dictionary<string, CuaChoiceSnapshot>
             _cuaChoiceSnapshots =
                 new Dictionary<string, CuaChoiceSnapshot>();
+        private readonly Dictionary<string, PersonClothingSnapshot>
+            _personClothingSnapshots =
+                new Dictionary<string, PersonClothingSnapshot>();
 
         public override void Init()
         {
@@ -376,6 +403,8 @@ namespace VAMPip
                 parsed.CreateIfMissing = false;
                 parsed.ChoiceIndex = -1;
                 parsed.ChoiceToken = "";
+                parsed.ClothingActive = false;
+                parsed.ClothingRevision = "";
 
                 if (command == CommandRescan)
                 {
@@ -523,6 +552,41 @@ namespace VAMPip
                         return;
                     }
                 }
+                else if (command == CommandSetPersonClothingResource)
+                {
+                    parsed.TargetUid =
+                        ((string)request["targetUid"] ?? "").Trim();
+                    parsed.ResourceRef =
+                        (string)request["resourceRef"] ?? "";
+                    parsed.ClothingRevision =
+                        (string)request["revision"] ?? "";
+                    parsed.RescanRequired = request["rescan"].AsBool;
+                    string desiredState =
+                        (string)request["desiredState"] ?? "";
+                    if (desiredState == "worn")
+                    {
+                        parsed.ClothingActive = true;
+                    }
+                    else if (desiredState == "removed")
+                    {
+                        parsed.ClothingActive = false;
+                    }
+                    else
+                    {
+                        RejectRequest(
+                            requestId,
+                            "desiredState must be exactly 'worn' or 'removed'.");
+                        return;
+                    }
+
+                    string validationError =
+                        ValidatePersonClothingRequest(parsed);
+                    if (validationError.Length != 0)
+                    {
+                        RejectRequest(requestId, validationError);
+                        return;
+                    }
+                }
                 else if (command == CommandLoadScene)
                 {
                     parsed.ResourceRef =
@@ -546,7 +610,8 @@ namespace VAMPip
                         "'applyPersonPreset', 'addPerson', 'addAtom', " +
                         "'applyAtomPreset', 'loadSubscene', " +
                         "'loadCustomUnityAsset', " +
-                        "'selectCustomUnityAssetChoice', 'selectPerson', " +
+                        "'selectCustomUnityAssetChoice', " +
+                        "'setPersonClothingResource', 'selectPerson', " +
                         "'selectAtom', and 'loadScene'.");
                     return;
                 }
@@ -725,6 +790,61 @@ namespace VAMPip
             if (!IsHexToken(request.ChoiceToken))
             {
                 return "choiceToken must contain exactly 32 hexadecimal characters.";
+            }
+            return "";
+        }
+
+        private static string ValidatePersonClothingRequest(
+            BridgeRequest request)
+        {
+            string targetError = ValidateTargetUid(request.TargetUid);
+            if (targetError.Length != 0)
+            {
+                return targetError;
+            }
+            if (!IsHexToken(request.ClothingRevision))
+            {
+                return "revision must contain exactly 32 hexadecimal characters.";
+            }
+
+            string resourceRef = request.ResourceRef ?? "";
+            string prefix = GetClothingResourcePrefix(resourceRef);
+            if (prefix.Length == 0)
+            {
+                return "Clothing resources must be below " +
+                    "Custom/Clothing/Female/ or Custom/Clothing/Male/.";
+            }
+            return ValidateResourceRef(
+                resourceRef,
+                prefix,
+                ".vam",
+                false,
+                "clothing items");
+        }
+
+        private static string GetClothingResourcePrefix(string resourceRef)
+        {
+            if (resourceRef == null)
+            {
+                return "";
+            }
+            int packageSeparator =
+                resourceRef.IndexOf(":/", StringComparison.Ordinal);
+            string member =
+                packageSeparator >= 0
+                ? resourceRef.Substring(packageSeparator + 2)
+                : resourceRef;
+            if (member.StartsWith(
+                    "Custom/Clothing/Female/",
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                return "Custom/Clothing/Female/";
+            }
+            if (member.StartsWith(
+                    "Custom/Clothing/Male/",
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                return "Custom/Clothing/Male/";
             }
             return "";
         }
@@ -1116,6 +1236,10 @@ namespace VAMPip
             {
                 ExecuteApplyPersonPreset(request);
             }
+            else if (request.Command == CommandSetPersonClothingResource)
+            {
+                ExecuteSetPersonClothingResource(request);
+            }
             else
             {
                 ExecuteSelectAtom(
@@ -1299,6 +1423,210 @@ namespace VAMPip
                     backend,
                     message);
                 SuperController.LogError("[VAM-PIP Bridge] " + message);
+            }
+            finally
+            {
+                if (rescanAttempted)
+                {
+                    _nextAllowedRescanAt =
+                        Time.realtimeSinceStartup +
+                        MinimumRescanIntervalSeconds;
+                }
+            }
+        }
+
+        private void ExecuteSetPersonClothingResource(
+            BridgeRequest request)
+        {
+            string startedAt = UtcNow();
+            string backend = "";
+            bool rescanAttempted = false;
+            try
+            {
+                if (request.RescanRequired)
+                {
+                    rescanAttempted = true;
+                    PublishStatus(
+                        StateRescanning,
+                        request.RequestId,
+                        startedAt,
+                        "",
+                        "",
+                        "Rescanning VaM packages before changing clothing.");
+                    SuperController.singleton.RescanPackages();
+                    backend = "vam";
+                }
+
+                PublishStatus(
+                    StateApplying,
+                    request.RequestId,
+                    startedAt,
+                    "",
+                    backend,
+                    request.ClothingActive
+                    ? "Putting on an individual clothing item."
+                    : "Removing an individual clothing item.");
+
+                if (request.ClothingActive &&
+                    !FileManagerSecure.FileExists(request.ResourceRef))
+                {
+                    throw new Exception(
+                        "The validated clothing item does not exist or is not " +
+                        "visible to VaM.");
+                }
+
+                Atom person =
+                    SuperController.singleton.GetAtomByUid(request.TargetUid);
+                if (person == null || person.type != "Person")
+                {
+                    throw new Exception(
+                        "targetUid does not identify a Person atom in the " +
+                        "current scene.");
+                }
+                DAZCharacterSelector geometry =
+                    person.GetStorableByID("geometry")
+                    as DAZCharacterSelector;
+                if (geometry == null)
+                {
+                    throw new Exception(
+                        "The target Person does not expose native geometry.");
+                }
+
+                PersonClothingSnapshot snapshot = null;
+                if (!_personClothingSnapshots.TryGetValue(
+                        request.TargetUid,
+                        out snapshot) ||
+                    !object.ReferenceEquals(snapshot.Atom, person) ||
+                    !object.ReferenceEquals(snapshot.Geometry, geometry) ||
+                    !string.Equals(
+                        snapshot.Revision,
+                        request.ClothingRevision,
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    throw new Exception(
+                        "The Person clothing revision is stale; refresh the " +
+                        "live roster.");
+                }
+                List<ActiveClothingEntry> entries =
+                    GetActiveClothingEntries(person, geometry);
+                string currentGeneration =
+                    BuildPersonClothingGenerationKey(geometry, entries);
+                if (!string.Equals(
+                        snapshot.GenerationKey,
+                        currentGeneration,
+                        StringComparison.Ordinal))
+                {
+                    throw new Exception(
+                        "The Person's clothing or gender changed; refresh the " +
+                        "live roster.");
+                }
+
+                string prefix =
+                    GetClothingResourcePrefix(request.ResourceRef);
+                string gender = geometry.gender.ToString();
+                bool genderCompatible =
+                    prefix == "Custom/Clothing/Female/"
+                    ? gender.Equals(
+                        "Female",
+                        StringComparison.OrdinalIgnoreCase) ||
+                      gender.Equals(
+                        "Both",
+                        StringComparison.OrdinalIgnoreCase)
+                    : gender.Equals(
+                        "Male",
+                        StringComparison.OrdinalIgnoreCase) ||
+                      gender.Equals(
+                        "Both",
+                        StringComparison.OrdinalIgnoreCase);
+                if (request.ClothingActive && !genderCompatible)
+                {
+                    throw new Exception(
+                        "The clothing item is incompatible with the Person's " +
+                        "current gender.");
+                }
+
+                string normalized =
+                    FileManagerSecure.NormalizePath(request.ResourceRef);
+                DAZClothingItem resolvedItem =
+                    geometry.GetClothingItem(normalized);
+                bool locked =
+                    resolvedItem != null && resolvedItem.locked;
+                bool observedWorn = false;
+                int entryIndex;
+                for (entryIndex = 0;
+                     entryIndex < entries.Count;
+                     entryIndex++)
+                {
+                    ActiveClothingEntry entry = entries[entryIndex];
+                    if (entry.ResourceRef.Length != 0 &&
+                        entry.ResourceRef.Equals(
+                            normalized,
+                            StringComparison.OrdinalIgnoreCase))
+                    {
+                        observedWorn = true;
+                        if (entry.Locked)
+                        {
+                            locked = true;
+                        }
+                    }
+                }
+                JSONStorableBool active =
+                    geometry.GetBoolJSONParam("clothing:" + normalized);
+                bool alreadyRemoved =
+                    active == null &&
+                    !request.ClothingActive &&
+                    !observedWorn;
+                if (active == null && !alreadyRemoved)
+                {
+                    throw new Exception(
+                        "VaM did not register the exact clothing item on this " +
+                        "Person after the package rescan.");
+                }
+                if (!alreadyRemoved &&
+                    active.val != request.ClothingActive &&
+                    locked)
+                {
+                    throw new Exception(
+                        "The clothing item is locked in VaM; unlock it before " +
+                        "changing it externally.");
+                }
+
+                if (!alreadyRemoved)
+                {
+                    active.val = request.ClothingActive;
+                    if (active.val != request.ClothingActive)
+                    {
+                        throw new Exception(
+                            "VaM refused the requested clothing state.");
+                    }
+                }
+
+                backend = "vam";
+                CompleteRequest(request.RequestId);
+                PublishSceneStatus();
+                PublishStatus(
+                    StateOk,
+                    request.RequestId,
+                    startedAt,
+                    UtcNow(),
+                    backend,
+                    request.ClothingActive
+                    ? "Clothing item is worn."
+                    : alreadyRemoved
+                      ? "Clothing item was already removed."
+                      : "Clothing item was removed.");
+                SuperController.LogMessage(
+                    "[VAM-PIP Bridge] Clothing state changed for " +
+                    request.TargetUid +
+                    ".");
+            }
+            catch (Exception exception)
+            {
+                FailRequest(
+                    request,
+                    startedAt,
+                    "Person clothing request failed: " +
+                    DescribeException(exception));
             }
             finally
             {
@@ -2836,6 +3164,243 @@ namespace VAMPip
             return first.ToString("x16") + second.ToString("x16");
         }
 
+        private static int CompareActiveClothingEntries(
+            ActiveClothingEntry left,
+            ActiveClothingEntry right)
+        {
+            int resourceOrder = string.Compare(
+                left == null ? "" : left.ResourceRef,
+                right == null ? "" : right.ResourceRef,
+                StringComparison.OrdinalIgnoreCase);
+            if (resourceOrder != 0)
+            {
+                return resourceOrder;
+            }
+            int packageOrder = string.Compare(
+                left == null ? "" : left.PackageUid,
+                right == null ? "" : right.PackageUid,
+                StringComparison.Ordinal);
+            if (packageOrder != 0)
+            {
+                return packageOrder;
+            }
+            return string.Compare(
+                left == null ? "" : left.InternalUid,
+                right == null ? "" : right.InternalUid,
+                StringComparison.Ordinal);
+        }
+
+        private static List<ActiveClothingEntry> GetActiveClothingEntries(
+            Atom atom,
+            DAZCharacterSelector geometry)
+        {
+            List<ActiveClothingEntry> result =
+                new List<ActiveClothingEntry>();
+            if (atom == null || geometry == null || atom.type != "Person")
+            {
+                return result;
+            }
+            DAZClothingItem[] items =
+                atom.GetComponentsInChildren<DAZClothingItem>();
+            if (items == null)
+            {
+                return result;
+            }
+            int index;
+            for (index = 0; index < items.Length; index++)
+            {
+                DAZClothingItem item = items[index];
+                if (item == null)
+                {
+                    continue;
+                }
+                string rawResourceRef =
+                    item.dynamicRuntimeLoadPath ?? "";
+                if (rawResourceRef.Length == 0)
+                {
+                    // VaM serializes the exact clothing resource as the item
+                    // id. Built-in items also use uid, but they fail the
+                    // scoped resource validation below and remain private.
+                    rawResourceRef = item.uid ?? "";
+                }
+                string resourceRef = "";
+                if (rawResourceRef.Length != 0)
+                {
+                    try
+                    {
+                        resourceRef =
+                            FileManagerSecure.NormalizePath(rawResourceRef);
+                        string prefix =
+                            GetClothingResourcePrefix(resourceRef);
+                        if (prefix.Length == 0 ||
+                            ValidateResourceRef(
+                                resourceRef,
+                                prefix,
+                                ".vam",
+                                false,
+                                "clothing items").Length != 0)
+                        {
+                            resourceRef = "";
+                        }
+                    }
+                    catch
+                    {
+                        resourceRef = "";
+                    }
+                }
+                ActiveClothingEntry entry = new ActiveClothingEntry();
+                entry.Item = item;
+                entry.ResourceRef = resourceRef;
+                entry.Uid = item.uid ?? "";
+                entry.InternalUid = item.internalUid ?? "";
+                entry.PackageUid = item.packageUid ?? "";
+                entry.Locked = item.locked;
+                result.Add(entry);
+            }
+            result.Sort(CompareActiveClothingEntries);
+            return result;
+        }
+
+        private static string BuildPersonClothingGenerationKey(
+            DAZCharacterSelector geometry,
+            List<ActiveClothingEntry> entries)
+        {
+            ulong first = 1469598103934665603UL;
+            ulong second = 7809847782465536322UL;
+            HashCuaText(
+                ref first,
+                ref second,
+                geometry == null ? "" : geometry.gender.ToString());
+            HashCuaText(
+                ref first,
+                ref second,
+                entries == null ? "-1" : entries.Count.ToString());
+            if (entries != null)
+            {
+                int index;
+                for (index = 0; index < entries.Count; index++)
+                {
+                    ActiveClothingEntry entry = entries[index];
+                    if (entry.ResourceRef.Length != 0)
+                    {
+                        HashCuaText(
+                            ref first,
+                            ref second,
+                            entry.ResourceRef);
+                    }
+                    else
+                    {
+                        HashCuaText(ref first, ref second, entry.Uid);
+                        HashCuaText(
+                            ref first,
+                            ref second,
+                            entry.InternalUid);
+                        HashCuaText(
+                            ref first,
+                            ref second,
+                            entry.PackageUid);
+                    }
+                    HashCuaText(
+                        ref first,
+                        ref second,
+                        entry.Locked ? "locked" : "unlocked");
+                }
+            }
+            return first.ToString("x16") + second.ToString("x16");
+        }
+
+        private JSONClass BuildPersonClothingStatus(
+            Atom atom,
+            ref int globalResourceBudget)
+        {
+            JSONClass clothing = new JSONClass();
+            DAZCharacterSelector geometry =
+                atom == null
+                ? null
+                : atom.GetStorableByID("geometry") as DAZCharacterSelector;
+            clothing["ready"].AsBool = geometry != null;
+            clothing["gender"] =
+                geometry == null ? "None" : geometry.gender.ToString();
+            JSONArray activeRefs = new JSONArray();
+            JSONArray lockedRefs = new JSONArray();
+            clothing["activeResourceRefs"] = activeRefs;
+            clothing["lockedResourceRefs"] = lockedRefs;
+            clothing["activeCount"].AsInt = 0;
+            clothing["lockedCount"].AsInt = 0;
+            clothing["truncated"].AsBool = false;
+            clothing["revision"] = "";
+            if (geometry == null)
+            {
+                _personClothingSnapshots.Remove(atom.uid);
+                return clothing;
+            }
+
+            List<ActiveClothingEntry> entries =
+                GetActiveClothingEntries(atom, geometry);
+            string generationKey =
+                BuildPersonClothingGenerationKey(geometry, entries);
+            PersonClothingSnapshot snapshot = null;
+            bool reuse =
+                _personClothingSnapshots.TryGetValue(
+                    atom.uid,
+                    out snapshot) &&
+                object.ReferenceEquals(snapshot.Atom, atom) &&
+                object.ReferenceEquals(snapshot.Geometry, geometry) &&
+                string.Equals(
+                    snapshot.GenerationKey,
+                    generationKey,
+                    StringComparison.Ordinal);
+            if (!reuse)
+            {
+                snapshot = new PersonClothingSnapshot();
+                snapshot.Revision = Guid.NewGuid().ToString("N");
+            }
+            snapshot.Atom = atom;
+            snapshot.Geometry = geometry;
+            snapshot.GenerationKey = generationKey;
+            _personClothingSnapshots[atom.uid] = snapshot;
+
+            HashSet<string> published =
+                new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            int resourceCount = 0;
+            int lockedCount = 0;
+            int entryIndex;
+            for (entryIndex = 0;
+                 entryIndex < entries.Count;
+                 entryIndex++)
+            {
+                ActiveClothingEntry entry = entries[entryIndex];
+                if (entry.Locked)
+                {
+                    lockedCount++;
+                }
+                if (entry.ResourceRef.Length == 0 ||
+                    published.Contains(entry.ResourceRef))
+                {
+                    continue;
+                }
+                resourceCount++;
+                if (published.Count >= MaximumClothingRefsPerPerson ||
+                    globalResourceBudget <= 0)
+                {
+                    continue;
+                }
+                published.Add(entry.ResourceRef);
+                activeRefs.Add(entry.ResourceRef);
+                if (entry.Locked)
+                {
+                    lockedRefs.Add(entry.ResourceRef);
+                }
+                globalResourceBudget--;
+            }
+            clothing["activeCount"].AsInt = entries.Count;
+            clothing["lockedCount"].AsInt = lockedCount;
+            clothing["truncated"].AsBool =
+                resourceCount > published.Count;
+            clothing["revision"] = snapshot.Revision;
+            return clothing;
+        }
+
         private JSONClass BuildCuaStatus(
             Atom atom,
             ref int globalChoiceBudget)
@@ -2958,6 +3523,7 @@ namespace VAMPip
             capabilities.Add("person-preset-plugins");
             capabilities.Add("person-preset-pose");
             capabilities.Add("person-preset-skin");
+            capabilities.Add("person-clothing-item-toggle");
             capabilities.Add("person-add");
             capabilities.Add("person-select");
             return capabilities;
@@ -2991,7 +3557,10 @@ namespace VAMPip
                 JSONArray atoms = new JSONArray();
                 JSONArray persons = new JSONArray();
                 int globalCuaChoiceBudget = MaximumCuaChoicesGlobally;
+                int globalClothingResourceBudget =
+                    MaximumClothingRefsGlobally;
                 HashSet<string> liveCuaUids = new HashSet<string>();
+                HashSet<string> livePersonUids = new HashSet<string>();
                 if (controller != null)
                 {
                     foreach (Atom atom in controller.GetAtoms())
@@ -3024,6 +3593,11 @@ namespace VAMPip
                         JSONClass person = new JSONClass();
                         person["uid"] = atom.uid ?? "";
                         person["selected"].AsBool = isSelected;
+                        livePersonUids.Add(atom.uid);
+                        person["clothing"] =
+                            BuildPersonClothingStatus(
+                                atom,
+                                ref globalClothingResourceBudget);
                         persons.Add(person);
                     }
                 }
@@ -3044,6 +3618,23 @@ namespace VAMPip
                 {
                     _cuaChoiceSnapshots.Remove(
                         removedCuaUids[removedOffset]);
+                }
+                List<string> removedPersonUids = new List<string>();
+                foreach (
+                    KeyValuePair<string, PersonClothingSnapshot> entry
+                    in _personClothingSnapshots)
+                {
+                    if (!livePersonUids.Contains(entry.Key))
+                    {
+                        removedPersonUids.Add(entry.Key);
+                    }
+                }
+                for (removedOffset = 0;
+                     removedOffset < removedPersonUids.Count;
+                     removedOffset++)
+                {
+                    _personClothingSnapshots.Remove(
+                        removedPersonUids[removedOffset]);
                 }
                 scene["atoms"] = atoms;
                 scene["persons"] = persons;

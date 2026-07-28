@@ -19,6 +19,7 @@ from vampip.bridge import (
     request_atom_preset,
     request_custom_unity_asset_choice,
     request_custom_unity_asset_load,
+    request_person_clothing,
     request_person_preset,
     request_rescan,
     request_scene_load,
@@ -197,6 +198,131 @@ class BridgeProtocolTests(unittest.TestCase):
                     request_add_person(self.vam_root, invalid_uid)
                 with self.assertRaises(ValueError):
                     request_select_atom(self.vam_root, invalid_uid)
+
+    def test_person_clothing_request_uses_desired_state_and_exact_revision(
+        self,
+    ) -> None:
+        revision = "A1" * 16
+        local_ref = (
+            "Custom/Clothing/Female/Creator/Evening Dress/Evening Dress.vam"
+        )
+        request_id = request_person_clothing(
+            self.vam_root,
+            "Person #2",
+            local_ref,
+            active=True,
+            revision=revision,
+            rescan=False,
+        )
+
+        request = self.read_request()
+        self.assertEqual(request["requestId"], request_id)
+        self.assertEqual(request["command"], "setPersonClothingResource")
+        self.assertEqual(request["targetUid"], "Person #2")
+        self.assertEqual(request["resourceRef"], local_ref)
+        self.assertEqual(request["desiredState"], "worn")
+        self.assertEqual(request["revision"], revision)
+        self.assertIs(request["rescan"], False)
+        self.assertEqual(
+            set(request) - {"protocol", "requestId", "createdAtUtc"},
+            {
+                "command",
+                "targetUid",
+                "resourceRef",
+                "desiredState",
+                "revision",
+                "rescan",
+            },
+        )
+
+        packaged_ref = (
+            "Author.Menswear.3:/"
+            "Custom/Clothing/Male/Author/Jacket/Jacket.VAM"
+        )
+        request_person_clothing(
+            self.vam_root,
+            "Person",
+            packaged_ref,
+            active=False,
+            revision="0" * 32,
+        )
+        request = self.read_request()
+        self.assertEqual(request["resourceRef"], packaged_ref)
+        self.assertEqual(request["desiredState"], "removed")
+        self.assertIs(request["rescan"], True)
+
+    def test_person_clothing_request_rejects_unscoped_refs_and_bad_scalars(
+        self,
+    ) -> None:
+        valid_ref = "Custom/Clothing/Female/Creator/Dress/Dress.vam"
+        revision = "0" * 32
+        for invalid_ref in (
+            "",
+            "/Custom/Clothing/Female/Creator/Dress/Dress.vam",
+            r"Custom\Clothing\Female\Creator\Dress\Dress.vam",
+            "Custom/Clothing/Creator/Dress/Dress.vam",
+            "Custom/Clothing/Female/Creator/../Dress.vam",
+            "Custom/Clothing/Female/Creator/Dress/Dress.vap",
+            "Custom/Atom/Person/Clothing/Preset_Outfit.vap",
+            "Author.Dress:/Custom/Clothing/Female/Creator/Dress/Dress.vam",
+            "Author..1:/Custom/Clothing/Female/Creator/Dress/Dress.vam",
+            (
+                "Author.Dress.1:/Custom/Clothing/Female/"
+                "Other.Dress.2:/Custom/Clothing/Female/Creator/Dress.vam"
+            ),
+        ):
+            with self.subTest(invalid_ref=invalid_ref):
+                with self.assertRaises(ValueError):
+                    request_person_clothing(
+                        self.vam_root,
+                        "Person",
+                        invalid_ref,
+                        active=True,
+                        revision=revision,
+                    )
+
+        for invalid_revision in (
+            "",
+            "0" * 31,
+            "0" * 33,
+            "g" * 32,
+            "0" * 31 + "\n",
+        ):
+            with self.subTest(invalid_revision=invalid_revision):
+                with self.assertRaises(ValueError):
+                    request_person_clothing(
+                        self.vam_root,
+                        "Person",
+                        valid_ref,
+                        active=True,
+                        revision=invalid_revision,
+                    )
+
+        with self.assertRaises(TypeError):
+            request_person_clothing(
+                self.vam_root,
+                "Person",
+                valid_ref,
+                active=1,  # type: ignore[arg-type]
+                revision=revision,
+            )
+        with self.assertRaises(TypeError):
+            request_person_clothing(
+                self.vam_root,
+                "Person",
+                valid_ref,
+                active=True,
+                revision=1,  # type: ignore[arg-type]
+            )
+        with self.assertRaises(TypeError):
+            request_person_clothing(
+                self.vam_root,
+                "Person",
+                valid_ref,
+                active=True,
+                revision=revision,
+                rescan=1,  # type: ignore[arg-type]
+            )
 
     def test_add_atom_request_uses_exact_native_allowlist(self) -> None:
         request_id = request_add_atom(
@@ -598,7 +724,21 @@ class BridgeProtocolTests(unittest.TestCase):
                         },
                     ],
                     "persons": [
-                        {"uid": "Person", "selected": "true"},
+                        {
+                            "uid": "Person",
+                            "selected": "true",
+                            "clothing": {
+                                "ready": "true",
+                                "revision": "2" * 32,
+                                "activeResourceRefs": [
+                                    (
+                                        "Author.Dress.1:/Custom/Clothing/"
+                                        "Female/Author/Dress/Dress.vam"
+                                    )
+                                ],
+                                "truncated": "false",
+                            },
+                        },
                         {"uid": "Person #2", "selected": "false"},
                     ],
                     "capabilities": [
@@ -624,6 +764,10 @@ class BridgeProtocolTests(unittest.TestCase):
         assert isinstance(persons, list)
         self.assertIs(persons[0]["selected"], True)
         self.assertIs(persons[1]["selected"], False)
+        clothing = persons[0]["clothing"]
+        self.assertIs(clothing["ready"], True)
+        self.assertIs(clothing["truncated"], False)
+        self.assertEqual(clothing["revision"], "2" * 32)
         atoms = scene["atoms"]
         assert isinstance(atoms, list)
         self.assertIs(atoms[0]["selected"], True)
@@ -701,13 +845,14 @@ class BridgeSourceTests(unittest.TestCase):
             repository / "src" / "vampip" / "bridge_assets" / "VAMPipBridge.cs"
         ).read_text(encoding="utf-8")
         self.assertIn("ProtocolVersion = 2", source)
-        self.assertIn('BridgeVersion = "0.5.0"', source)
+        self.assertIn('BridgeVersion = "0.6.0"', source)
         self.assertIn('"applyPersonPreset"', source)
         self.assertIn('"addAtom"', source)
         self.assertIn('"applyAtomPreset"', source)
         self.assertIn('"loadSubscene"', source)
         self.assertIn('"loadCustomUnityAsset"', source)
         self.assertIn('"selectCustomUnityAssetChoice"', source)
+        self.assertIn('"setPersonClothingResource"', source)
         self.assertIn('"loadScene"', source)
         self.assertIn('"selectAtom"', source)
         self.assertIn('"atom-roster"', source)
@@ -720,6 +865,7 @@ class BridgeSourceTests(unittest.TestCase):
         self.assertIn('"scene-load"', source)
         self.assertIn('"person-roster"', source)
         self.assertIn('"person-preset-apply"', source)
+        self.assertIn('"person-clothing-item-toggle"', source)
         for capability in (
             "person-preset-appearance",
             "person-preset-animation",
@@ -739,6 +885,8 @@ class BridgeSourceTests(unittest.TestCase):
         self.assertIn('"addPerson"', source)
         self.assertIn('"selectPerson"', source)
         self.assertIn("FileManagerSecure.FileExists(request.ResourceRef)", source)
+        self.assertIn('"clothing:" + normalized', source)
+        self.assertIn("GetComponentsInChildren<DAZClothingItem>()", source)
         self.assertIn('if (presetKind == "hair") return "HairPresets";', source)
         self.assertIn(
             'if (presetKind == "general") return "Preset";',

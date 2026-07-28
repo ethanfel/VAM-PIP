@@ -16,7 +16,7 @@ from vampip.catalog import (
     resolve_resource_archive,
     search_resources,
 )
-from vampip.database import connect
+from vampip.database import SCHEMA_VERSION, connect
 from vampip.inventory import scan
 from vampip.service import ManagerService
 
@@ -513,6 +513,248 @@ class CatalogTests(unittest.TestCase):
                 package_state="hidden",
             )
         self.assertEqual(result["total"], 1)
+
+    def test_clothing_metadata_uses_exact_installed_version_and_preserves_uid(
+        self,
+    ) -> None:
+        resource_path = (
+            "Custom\\Clothing\\Female\\Creator\\Evening Dress\\Evening Dress.vam"
+        )
+        self.write_catalogue(
+            [
+                {
+                    "creatorName": "Creator",
+                    "packageName": "Wardrobe",
+                    "resourceFullFileName": resource_path,
+                    "resourceType": "Clothing (Female)",
+                    "presetAtomType": "Person",
+                    "varVersions": ["1", "2"],
+                    "clothingVersions": [
+                        {
+                            "varVersion": "1",
+                            "clothing": {
+                                "itemType": "ClothingFemale",
+                                "uid": "Creator:Evening Dress Old",
+                                "displayName": "Old Dress",
+                                "creatorName": "Creator",
+                                "tags": "old",
+                                "isRealItem": "false",
+                            },
+                        },
+                        {
+                            "varVersion": "2",
+                            "clothing": {
+                                "itemType": " ClothingFemale ",
+                                "uid": "Creator:Evening Dress ",
+                                "displayName": " Evening Dress ",
+                                "creatorName": " Creator ",
+                                "tags": "formal, Formal, evening",
+                                "isRealItem": "true",
+                            },
+                        },
+                    ],
+                }
+            ]
+        )
+        member = "Custom/Clothing/Female/Creator/Evening Dress/Evening Dress.vam"
+        for version in ("1", "2"):
+            make_var(
+                self.addons / f"Creator.Wardrobe.{version}.var",
+                creator="Creator",
+                package="Wardrobe",
+                members={member: b"{}"},
+            )
+
+        with connect(self.state) as database:
+            scan(self.addons, database)
+            import_browserassist(database, self.vam_root)
+            result = search_resources(
+                database,
+                self.vam_root,
+                resource_type="Clothing (Female)",
+            )
+
+            self.assertEqual(result["total"], 1)
+            item = result["items"][0]
+            self.assertEqual(item["selected_version"], "2")
+            self.assertEqual(item["package_ref"], "Creator.Wardrobe.2")
+            self.assertEqual(
+                item["resolved_resource_ref"],
+                f"Creator.Wardrobe.2:/{member}",
+            )
+            self.assertNotIn("clothing_versions", item)
+            self.assertEqual(
+                item["clothing"],
+                {
+                    "version": "2",
+                    "item_type": "ClothingFemale",
+                    "uid": "Creator:Evening Dress ",
+                    "display_name": "Evening Dress",
+                    "creator": "Creator",
+                    "tags": ["formal", "evening"],
+                    "is_real_item": True,
+                },
+            )
+
+            stored = json.loads(
+                database.execute(
+                    """
+                    SELECT clothing_versions_json
+                    FROM catalog_resources
+                    """
+                ).fetchone()[0]
+            )
+            self.assertEqual(
+                [entry["version"] for entry in stored],
+                ["1", "2"],
+            )
+            self.assertEqual(stored[1]["uid"], "Creator:Evening Dress ")
+
+    def test_clothing_metadata_does_not_fall_back_to_another_version(
+        self,
+    ) -> None:
+        resource_path = "Custom\\Clothing\\Male\\Creator\\Jacket\\Jacket.vam"
+        self.write_catalogue(
+            [
+                {
+                    "creatorName": "Creator",
+                    "packageName": "Menswear",
+                    "resourceFullFileName": resource_path,
+                    "resourceType": "Clothing (Male)",
+                    "presetAtomType": "Person",
+                    "varVersions": ["1", "2"],
+                    "clothingVersions": [
+                        {
+                            "varVersion": "1",
+                            "clothing": {
+                                "itemType": "ClothingMale",
+                                "uid": "Creator:Jacket v1",
+                                "displayName": "Jacket",
+                                "creatorName": "Creator",
+                                "tags": "outerwear",
+                                "isRealItem": True,
+                            },
+                        }
+                    ],
+                }
+            ]
+        )
+        member = "Custom/Clothing/Male/Creator/Jacket/Jacket.vam"
+        make_var(
+            self.addons / "Creator.Menswear.2.var",
+            creator="Creator",
+            package="Menswear",
+            members={member: b"{}"},
+        )
+
+        with connect(self.state) as database:
+            scan(self.addons, database)
+            import_browserassist(database, self.vam_root)
+            item = search_resources(database, self.vam_root)["items"][0]
+
+            self.assertEqual(item["selected_version"], "2")
+            self.assertEqual(item["package_ref"], "Creator.Menswear.2")
+            self.assertNotIn("clothing", item)
+            stored = json.loads(
+                database.execute(
+                    """
+                    SELECT clothing_versions_json
+                    FROM catalog_resources
+                    """
+                ).fetchone()[0]
+            )
+            self.assertEqual(stored[0]["uid"], "Creator:Jacket v1")
+
+    def test_connect_migrates_legacy_catalog_clothing_metadata_column(
+        self,
+    ) -> None:
+        self.state.mkdir(parents=True)
+        legacy_path = self.state / "inventory.sqlite3"
+        legacy = sqlite3.connect(legacy_path)
+        try:
+            legacy.executescript(
+                """
+                CREATE TABLE schema_meta (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL
+                );
+                INSERT INTO schema_meta(key, value)
+                VALUES ('schema_version', '3');
+
+                CREATE TABLE catalog_resources (
+                    id INTEGER PRIMARY KEY,
+                    root TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    resource_key TEXT NOT NULL,
+                    creator TEXT NOT NULL,
+                    package_name TEXT NOT NULL,
+                    versions_json TEXT NOT NULL DEFAULT '[]',
+                    resource_path TEXT NOT NULL,
+                    resource_type TEXT NOT NULL,
+                    atom_type TEXT NOT NULL DEFAULT '',
+                    favorite INTEGER NOT NULL DEFAULT 0,
+                    hidden INTEGER NOT NULL DEFAULT 0,
+                    tags_json TEXT NOT NULL DEFAULT '[]',
+                    imported_utc TEXT NOT NULL,
+                    UNIQUE(root, source, resource_key)
+                );
+                """
+            )
+            legacy.execute(
+                """
+                INSERT INTO catalog_resources (
+                    root, source, resource_key, creator, package_name,
+                    versions_json, resource_path, resource_type, atom_type,
+                    favorite, hidden, tags_json, imported_utc
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    str(self.vam_root.resolve()),
+                    "browserassist",
+                    "legacy-key",
+                    "Creator",
+                    "Wardrobe",
+                    '["1"]',
+                    "Custom\\Clothing\\Female\\Creator\\Dress\\Dress.vam",
+                    "Clothing (Female)",
+                    "Person",
+                    0,
+                    0,
+                    "[]",
+                    "2026-01-01T00:00:00+00:00",
+                ),
+            )
+            legacy.commit()
+        finally:
+            legacy.close()
+
+        with connect(self.state) as database:
+            columns = {
+                row["name"]
+                for row in database.execute(
+                    "PRAGMA table_info(catalog_resources)"
+                )
+            }
+            self.assertIn("clothing_versions_json", columns)
+            self.assertEqual(
+                database.execute(
+                    """
+                    SELECT clothing_versions_json
+                    FROM catalog_resources
+                    WHERE resource_key = 'legacy-key'
+                    """
+                ).fetchone()[0],
+                "[]",
+            )
+            self.assertEqual(
+                database.execute(
+                    """
+                    SELECT value FROM schema_meta
+                    WHERE key = 'schema_version'
+                    """
+                ).fetchone()[0],
+                str(SCHEMA_VERSION),
+            )
 
     def test_resolver_verifies_the_member_in_an_allowed_version(self) -> None:
         resource_path = "Saves\\scene\\Versioned.json"

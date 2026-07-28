@@ -24,8 +24,8 @@ capability, not an error.
 | SubScenes | 2,549 `SubScenes` entries | Target an existing `SubScene` or create one only while its requested UID remains unused, then set `SubScene.browsePath` | Implemented for existing and newly created targets. Loading requires critical confirmation because a SubScene can contain plugin atoms. Optional placement remains in VaM. |
 | Atom presets | 2,513 `Preset Atom` entries across multiple atom types | Target an existing exact type or create it only while its requested UID remains unused, then use its `Preset` manager with replace/merge | Implemented when the catalogue-derived type is in the shared native allowlist. Other types stay browse-only. All loads require critical confirmation because generic presets can contain `PluginManager` state. |
 | Custom Unity Assets | 4,800 `Custom Unity Assets` entries: 4,767 `.assetbundle` and 33 legacy `.scene` bundles | Target an existing `CustomUnityAsset` or create one while its UID remains unused, force `loadDll=false`, then set the fixed `asset.assetUrl`; single-choice bundles auto-select and multi-choice bundles use bridge-issued numeric choices | Implemented. Every load requires critical confirmation. The browser cannot provide a bundle path, atom type, asset name, storable, or DLL option. Existing code already active in VaM cannot be unloaded. |
-| Plugins | 12,933 indexed files | Merge a synthetic PluginManager preset into a chosen atom, Scene Plugins, or Session Plugins | Feasible but executes code. The catalogue contains helper `.cs` files as well as entry `.cslist` files, so entry-point classification and explicit confirmation are required first. |
-| Clothing | 9,863 raw female/male items and 30,914 item-style presets | Toggle the target Person's exact `geometry` clothing boolean; item styles use that item's preset manager | Feasible after preserving BrowserAssist's per-version clothing UID metadata and publishing worn state. |
+| Plugins | 12,933 indexed files | Merge a synthetic PluginManager preset into a chosen atom, Scene Plugins, or Session Plugins | Next target, but it executes code. The catalogue contains helper `.cs` files as well as entry `.cslist` files, so trusted entry-point classification and explicit confirmation are required first. |
+| Clothing | 9,863 raw female/male items and 30,914 item-style presets | Set the target Person's exact `geometry` clothing boolean to worn or removed; item styles use that item's preset manager | Individual wear/remove is implemented with exact package-qualified resource identity and revisioned worn/locked/gender state. Item-style presets remain future work. |
 | Person presets and controls | Appearance, hair, skin, clothing, morphs, pose, physics, animation, general, and Person-plugin presets | Use static preset-kind to path/storable mappings; later publish typed live controls | The broad preset pipeline is the first Person module. See [PERSON-WORKSPACE.md](PERSON-WORKSPACE.md). |
 
 Counts come from the current last-good BrowserAssist import and are not
@@ -53,6 +53,20 @@ member, dependencies, and full VaM reference. The bridge independently checks
 the expected directory, extension, target atom type, and advertised
 capability.
 
+For packaged clothing, the full action identity is the exact
+`creator.package.version:/Custom/Clothing/Female-or-Male/item.vam` reference
+derived from that catalogue row. BrowserAssist's per-version clothing UID is
+useful metadata but is not unique enough to identify the action. The browser
+therefore never supplies either value.
+
+Individual clothing is a desired-state operation: `Wear` means true and
+`Remove` means false, rather than toggling stale state. The request carries
+the target Person UID and its current clothing revision. VaM publishes a
+bounded list of worn and locked resource references, the current gender, and
+a truncation marker. The manager and bridge fail closed on stale revisions,
+gender-incompatible wear requests, and locked changes. The web workspace also
+fails closed when truncation leaves the selected item's state unknown.
+
 Commands that create atoms carry a caller-chosen UID. If an atom of the
 expected type already has that UID, the retry succeeds as “already present”;
 if another type owns it, the command fails. That gives creation an idempotent
@@ -60,8 +74,9 @@ contract without a general durable command queue.
 
 ## Live scene model
 
-File metadata alone cannot drive the whole VaM UI. A later bridge snapshot
-should expose a bounded live scene document:
+File metadata alone cannot drive the whole VaM UI. The bridge now exposes the
+bounded clothing subset of a live scene document; later controls should extend
+the same model:
 
 ```text
 scene revision
@@ -106,9 +121,10 @@ the bridge executes them, so that mode cannot silently become replacement.
 3. Completed: all-atom roster/select and idempotent Person creation.
 4. Completed: typed native-atom creation, atom presets, and SubScenes.
 5. Completed: CUA loading with DLL loading forced off and stale-safe contained-asset choices.
-6. Next: clothing and other item-level state.
-7. Revisioned live controls.
-8. Explicit code-loading and save/export workflows.
+6. Completed: individual clothing wear/remove with revisioned worn, lock, and gender state.
+7. Next: trusted plugin entry-point classification and explicitly confirmed code loading.
+8. Save/export workflows with explicit overwrite and screenshot semantics.
+9. Later: revisioned live controls.
 
 This order produces useful external control early while preserving a protocol
 that can be reasoned about and tested.

@@ -16,6 +16,10 @@ MAX_RESOURCE_REF_LENGTH = 1000
 SCENE_RESOURCE_PREFIX = "Saves/scene/"
 SUBSCENE_RESOURCE_PREFIX = "Custom/SubScene/"
 CUSTOM_UNITY_ASSET_RESOURCE_PREFIX = "Custom/Assets/"
+CLOTHING_RESOURCE_PREFIXES = (
+    "Custom/Clothing/Female/",
+    "Custom/Clothing/Male/",
+)
 PERSON_PRESET_PREFIXES = {
     "appearance": "Custom/Atom/Person/Appearance/",
     "animation": "Custom/Atom/Person/AnimationPresets/",
@@ -282,6 +286,42 @@ def _validate_person_preset_resource_ref(
     )
 
 
+def _validate_clothing_resource_ref(resource_ref: str) -> None:
+    package_separator = resource_ref.find(":/")
+    member = (
+        resource_ref[package_separator + 2 :]
+        if package_separator >= 0
+        else resource_ref
+    )
+    prefix = next(
+        (
+            candidate
+            for candidate in CLOTHING_RESOURCE_PREFIXES
+            if member.casefold().startswith(candidate.casefold())
+        ),
+        None,
+    )
+    if prefix is None:
+        accepted = " or ".join(CLOTHING_RESOURCE_PREFIXES)
+        raise ValueError(f"clothing resource_ref must be below {accepted}")
+    _validate_allowlisted_resource_ref(
+        resource_ref,
+        required_prefix=prefix,
+        extension=".vam",
+        require_preset_basename=False,
+    )
+
+
+def _validate_revision(revision: str) -> str:
+    if not isinstance(revision, str):
+        raise TypeError("revision must be a string")
+    if len(revision) != 32 or any(
+        character not in "0123456789abcdefABCDEF" for character in revision
+    ):
+        raise ValueError("revision must contain exactly 32 hexadecimal characters")
+    return revision
+
+
 def _validate_allowlisted_resource_ref(
     resource_ref: str,
     *,
@@ -385,6 +425,37 @@ def request_select_person(vam_root: Path, target_uid: str) -> str:
         {
             "command": "selectPerson",
             "targetUid": _validate_target_uid(target_uid),
+        },
+    )
+
+
+def request_person_clothing(
+    vam_root: Path,
+    target_uid: str,
+    resource_ref: str,
+    *,
+    active: bool,
+    revision: str,
+    rescan: bool = True,
+) -> str:
+    target_uid = _validate_target_uid(target_uid)
+    if not isinstance(resource_ref, str):
+        raise TypeError("resource_ref must be a string")
+    _validate_clothing_resource_ref(resource_ref)
+    if not isinstance(active, bool):
+        raise TypeError("active must be a bool")
+    revision = _validate_revision(revision)
+    if not isinstance(rescan, bool):
+        raise TypeError("rescan must be a bool")
+    return _write_request(
+        vam_root,
+        {
+            "command": "setPersonClothingResource",
+            "targetUid": target_uid,
+            "resourceRef": resource_ref,
+            "desiredState": "worn" if active else "removed",
+            "revision": revision,
+            "rescan": rescan,
         },
     )
 
@@ -633,6 +704,10 @@ def read_scene_status(vam_root: Path) -> dict[str, object] | None:
         for person in persons:
             if isinstance(person, dict):
                 _normalize_bool(person, "selected")
+                clothing = person.get("clothing")
+                if isinstance(clothing, dict):
+                    _normalize_bool(clothing, "ready")
+                    _normalize_bool(clothing, "truncated")
     atoms = document.get("atoms")
     if isinstance(atoms, list):
         for atom in atoms:

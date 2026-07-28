@@ -249,6 +249,7 @@ class ManagerRequestHandler(BaseHTTPRequestHandler):
                     category=query.get("category", [""])[0],
                     state=query.get("state", ["all"])[0],
                     favorite=_bool_query(query, "favorite"),
+                    target_uid=(query.get("target_uid", [""])[0] or None),
                     limit=int(query.get("limit", ["100"])[0]),
                     offset=int(query.get("offset", ["0"])[0]),
                 )
@@ -515,6 +516,50 @@ class ManagerRequestHandler(BaseHTTPRequestHandler):
                         target_uid,
                         choice_index,
                         choice_token,
+                    ),
+                )
+                return
+            if method == "POST" and parsed.path == "/api/vam/person/clothing":
+                allowed_fields = {
+                    "resource_id",
+                    "target_uid",
+                    "active",
+                    "revision",
+                    "days",
+                }
+                unexpected_fields = sorted(set(document) - allowed_fields)
+                if unexpected_fields:
+                    raise ValueError(
+                        "unsupported Person clothing field(s): "
+                        + ", ".join(unexpected_fields)
+                    )
+                resource_id = document.get("resource_id")
+                target_uid = document.get("target_uid")
+                active = document.get("active")
+                revision = document.get("revision")
+                days = document.get("days", 3)
+                if (
+                    isinstance(resource_id, bool)
+                    or not isinstance(resource_id, int)
+                    or resource_id < 1
+                ):
+                    raise ValueError("resource_id must be a positive integer")
+                if not isinstance(target_uid, str):
+                    raise ValueError("target_uid must be a string")
+                if not isinstance(active, bool):
+                    raise ValueError("active must be a boolean")
+                if not isinstance(revision, str):
+                    raise ValueError("revision must be a string")
+                if isinstance(days, bool) or not isinstance(days, (int, float)):
+                    raise ValueError("days must be a number")
+                self._json(
+                    HTTPStatus.OK,
+                    service.set_person_clothing(
+                        resource_id,
+                        target_uid=target_uid,
+                        active=active,
+                        revision=revision,
+                        days=float(days),
                     ),
                 )
                 return
