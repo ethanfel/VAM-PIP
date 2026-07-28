@@ -61,7 +61,7 @@ The bridge writes `status.json`:
 ```json
 {
   "protocol": 1,
-  "bridgeVersion": "0.1.2",
+  "bridgeVersion": "0.1.3",
   "instanceId": "id-created-when-the-plugin-started",
   "requestId": "a-new-unique-id",
   "lastCompletedRequestId": "a-new-unique-id",
@@ -103,3 +103,7 @@ The bridge calls only VaM's public
 BrowserAssist internals: those require reflection, which VaM prohibits for
 loose plugins. Reload BrowserAssist, or restart VaM, when BrowserAssist must
 rebuild its own package/resource manifest.
+
+The bridge also avoids runtime type inspection in error messages. On VaM's
+legacy Mono runtime, even `Exception.GetType().Name` emits a reference through
+the prohibited reflection namespace.

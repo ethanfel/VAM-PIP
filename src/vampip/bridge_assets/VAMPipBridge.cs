@@ -14,7 +14,7 @@ namespace VAMPip
     public class VAMPipBridge : MVRScript
     {
         private const int ProtocolVersion = 1;
-        private const string BridgeVersion = "0.1.2";
+        private const string BridgeVersion = "0.1.3";
 
         private const string PluginDataRoot = "Saves\\PluginData";
         private const string DataRoot = "Saves\\PluginData\\VAMPip";
@@ -456,9 +456,15 @@ namespace VAMPip
                 return "Unknown error.";
             }
 
-            string message =
-                exception.GetType().Name + ": " + (exception.Message ?? "");
+            // Runtime type inspection in diagnostics emits a prohibited
+            // metadata call on VaM's legacy Mono runtime. Keep this
+            // message-only so the sandbox accepts the assembly.
+            string message = exception.Message ?? "";
             message = message.Replace("\r", " ").Replace("\n", " ").Trim();
+            if (message.Length == 0)
+            {
+                message = "Unspecified error.";
+            }
             if (message.Length > 1000)
             {
                 message = message.Substring(0, 1000);
