@@ -2,6 +2,7 @@
 
 const PAGE_SIZE = 60;
 const TOKEN_KEY = "vampip-token";
+const WORKSPACE_ACTION_STALL_MS = 5 * 60 * 1000;
 const PERSON_BRIDGE_BUSY_STATES = new Set([
   "queued",
   "deferred-loading",
@@ -362,6 +363,7 @@ const app = {
   atomMutationInFlight: false,
   cuaChoiceInFlight: false,
   applyingWorkspaceResources: new Set(),
+  workspaceAction: null,
   workspaceCategories: [],
   workspaceCategoriesError: null,
   workspaceCategoriesSource: "fallback",
@@ -373,6 +375,7 @@ const app = {
 
 const elements = {};
 const busyContents = new WeakMap();
+const toastTimers = new WeakMap();
 
 document.addEventListener("DOMContentLoaded", init);
 
@@ -724,7 +727,8 @@ function startActivityPolling() {
       app.activityRefreshNeeded = true;
       setConnection("error", "Unavailable");
     } finally {
-      const delay = operationIsBusy() ? 650 : 1500;
+      const delay =
+        operationIsBusy() || workspaceActionIsActive() ? 650 : 1500;
       app.activityTimer = window.setTimeout(tick, delay);
     }
   };
@@ -746,6 +750,15 @@ async function loadActivity({ refreshOnTerminal = true } = {}) {
       Boolean(previousInstance) &&
       Boolean(currentInstance) &&
       previousInstance !== currentInstance;
+    if (instanceChanged && workspaceActionIsActive()) {
+      finishWorkspaceActionFeedback(
+        app.workspaceAction,
+        false,
+        "The VAM-PIP manager restarted before this load finished. Retry the asset.",
+      );
+    } else {
+      syncWorkspaceActionActivity(app.activity);
+    }
     app.activityPollFailed = false;
     if (recovered || instanceChanged) {
       app.activityRefreshNeeded = true;
@@ -754,6 +767,7 @@ async function loadActivity({ refreshOnTerminal = true } = {}) {
     const workspaceCategory =
       app.view === "workspace" ? currentWorkspaceCategory() : null;
     const shouldPollScene =
+      workspaceActionIsActive() ||
       snapshotBridgeBusy() ||
       Boolean(
         workspaceCategory &&
@@ -761,7 +775,11 @@ async function loadActivity({ refreshOnTerminal = true } = {}) {
             workspaceCategory.targetKind === "person" ||
             ATOM_TARGET_KINDS.has(workspaceCategory.targetKind)),
       );
-    if (shouldPollScene && Date.now() - app.personPollAt > 3000) {
+    const scenePollInterval = workspaceActionIsActive() ? 900 : 3000;
+    if (
+      shouldPollScene &&
+      Date.now() - app.personPollAt > scenePollInterval
+    ) {
       loadPersons({ quiet: true });
     }
     if (
@@ -783,6 +801,13 @@ async function loadActivity({ refreshOnTerminal = true } = {}) {
     const terminal = terminalStatus && !busy;
     const unhandledTerminal =
       terminal && Boolean(key) && app.lastTerminalOperation !== key;
+    const previousOperation = previous?.operation || {};
+    const activityChanged =
+      operationIsBusy(previous) !== busy ||
+      operationKey(previousOperation) !== key;
+    if (app.view === "workspace" && activityChanged) {
+      renderLibrary();
+    }
     if (
       refreshOnTerminal &&
       !busy &&
@@ -1636,6 +1661,11 @@ function personControlKey() {
       Boolean(atom.selected),
       atom.cua || null,
     ]),
+    bridge: [
+      snapshot.bridge?.requestId || "",
+      snapshot.bridge?.state || "",
+      snapshot.bridge?.message || "",
+    ],
   });
 }
 
@@ -1650,6 +1680,7 @@ function acceptPersonSnapshot(snapshot, generation) {
   app.person = snapshot;
   app.personError = null;
   app.personPollAt = Date.now();
+  syncWorkspaceActionSnapshot(snapshot);
 
   const persons = personList(snapshot);
   const known = new Set(persons.map((person) => person.uid));
@@ -3282,6 +3313,312 @@ async function setPersonClothing(item, category, sourceButton) {
   }
 }
 
+function workspaceActionIsActive(action = app.workspaceAction) {
+  return Boolean(action && !action.terminal);
+}
+
+function workspaceActionTarget(action) {
+  if (!action || action.recovered || !action.title) return "";
+  return ` “${action.title}”`;
+}
+
+function startWorkspaceActionFeedback(item, category, key, state) {
+  const title = resourceTitle(item);
+  const noun = prettyType(category.noun);
+  const needsPackageEnable = !["active", "local"].includes(state);
+  const now = Date.now();
+  const action = {
+    key,
+    resourceId: Number(item.id),
+    categoryId: category.id,
+    operation: category.operation,
+    title,
+    noun,
+    needsPackageEnable,
+    requestId: "",
+    stage: "preparing",
+    message: needsPackageEnable
+      ? `Resolving dependencies and enabling hidden packages for “${title}”.`
+      : `Preparing “${title}” for VaM.`,
+    managerProgress: null,
+    result: null,
+    terminal: false,
+    recovered: false,
+    toast: null,
+    dismissTimer: null,
+    startedAt: now,
+    lastProgressAt: now,
+    previousOperationId: numberOr(app.activity?.operation?.id, 0),
+  };
+  app.workspaceAction = action;
+  action.toast = toast(
+    `Preparing ${noun.toLowerCase()}`,
+    action.message,
+    "busy",
+    { persistent: true },
+  );
+  renderWorkspaceActionFeedback();
+  return action;
+}
+
+function bindWorkspaceActionRequest(action, result, detail) {
+  if (app.workspaceAction !== action || action.terminal) return;
+  action.requestId = String(result.bridge_request || "").trim();
+  action.result = result;
+  action.stage = "queued";
+  action.message = detail;
+  action.managerProgress = null;
+  action.lastProgressAt = Date.now();
+  renderWorkspaceActionFeedback();
+}
+
+function syncWorkspaceActionActivity(activity = app.activity) {
+  const action = app.workspaceAction;
+  if (!workspaceActionIsActive(action)) return;
+  if (
+    Date.now() - numberOr(action.lastProgressAt, action.startedAt) >
+    WORKSPACE_ACTION_STALL_MS
+  ) {
+    finishWorkspaceActionFeedback(
+      action,
+      false,
+      "No progress was reported for five minutes. Check VaM and retry the asset.",
+    );
+    return;
+  }
+  if (action.requestId && activity?.vam?.running === false) {
+    finishWorkspaceActionFeedback(
+      action,
+      false,
+      "VaM closed before this load finished. Start VaM and retry the asset.",
+    );
+    return;
+  }
+  if (action.requestId) return;
+  const operation = activity?.operation || {};
+  if (!operationIsBusy(activity)) {
+    renderWorkspaceActionFeedback();
+    return;
+  }
+
+  const operationId = numberOr(operation.id, 0);
+  if (
+    operationId <= numberOr(action.previousOperationId, 0) ||
+    operation.run_name !== "managed-reconcile"
+  ) {
+    renderWorkspaceActionFeedback();
+    return;
+  }
+  const status = String(operation.status || "").toLowerCase();
+  const enableTotal = numberOr(operation.enable_total, 0);
+  const enabled = Math.min(numberOr(operation.enabled, 0), enableTotal);
+  const previousProgress = action.managerProgress || {};
+  if (
+    previousProgress.status !== status ||
+    previousProgress.enableTotal !== enableTotal ||
+    previousProgress.enabled !== enabled
+  ) {
+    action.lastProgressAt = Date.now();
+  }
+  action.managerProgress = { status, enableTotal, enabled };
+  if (enableTotal > enabled) {
+    action.stage = "enabling";
+  } else if (status === "finalizing") {
+    action.stage = "finalizing";
+  }
+  renderWorkspaceActionFeedback();
+}
+
+function recoverWorkspaceActionFeedback(snapshot) {
+  const bridge = snapshot?.bridge || {};
+  const stage = String(bridge.state || "").toLowerCase();
+  const requestId = String(bridge.requestId || "").trim();
+  if (
+    app.workspaceAction ||
+    snapshot?.vam_running !== true ||
+    snapshot?.available !== true ||
+    !requestId ||
+    !PERSON_BRIDGE_BUSY_STATES.has(stage)
+  ) {
+    return;
+  }
+
+  const now = Date.now();
+  const action = {
+    key: "",
+    resourceId: null,
+    categoryId: "",
+    operation: "",
+    title: "",
+    noun: "VaM action",
+    needsPackageEnable: stage === "rescanning",
+    requestId,
+    stage,
+    message: String(bridge.message || "").trim(),
+    managerProgress: null,
+    result: null,
+    terminal: false,
+    recovered: true,
+    toast: null,
+    dismissTimer: null,
+    startedAt: now,
+    lastProgressAt: now,
+    previousOperationId: numberOr(app.activity?.operation?.id, 0),
+  };
+  app.workspaceAction = action;
+  action.toast = toast(
+    "VaM action in progress",
+    action.message || "The bridge is processing an earlier request.",
+    "busy",
+    { persistent: true },
+  );
+}
+
+function syncWorkspaceActionSnapshot(snapshot = app.person) {
+  recoverWorkspaceActionFeedback(snapshot);
+  const action = app.workspaceAction;
+  if (!workspaceActionIsActive(action) || !action.requestId) return;
+  if (snapshot?.vam_running === false) {
+    finishWorkspaceActionFeedback(
+      action,
+      false,
+      "VaM closed before this load finished. Start VaM and retry the asset.",
+    );
+    return;
+  }
+
+  const bridge = snapshot?.bridge || {};
+  const observedRequestId = String(bridge.requestId || "").trim();
+  const lastCompletedRequestId = String(
+    bridge.lastCompletedRequestId || "",
+  ).trim();
+  const stage = String(bridge.state || "").toLowerCase();
+  if (observedRequestId !== action.requestId) {
+    if (lastCompletedRequestId === action.requestId) {
+      finishWorkspaceActionFeedback(
+        action,
+        true,
+        "The action completed in VaM; the bridge has already moved to a newer request.",
+      );
+      return;
+    }
+    if (
+      observedRequestId &&
+      PERSON_BRIDGE_BUSY_STATES.has(stage)
+    ) {
+      finishWorkspaceActionFeedback(
+        action,
+        false,
+        "The bridge moved to another request before VAM-PIP saw this load finish. Check VaM before retrying; this result is unknown.",
+      );
+    }
+    return;
+  }
+
+  if (
+    !PERSON_BRIDGE_BUSY_STATES.has(stage) &&
+    !["ok", "error"].includes(stage)
+  ) {
+    return;
+  }
+  const message = String(bridge.message || "").trim();
+  if (action.stage !== stage || action.message !== message) {
+    action.lastProgressAt = Date.now();
+  }
+  action.stage = stage;
+  action.message = message;
+  if (stage === "ok" || stage === "error") {
+    finishWorkspaceActionFeedback(
+      action,
+      stage === "ok",
+      action.message,
+    );
+    return;
+  }
+  renderWorkspaceActionFeedback();
+}
+
+function finishWorkspaceActionFeedback(action, ok, message) {
+  if (!action || app.workspaceAction !== action || action.terminal) return;
+  action.terminal = true;
+  action.stage = ok ? "ok" : "error";
+  action.message = message || (
+    ok
+      ? `${action.noun}${workspaceActionTarget(action)} finished in VaM.`
+      : `${action.noun}${workspaceActionTarget(action)} could not be loaded.`
+  );
+  renderWorkspaceActionFeedback();
+  const dismissAfter = ok ? 5200 : 9000;
+  action.dismissTimer = window.setTimeout(() => {
+    dismissToast(action.toast);
+    if (app.workspaceAction === action) {
+      app.workspaceAction = null;
+      if (app.view === "workspace") renderLibrary();
+    }
+  }, dismissAfter);
+}
+
+function renderWorkspaceActionFeedback() {
+  const action = app.workspaceAction;
+  if (!action || !action.toast) return;
+
+  const target = workspaceActionTarget(action);
+  let title = `Preparing ${action.noun.toLowerCase()}`;
+  let detail = action.message;
+  let kind = "busy";
+  if (action.stage === "enabling") {
+    const progress = action.managerProgress || {};
+    title = "Enabling required packages";
+    detail = progress.enableTotal
+      ? `Enabled ${formatNumber(progress.enabled)} of ${formatNumber(
+          progress.enableTotal,
+        )} required packages for${target || " the requested asset"}.`
+      : `Enabling hidden packages for${target || " the requested asset"}.`;
+  } else if (action.stage === "finalizing") {
+    title = "Refreshing the package catalogue";
+    detail =
+      `The required packages are enabled. Preparing${target || " the asset"} for VaM.`;
+  } else if (action.stage === "queued") {
+    title = `${action.noun} queued`;
+    detail =
+      action.message ||
+      `Waiting for VaM to accept${target || " the requested asset"}.`;
+  } else if (action.stage === "deferred-loading") {
+    title = "Waiting for VaM";
+    detail =
+      action.message ||
+      "The current scene must finish loading before this request can continue.";
+  } else if (action.stage === "rescanning") {
+    title = "Registering enabled packages in VaM";
+    detail =
+      action.message ||
+      `VaM is rescanning before it loads${target || " the requested asset"}.`;
+  } else if (action.stage === "loading-scene") {
+    title = action.recovered
+      ? "Loading scene in VaM"
+      : `Loading “${action.title}” in VaM`;
+    detail = action.message || "VaM is replacing the current scene.";
+  } else if (["applying", "adding", "selecting"].includes(action.stage)) {
+    title = `${prettyType(action.stage)} ${action.noun.toLowerCase()}`;
+    detail =
+      action.message ||
+      `VaM is processing${target || " the requested asset"}.`;
+  } else if (action.stage === "ok") {
+    title = action.recovered
+      ? "VaM action finished"
+      : `${action.noun}${target} loaded`;
+    detail = action.message;
+    kind = "success";
+  } else if (action.stage === "error") {
+    title = action.recovered
+      ? "VaM action failed"
+      : `Could not load${target || ` ${action.noun.toLowerCase()}`}`;
+    detail = action.message;
+    kind = "error";
+  }
+  updateToast(action.toast, title, detail, kind);
+}
+
 function workspaceApplyAvailability(item, category = currentWorkspaceCategory()) {
   const snapshot = app.person || {};
   const persons = personList(snapshot);
@@ -3329,6 +3666,10 @@ function workspaceApplyAvailability(item, category = currentWorkspaceCategory())
     reason = "Wait for VaM to finish loading the scene";
   } else if (snapshotBridgeBusy(snapshot)) {
     reason = "Wait for the current bridge action to finish";
+  } else if (workspaceActionIsActive()) {
+    reason = "Wait for the current asset load to finish";
+  } else if (operationIsBusy()) {
+    reason = "Wait for the current package update to finish";
   } else if (app.atomMutationInFlight || app.cuaChoiceInFlight) {
     reason = "Wait for the current atom action to finish";
   } else if (
@@ -3384,6 +3725,25 @@ function workspaceApplyAvailability(item, category = currentWorkspaceCategory())
     label = state === "active" || state === "local" ? "Merge" : "Enable & merge";
   } else {
     label = state === "active" || state === "local" ? "Load" : "Enable & load";
+  }
+  const trackedAction = app.workspaceAction;
+  if (
+    workspaceActionIsActive(trackedAction) &&
+    trackedAction.key === key
+  ) {
+    if (trackedAction.stage === "enabling") {
+      label = "Enabling packages…";
+    } else if (trackedAction.stage === "rescanning") {
+      label = "Rescanning VaM…";
+    } else if (
+      ["queued", "deferred-loading"].includes(trackedAction.stage)
+    ) {
+      label = "Waiting for VaM…";
+    } else if (trackedAction.stage === "loading-scene") {
+      label = "Loading in VaM…";
+    } else {
+      label = "Preparing…";
+    }
   }
 
   return {
@@ -3444,6 +3804,16 @@ async function applyWorkspaceResource(item, category, sourceButton) {
   const resourceId = Number(item.id);
   if (!Number.isInteger(resourceId) || resourceId < 1 || !category) return;
 
+  const key = `${category.id}:${resourceId}`;
+  if (
+    app.applyingWorkspaceResources.has(key) ||
+    workspaceActionIsActive() ||
+    operationIsBusy()
+  ) {
+    return;
+  }
+  app.applyingWorkspaceResources.add(key);
+
   const managedTarget = categoryUsesManagedAtomTarget(category);
   const createIfMissing =
     managedTarget && app.atomTargetMode === "create";
@@ -3453,23 +3823,36 @@ async function applyWorkspaceResource(item, category, sourceButton) {
   const atomTargetUid = managedTarget ? activeAtomTargetUid(category) : "";
   let confirmedReplace = false;
   let confirmedRisk = false;
-  if (category.operation === "load-scene") {
-    const confirmed = await confirmSceneLoad(item, merge);
-    if (!confirmed) return;
-    confirmedReplace = !merge;
-  } else if (["high", "critical"].includes(category.risk)) {
-    confirmedRisk = Boolean(
-      await confirmRiskyAssetLoad(item, category, merge),
-    );
-    if (!confirmedRisk) return;
-    confirmedReplace = managedTarget && !createIfMissing && !merge;
-  }
-
-  const key = `${category.id}:${resourceId}`;
-  app.applyingWorkspaceResources.add(key);
-  if (managedTarget) renderAtomContext();
-  setButtonBusy(sourceButton, true, "Queuing…");
+  let action = null;
   try {
+    if (category.operation === "load-scene") {
+      const confirmed = await confirmSceneLoad(item, merge);
+      if (!confirmed) return;
+      confirmedReplace = !merge;
+    } else if (["high", "critical"].includes(category.risk)) {
+      confirmedRisk = Boolean(
+        await confirmRiskyAssetLoad(item, category, merge),
+      );
+      if (!confirmedRisk) return;
+      confirmedReplace = managedTarget && !createIfMissing && !merge;
+    }
+
+    const state = String(
+      item.state || (itemIsActive(item) ? "active" : "hidden"),
+    ).toLowerCase();
+    action = startWorkspaceActionFeedback(item, category, key, state);
+    if (managedTarget) renderAtomContext();
+    setButtonBusy(
+      sourceButton,
+      true,
+      action.needsPackageEnable
+        ? "Enabling packages…"
+        : category.operation === "load-scene"
+          ? "Preparing scene…"
+          : "Preparing…",
+    );
+    if (app.view === "workspace") renderLibrary();
+
     const body = {
       resource_id: resourceId,
       merge,
@@ -3490,11 +3873,24 @@ async function applyWorkspaceResource(item, category, sourceButton) {
     });
     requireWorkspaceBridgeQueue(result, `${prettyType(category.noun)} load`);
     if (createIfMissing) app.pendingAtomUid = atomTargetUid;
-    const requestId =
-      result.request_id || result.action_id || result.bridge_request || "";
+    const requestId = result.bridge_request;
+    const reconcile = result.lease?.reconcile || {};
+    const enabled = numberOr(reconcile.enable, 0);
+    const pendingDisable = numberOr(reconcile.pending_disable, 0);
+    const packageDetail = [
+      enabled
+        ? `${formatNumber(enabled)} required ${plural("package", enabled)} enabled`
+        : "",
+      pendingDisable
+        ? `${formatNumber(pendingDisable)} unused ${plural(
+            "package",
+            pendingDisable,
+          )} will stay available until VaM closes`
+        : "",
+    ].filter(Boolean).join(" · ");
     const detail =
       result.message ||
-      `Queued ${
+      `${packageDetail ? `${packageDetail}. ` : ""}Queued ${
         category.targetKind === "person"
           ? `for ${app.selectedPersonUid}`
           : managedTarget
@@ -3503,14 +3899,18 @@ async function applyWorkspaceResource(item, category, sourceButton) {
       }. VAM-PIP will enable required packages, rescan when needed, and load the asset${
         requestId ? ` · request ${String(requestId).slice(0, 8)}` : ""
       }.`;
-    toast(`${prettyType(category.noun)} queued`, detail);
+    bindWorkspaceActionRequest(action, result, detail);
     await refreshAll({ force: true });
   } catch (error) {
-    toast(
-      `Could not load ${resourceTitle(item)}`,
-      errorMessage(error),
-      "error",
-    );
+    if (action && !action.requestId) {
+      finishWorkspaceActionFeedback(action, false, errorMessage(error));
+    } else {
+      toast(
+        `Could not refresh ${resourceTitle(item)}`,
+        errorMessage(error),
+        "error",
+      );
+    }
   } finally {
     app.applyingWorkspaceResources.delete(key);
     setButtonBusy(sourceButton, false);
@@ -4538,25 +4938,51 @@ function showDialog(config) {
   });
 }
 
-function toast(title, message, kind = "success") {
-  const item = createElement("div", `toast${kind === "error" ? " is-error" : ""}`);
+function dismissToast(item) {
+  if (!item) return;
+  const timer = toastTimers.get(item);
+  if (timer !== undefined) window.clearTimeout(timer);
+  toastTimers.delete(item);
+  item.remove();
+}
+
+function updateToast(item, title, message, kind = "success") {
+  if (!item) return;
+  item.classList.toggle("is-error", kind === "error");
+  item.classList.toggle("is-busy", kind === "busy");
   item.setAttribute("role", kind === "error" ? "alert" : "status");
+  const heading = item.querySelector("strong");
+  const detail = item.querySelector("p");
+  const close = item.querySelector("button");
+  if (heading) heading.textContent = title;
+  if (detail) detail.textContent = message || "";
+  if (close) close.hidden = kind === "busy";
+}
+
+function toast(title, message, kind = "success", options = {}) {
+  const item = createElement("div", "toast");
   const dot = createElement("span", "toast-dot");
   dot.setAttribute("aria-hidden", "true");
   const content = document.createElement("div");
   const heading = document.createElement("strong");
-  heading.textContent = title;
   const detail = document.createElement("p");
-  detail.textContent = message || "";
   content.append(heading, detail);
   const close = document.createElement("button");
   close.type = "button";
   close.textContent = "×";
   close.setAttribute("aria-label", "Dismiss notification");
-  close.addEventListener("click", () => item.remove());
+  close.addEventListener("click", () => dismissToast(item));
   item.append(dot, content, close);
+  updateToast(item, title, message, kind);
   elements.toastRegion.append(item);
-  window.setTimeout(() => item.remove(), kind === "error" ? 9000 : 5200);
+  if (!options.persistent) {
+    const timer = window.setTimeout(
+      () => dismissToast(item),
+      kind === "error" ? 9000 : 5200,
+    );
+    toastTimers.set(item, timer);
+  }
+  return item;
 }
 
 function setButtonBusy(buttonElement, busy, busyLabel = "") {

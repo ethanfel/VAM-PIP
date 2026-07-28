@@ -264,6 +264,148 @@ class WorkspaceWebUITests(unittest.TestCase):
         )
         self.assertIn("confirm_critical: confirmedRisk", self.javascript)
 
+    def test_scene_load_claims_action_and_shows_feedback_before_request(
+        self,
+    ) -> None:
+        start = self.javascript.index(
+            "async function applyWorkspaceResource("
+        )
+        end = self.javascript.index("function createPackageCard(", start)
+        action = self.javascript[start:end]
+
+        guard = "app.applyingWorkspaceResources.has(key)"
+        claim = "app.applyingWorkspaceResources.add(key);"
+        confirmation = "await confirmSceneLoad(item, merge)"
+        feedback = "startWorkspaceActionFeedback(item, category, key, state)"
+        rerender = 'if (app.view === "workspace") renderLibrary();'
+        request = 'await api("/api/vam/resource/apply"'
+        for fragment in (
+            guard,
+            claim,
+            confirmation,
+            feedback,
+            '"Enabling packages…"',
+            "bindWorkspaceActionRequest(action, result, detail)",
+            "app.applyingWorkspaceResources.delete(key)",
+        ):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, action)
+
+        self.assertLess(action.index(guard), action.index(claim))
+        self.assertLess(action.index(claim), action.index(confirmation))
+        self.assertLess(action.index(feedback), action.index(request))
+        self.assertLess(action.index(rerender), action.index(request))
+        self.assertEqual(
+            action.count('api("/api/vam/resource/apply"'),
+            1,
+        )
+
+    def test_workspace_action_tracks_exact_bridge_request_until_terminal(
+        self,
+    ) -> None:
+        self.assertIn("workspaceAction: null", self.javascript)
+        sync_start = self.javascript.index(
+            "function syncWorkspaceActionSnapshot("
+        )
+        sync_end = self.javascript.index(
+            "function finishWorkspaceActionFeedback(", sync_start
+        )
+        sync = self.javascript[sync_start:sync_end]
+        exact_match = "observedRequestId !== action.requestId"
+        self.assertIn(
+            'const observedRequestId = String(bridge.requestId || "").trim()',
+            sync,
+        )
+        self.assertIn(exact_match, sync)
+        self.assertLess(
+            sync.index(exact_match),
+            sync.index('if (stage === "ok" || stage === "error")'),
+        )
+        self.assertIn('!["ok", "error"].includes(stage)', sync)
+
+        render_start = self.javascript.index(
+            "function renderWorkspaceActionFeedback("
+        )
+        render_end = self.javascript.index(
+            "function workspaceApplyAvailability(", render_start
+        )
+        render = self.javascript[render_start:render_end]
+        for stage in (
+            "enabling",
+            "queued",
+            "deferred-loading",
+            "rescanning",
+            "loading-scene",
+            "ok",
+            "error",
+        ):
+            with self.subTest(stage=stage):
+                self.assertIn(f'action.stage === "{stage}"', render)
+
+        activity_start = self.javascript.index(
+            "async function loadActivity("
+        )
+        activity_end = self.javascript.index(
+            "async function fetchLiveSceneSnapshot()", activity_start
+        )
+        activity = self.javascript[activity_start:activity_end]
+        self.assertIn("workspaceActionIsActive() ||", activity)
+        self.assertIn(
+            "workspaceActionIsActive() ? 900 : 3000",
+            activity,
+        )
+        self.assertIn("instanceChanged && workspaceActionIsActive()", activity)
+        self.assertIn(
+            'if (app.view === "workspace" && activityChanged)',
+            activity,
+        )
+        self.assertIn("operationIsBusy(previous) !== busy", activity)
+
+        sync_activity_start = self.javascript.index(
+            "function syncWorkspaceActionActivity("
+        )
+        sync_activity_end = self.javascript.index(
+            "function recoverWorkspaceActionFeedback(", sync_activity_start
+        )
+        sync_activity = self.javascript[
+            sync_activity_start:sync_activity_end
+        ]
+        self.assertIn("WORKSPACE_ACTION_STALL_MS", sync_activity)
+        self.assertIn('operation.run_name !== "managed-reconcile"', sync_activity)
+        self.assertIn(
+            "operationId <= numberOr(action.previousOperationId, 0)",
+            sync_activity,
+        )
+        self.assertIn("activity?.vam?.running === false", sync_activity)
+
+        recover_start = self.javascript.index(
+            "function recoverWorkspaceActionFeedback("
+        )
+        recover_end = self.javascript.index(
+            "function syncWorkspaceActionSnapshot(", recover_start
+        )
+        recover = self.javascript[recover_start:recover_end]
+        self.assertIn("snapshot?.vam_running !== true", recover)
+        self.assertIn("snapshot?.available !== true", recover)
+        self.assertIn("bridge.lastCompletedRequestId", sync)
+        self.assertIn(
+            "lastCompletedRequestId === action.requestId",
+            sync,
+        )
+
+    def test_workspace_action_toast_is_persistent_and_visibly_busy(self) -> None:
+        toast_start = self.javascript.index("function updateToast(")
+        toast_end = self.javascript.index(
+            "function setButtonBusy(", toast_start
+        )
+        toast_block = self.javascript[toast_start:toast_end]
+        self.assertIn("options = {}", toast_block)
+        self.assertIn("if (!options.persistent)", toast_block)
+        self.assertIn("return item;", toast_block)
+        self.assertIn('close.hidden = kind === "busy"', toast_block)
+        self.assertIn(".toast.is-busy .toast-dot", self.styles)
+        self.assertIn("@keyframes action-pulse", self.styles)
+
     def test_atom_subscene_and_cua_apply_use_catalog_owned_actions(self) -> None:
         self.assertIn('"apply-atom-preset"', self.javascript)
         self.assertIn('"load-subscene"', self.javascript)
@@ -445,8 +587,8 @@ class WorkspaceWebUITests(unittest.TestCase):
                 self.assertIn(selector, self.styles)
 
     def test_static_assets_use_the_current_cache_version(self) -> None:
-        self.assertIn("/styles.css?v=0.6.4", self.html)
-        self.assertIn("/app.js?v=0.6.4", self.html)
+        self.assertIn("/styles.css?v=0.6.5", self.html)
+        self.assertIn("/app.js?v=0.6.5", self.html)
 
 
 if __name__ == "__main__":
