@@ -1,5 +1,6 @@
 using System;
 using System.Collections;
+using System.Collections.Generic;
 using MVR.FileManagementSecure;
 using SimpleJSON;
 using UnityEngine;
@@ -16,7 +17,7 @@ namespace VAMPip
     public class VAMPipBridge : MVRScript
     {
         private const int ProtocolVersion = 2;
-        private const string BridgeVersion = "0.4.0";
+        private const string BridgeVersion = "0.5.0";
 
         private const string PluginDataRoot = "Saves\\PluginData";
         private const string DataRoot = "Saves\\PluginData\\VAMPip";
@@ -26,6 +27,9 @@ namespace VAMPip
         private const string ScenePath = BridgeRoot + "\\scene.json";
 
         private const int MaximumResourceRefLength = 1000;
+        private const int MaximumCuaChoicesPerAtom = 128;
+        private const int MaximumCuaChoicesGlobally = 512;
+        private const int MaximumCuaChoiceLabelLength = 256;
         private const float PollIntervalSeconds = 0.5f;
         private const float ScenePublishIntervalSeconds = 1.0f;
         private const float MinimumRescanIntervalSeconds = 5.0f;
@@ -37,6 +41,10 @@ namespace VAMPip
         private const string CommandAddAtom = "addAtom";
         private const string CommandApplyAtomPreset = "applyAtomPreset";
         private const string CommandLoadSubscene = "loadSubscene";
+        private const string CommandLoadCustomUnityAsset =
+            "loadCustomUnityAsset";
+        private const string CommandSelectCustomUnityAssetChoice =
+            "selectCustomUnityAssetChoice";
         private const string CommandSelectPerson = "selectPerson";
         private const string CommandSelectAtom = "selectAtom";
         private const string CommandLoadScene = "loadScene";
@@ -115,6 +123,8 @@ namespace VAMPip
             public bool RescanRequired;
             public bool Merge;
             public bool CreateIfMissing;
+            public int ChoiceIndex;
+            public string ChoiceToken;
         }
 
         private sealed class AtomCreationResult
@@ -126,6 +136,25 @@ namespace VAMPip
 
         private sealed class LoadingWaitResult
         {
+            public string Error;
+        }
+
+        private sealed class CuaChoiceSnapshot
+        {
+            public Atom Atom;
+            public CustomUnityAssetLoader Loader;
+            public List<string> ChoiceList;
+            public string GenerationKey;
+            public string ChoiceToken;
+            public List<int> PublishedIndices;
+        }
+
+        private sealed class CuaLoaderState
+        {
+            public CustomUnityAssetLoader Loader;
+            public JSONStorableUrl AssetUrl;
+            public JSONStorableStringChooser AssetName;
+            public JSONStorableBool LoadDll;
             public string Error;
         }
 
@@ -143,6 +172,9 @@ namespace VAMPip
         private string _mailboxRejectedRequestId = "";
         private string _mailboxRejectedMessage = "";
         private BridgeRequest _pendingRequest;
+        private readonly Dictionary<string, CuaChoiceSnapshot>
+            _cuaChoiceSnapshots =
+                new Dictionary<string, CuaChoiceSnapshot>();
 
         public override void Init()
         {
@@ -342,6 +374,8 @@ namespace VAMPip
                 parsed.ResourceRef = "";
                 parsed.Merge = false;
                 parsed.CreateIfMissing = false;
+                parsed.ChoiceIndex = -1;
+                parsed.ChoiceToken = "";
 
                 if (command == CommandRescan)
                 {
@@ -452,6 +486,43 @@ namespace VAMPip
                         return;
                     }
                 }
+                else if (command == CommandLoadCustomUnityAsset)
+                {
+                    parsed.TargetUid =
+                        ((string)request["targetUid"] ?? "").Trim();
+                    parsed.AtomType = "CustomUnityAsset";
+                    parsed.ResourceRef =
+                        (string)request["resourceRef"] ?? "";
+                    parsed.RescanRequired = request["rescan"].AsBool;
+                    parsed.CreateIfMissing =
+                        request["createIfMissing"].AsBool;
+
+                    string validationError =
+                        ValidateCustomUnityAssetRequest(parsed);
+                    if (validationError.Length != 0)
+                    {
+                        RejectRequest(requestId, validationError);
+                        return;
+                    }
+                }
+                else if (command == CommandSelectCustomUnityAssetChoice)
+                {
+                    parsed.TargetUid =
+                        ((string)request["targetUid"] ?? "").Trim();
+                    parsed.AtomType = "CustomUnityAsset";
+                    parsed.ChoiceIndex = request["choiceIndex"].AsInt;
+                    parsed.ChoiceToken =
+                        (string)request["choiceToken"] ?? "";
+                    parsed.RescanRequired = false;
+
+                    string validationError =
+                        ValidateCustomUnityAssetChoiceRequest(parsed);
+                    if (validationError.Length != 0)
+                    {
+                        RejectRequest(requestId, validationError);
+                        return;
+                    }
+                }
                 else if (command == CommandLoadScene)
                 {
                     parsed.ResourceRef =
@@ -473,7 +544,9 @@ namespace VAMPip
                         requestId,
                         "Unsupported command. Accepted commands are 'rescan' " +
                         "'applyPersonPreset', 'addPerson', 'addAtom', " +
-                        "'applyAtomPreset', 'loadSubscene', 'selectPerson', " +
+                        "'applyAtomPreset', 'loadSubscene', " +
+                        "'loadCustomUnityAsset', " +
+                        "'selectCustomUnityAssetChoice', 'selectPerson', " +
                         "'selectAtom', and 'loadScene'.");
                     return;
                 }
@@ -600,6 +673,81 @@ namespace VAMPip
                 ".json",
                 false,
                 "SubScenes");
+        }
+
+        private static string ValidateCustomUnityAssetRequest(
+            BridgeRequest request)
+        {
+            string targetError = ValidateTargetUid(request.TargetUid);
+            if (targetError.Length != 0)
+            {
+                return targetError;
+            }
+            string extension = "";
+            if (request.ResourceRef != null &&
+                request.ResourceRef.EndsWith(
+                    ".assetbundle",
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                extension = ".assetbundle";
+            }
+            else if (request.ResourceRef != null &&
+                     request.ResourceRef.EndsWith(
+                         ".scene",
+                         StringComparison.OrdinalIgnoreCase))
+            {
+                extension = ".scene";
+            }
+            if (extension.Length == 0)
+            {
+                return "resourceRef must name a .assetbundle or .scene resource.";
+            }
+            return ValidateResourceRef(
+                request.ResourceRef,
+                "Custom/Assets/",
+                extension,
+                false,
+                "Custom Unity Assets");
+        }
+
+        private static string ValidateCustomUnityAssetChoiceRequest(
+            BridgeRequest request)
+        {
+            string targetError = ValidateTargetUid(request.TargetUid);
+            if (targetError.Length != 0)
+            {
+                return targetError;
+            }
+            if (request.ChoiceIndex <= 0)
+            {
+                return "choiceIndex must be a positive chooser index.";
+            }
+            if (!IsHexToken(request.ChoiceToken))
+            {
+                return "choiceToken must contain exactly 32 hexadecimal characters.";
+            }
+            return "";
+        }
+
+        private static bool IsHexToken(string value)
+        {
+            if (value == null || value.Length != 32)
+            {
+                return false;
+            }
+            int index;
+            for (index = 0; index < value.Length; index++)
+            {
+                char character = value[index];
+                bool digit = character >= '0' && character <= '9';
+                bool lower = character >= 'a' && character <= 'f';
+                bool upper = character >= 'A' && character <= 'F';
+                if (!digit && !lower && !upper)
+                {
+                    return false;
+                }
+            }
+            return true;
         }
 
         private static string ValidateTargetUid(string targetUid)
@@ -902,7 +1050,9 @@ namespace VAMPip
                 return;
             }
             if (request.Command == CommandApplyAtomPreset ||
-                request.Command == CommandLoadSubscene)
+                request.Command == CommandLoadSubscene ||
+                request.Command == CommandLoadCustomUnityAsset ||
+                request.Command == CommandSelectCustomUnityAssetChoice)
             {
                 _requestInProgress = true;
                 try
@@ -911,9 +1061,18 @@ namespace VAMPip
                     {
                         StartCoroutine(ExecuteApplyAtomPreset(request));
                     }
-                    else
+                    else if (request.Command == CommandLoadSubscene)
                     {
                         StartCoroutine(ExecuteLoadSubscene(request));
+                    }
+                    else if (request.Command == CommandLoadCustomUnityAsset)
+                    {
+                        StartCoroutine(ExecuteLoadCustomUnityAsset(request));
+                    }
+                    else
+                    {
+                        StartCoroutine(
+                            ExecuteSelectCustomUnityAssetChoice(request));
                     }
                 }
                 catch (Exception exception)
@@ -1890,6 +2049,586 @@ namespace VAMPip
             FinishAtomActionOk(request, startedAt, "SubScene loaded.");
         }
 
+        private static void ResolveCuaLoader(
+            Atom atom,
+            CuaLoaderState state)
+        {
+            state.Loader = null;
+            state.AssetUrl = null;
+            state.AssetName = null;
+            state.LoadDll = null;
+            state.Error = "";
+            if (atom == null || atom.type != "CustomUnityAsset")
+            {
+                state.Error =
+                    "targetUid does not identify a CustomUnityAsset atom.";
+                return;
+            }
+            state.Loader =
+                atom.GetStorableByID("asset") as CustomUnityAssetLoader;
+            if (state.Loader == null)
+            {
+                state.Error =
+                    "The target CustomUnityAsset has no native asset loader.";
+                return;
+            }
+            state.AssetUrl = state.Loader.GetUrlJSONParam("assetUrl");
+            state.AssetName =
+                state.Loader.GetStringChooserJSONParam("assetName");
+            state.LoadDll = state.Loader.GetBoolJSONParam("loadDll");
+            if (state.AssetUrl == null ||
+                state.AssetName == null ||
+                state.LoadDll == null)
+            {
+                state.Error =
+                    "The target CustomUnityAsset loader is missing a required " +
+                    "assetUrl, assetName, or loadDll parameter.";
+            }
+        }
+
+        private static bool IsEligibleCuaChoice(string choice)
+        {
+            return choice != null &&
+                choice.Trim().Length != 0 &&
+                !choice.Trim().Equals(
+                    "None",
+                    StringComparison.OrdinalIgnoreCase) &&
+                SanitizeCuaChoiceLabel(choice).Length != 0;
+        }
+
+        private static string GetCuaNoneChoice(
+            JSONStorableStringChooser assetName)
+        {
+            if (assetName != null && assetName.choices != null)
+            {
+                int index;
+                for (index = 0; index < assetName.choices.Count; index++)
+                {
+                    string choice = assetName.choices[index];
+                    if (choice != null &&
+                        choice.Trim().Equals(
+                            "None",
+                            StringComparison.OrdinalIgnoreCase))
+                    {
+                        return choice;
+                    }
+                }
+            }
+            return "None";
+        }
+
+        private static List<int> GetEligibleCuaChoiceIndices(
+            JSONStorableStringChooser assetName)
+        {
+            List<int> result = new List<int>();
+            if (assetName == null || assetName.choices == null)
+            {
+                return result;
+            }
+            int index;
+            for (index = 0; index < assetName.choices.Count; index++)
+            {
+                if (IsEligibleCuaChoice(assetName.choices[index]))
+                {
+                    result.Add(index);
+                }
+            }
+            return result;
+        }
+
+        private static void AbortUnsafeCuaLoad(CuaLoaderState state)
+        {
+            if (state == null || state.LoadDll == null)
+            {
+                return;
+            }
+            try
+            {
+                state.LoadDll.val = false;
+                if (state.AssetName != null)
+                {
+                    state.AssetName.val = GetCuaNoneChoice(state.AssetName);
+                }
+                state.LoadDll.val = false;
+                if (state.AssetUrl != null)
+                {
+                    state.AssetUrl.val = "";
+                }
+                state.LoadDll.val = false;
+            }
+            catch
+            {
+                // This is a best-effort abort after the safety invariant was
+                // violated. The failure status still tells the caller that
+                // the target must be inspected before another load.
+            }
+        }
+
+        private static string ValidateLiveCuaOperation(
+            BridgeRequest request,
+            Atom expectedAtom,
+            CustomUnityAssetLoader expectedLoader,
+            string expectedUrl,
+            CuaLoaderState state)
+        {
+            if (SuperController.singleton == null)
+            {
+                return "VaM's scene controller became unavailable.";
+            }
+            Atom current =
+                SuperController.singleton.GetAtomByUid(request.TargetUid);
+            if (current == null ||
+                current.type != "CustomUnityAsset" ||
+                !object.ReferenceEquals(current, expectedAtom))
+            {
+                return "The CustomUnityAsset target changed while loading.";
+            }
+            ResolveCuaLoader(current, state);
+            if (state.Error.Length != 0)
+            {
+                return state.Error;
+            }
+            if (!object.ReferenceEquals(state.Loader, expectedLoader))
+            {
+                return "The CustomUnityAsset loader changed while loading.";
+            }
+            if (state.LoadDll.val)
+            {
+                AbortUnsafeCuaLoad(state);
+                return "The CUA load was aborted because loadDll became enabled.";
+            }
+            if (expectedUrl != null &&
+                !string.Equals(
+                    state.AssetUrl.val,
+                    expectedUrl,
+                    StringComparison.Ordinal))
+            {
+                return "The CustomUnityAsset bundle changed while loading.";
+            }
+            return "";
+        }
+
+        private bool IsCurrentCuaChoiceSnapshot(
+            string targetUid,
+            CuaChoiceSnapshot expected,
+            string choiceToken,
+            List<string> currentChoices)
+        {
+            CuaChoiceSnapshot current = null;
+            return expected != null &&
+                _cuaChoiceSnapshots.TryGetValue(targetUid, out current) &&
+                object.ReferenceEquals(current, expected) &&
+                object.ReferenceEquals(current.ChoiceList, currentChoices) &&
+                string.Equals(
+                    current.ChoiceToken,
+                    choiceToken,
+                    StringComparison.OrdinalIgnoreCase);
+        }
+
+        private IEnumerator ExecuteLoadCustomUnityAsset(
+            BridgeRequest request)
+        {
+            string startedAt = UtcNow();
+            string prepareError =
+                PrepareAtomResourceRequest(
+                    request,
+                    startedAt,
+                    "loading the Custom Unity Asset");
+            if (prepareError.Length != 0)
+            {
+                FinishAtomActionError(request, startedAt, prepareError);
+                yield break;
+            }
+
+            AtomCreationResult target = new AtomCreationResult();
+            yield return EnsureTargetAtom(
+                request,
+                "CustomUnityAsset",
+                request.CreateIfMissing,
+                target);
+            if (target.Error.Length != 0)
+            {
+                FinishAtomActionError(request, startedAt, target.Error);
+                yield break;
+            }
+
+            PublishStatus(
+                StateApplying,
+                request.RequestId,
+                startedAt,
+                "",
+                "vam",
+                "Loading Custom Unity Asset bundle with DLL loading disabled.");
+
+            CuaLoaderState state = new CuaLoaderState();
+            string normalizedUrl = "";
+            string startError = "";
+            try
+            {
+                ResolveCuaLoader(target.Atom, state);
+                if (state.Error.Length != 0)
+                {
+                    throw new Exception(state.Error);
+                }
+
+                normalizedUrl =
+                    SuperController.singleton.NormalizePath(
+                        request.ResourceRef);
+                state.AssetName.val = GetCuaNoneChoice(state.AssetName);
+
+                // VaM samples loadDll synchronously from the assetUrl callback.
+                // Keep these statements adjacent: changing loadDll afterwards
+                // cannot unload an assembly that already executed.
+                state.LoadDll.val = false;
+                if (state.LoadDll.val)
+                {
+                    throw new Exception(
+                        "The target refused to disable loadDll.");
+                }
+                state.AssetUrl.val = normalizedUrl;
+            }
+            catch (Exception exception)
+            {
+                startError =
+                    "Could not start Custom Unity Asset loading: " +
+                    DescribeException(exception);
+            }
+            if (startError.Length != 0)
+            {
+                if (state.LoadDll != null && state.LoadDll.val)
+                {
+                    AbortUnsafeCuaLoad(state);
+                }
+                FinishAtomActionError(request, startedAt, startError);
+                yield break;
+            }
+
+            // A concurrent native loader rejects the new URL and restores its
+            // in-flight value. Cross a frame and verify what the storable kept.
+            yield return new WaitForEndOfFrame();
+
+            string liveError =
+                ValidateLiveCuaOperation(
+                    request,
+                    target.Atom,
+                    state.Loader,
+                    normalizedUrl,
+                    state);
+            if (liveError.Length != 0)
+            {
+                FinishAtomActionError(request, startedAt, liveError);
+                yield break;
+            }
+
+            float deadline =
+                Time.realtimeSinceStartup + MaximumOperationWaitSeconds;
+            List<int> eligible = GetEligibleCuaChoiceIndices(state.AssetName);
+            while (eligible.Count == 0 &&
+                   Time.realtimeSinceStartup < deadline)
+            {
+                yield return null;
+                liveError =
+                    ValidateLiveCuaOperation(
+                        request,
+                        target.Atom,
+                        state.Loader,
+                        normalizedUrl,
+                        state);
+                if (liveError.Length != 0)
+                {
+                    FinishAtomActionError(request, startedAt, liveError);
+                    yield break;
+                }
+                eligible = GetEligibleCuaChoiceIndices(state.AssetName);
+            }
+            if (eligible.Count == 0)
+            {
+                FinishAtomActionError(
+                    request,
+                    startedAt,
+                    "The bundle exposed no scene or prefab choice within 120 seconds.");
+                yield break;
+            }
+
+            if (eligible.Count > 1)
+            {
+                FinishAtomActionOk(
+                    request,
+                    startedAt,
+                    "Custom Unity Asset bundle is ready; choose one contained " +
+                    "scene or prefab from the picker.");
+                yield break;
+            }
+
+            int selectedIndex = eligible[0];
+            string selectedChoice = state.AssetName.choices[selectedIndex];
+            string selectionError = "";
+            try
+            {
+                state.AssetName.val = selectedChoice;
+            }
+            catch (Exception exception)
+            {
+                selectionError =
+                    "Could not select the bundle's only asset: " +
+                    DescribeException(exception);
+            }
+            if (selectionError.Length != 0)
+            {
+                FinishAtomActionError(request, startedAt, selectionError);
+                yield break;
+            }
+
+            yield return new WaitForEndOfFrame();
+            while (!state.Loader.isAssetLoaded &&
+                   Time.realtimeSinceStartup < deadline)
+            {
+                liveError =
+                    ValidateLiveCuaOperation(
+                        request,
+                        target.Atom,
+                        state.Loader,
+                        normalizedUrl,
+                        state);
+                if (liveError.Length != 0)
+                {
+                    FinishAtomActionError(request, startedAt, liveError);
+                    yield break;
+                }
+                yield return null;
+            }
+
+            liveError =
+                ValidateLiveCuaOperation(
+                    request,
+                    target.Atom,
+                    state.Loader,
+                    normalizedUrl,
+                    state);
+            if (liveError.Length == 0 &&
+                (!state.Loader.isAssetLoaded ||
+                 !string.Equals(
+                     state.AssetName.val,
+                     selectedChoice,
+                     StringComparison.Ordinal)))
+            {
+                liveError =
+                    "The contained asset did not finish loading within 120 seconds.";
+            }
+            if (liveError.Length != 0)
+            {
+                FinishAtomActionError(request, startedAt, liveError);
+                yield break;
+            }
+
+            FinishAtomActionOk(
+                request,
+                startedAt,
+                "Custom Unity Asset bundle and its only contained asset loaded.");
+        }
+
+        private IEnumerator ExecuteSelectCustomUnityAssetChoice(
+            BridgeRequest request)
+        {
+            string startedAt = UtcNow();
+            PublishStatus(
+                StateApplying,
+                request.RequestId,
+                startedAt,
+                "",
+                "vam",
+                "Selecting a published Custom Unity Asset choice.");
+
+            Atom target = null;
+            CuaLoaderState state = new CuaLoaderState();
+            CuaChoiceSnapshot snapshot = null;
+            string selectedChoice = "";
+            string selectedUrl = "";
+            string validationError = "";
+            try
+            {
+                target =
+                    SuperController.singleton.GetAtomByUid(request.TargetUid);
+                if (target == null || target.type != "CustomUnityAsset")
+                {
+                    throw new Exception(
+                        "targetUid does not identify a CustomUnityAsset atom.");
+                }
+                ResolveCuaLoader(target, state);
+                if (state.Error.Length != 0)
+                {
+                    throw new Exception(state.Error);
+                }
+                if (state.LoadDll.val)
+                {
+                    throw new Exception(
+                        "The target has loadDll enabled; disable it before " +
+                        "selecting an asset.");
+                }
+                if (!_cuaChoiceSnapshots.TryGetValue(
+                        request.TargetUid,
+                        out snapshot) ||
+                    !object.ReferenceEquals(snapshot.Atom, target) ||
+                    !object.ReferenceEquals(snapshot.Loader, state.Loader) ||
+                    !object.ReferenceEquals(
+                        snapshot.ChoiceList,
+                        state.AssetName.choices) ||
+                    !string.Equals(
+                        snapshot.ChoiceToken,
+                        request.ChoiceToken,
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    throw new Exception(
+                        "The CUA choice token is stale; refresh the live roster.");
+                }
+                string currentGeneration =
+                    BuildCuaGenerationKey(
+                        state.AssetUrl,
+                        state.AssetName,
+                        snapshot.PublishedIndices);
+                if (!string.Equals(
+                        snapshot.GenerationKey,
+                        currentGeneration,
+                        StringComparison.Ordinal))
+                {
+                    throw new Exception(
+                        "The CUA bundle choices changed; refresh the live roster.");
+                }
+                if (!snapshot.PublishedIndices.Contains(request.ChoiceIndex) ||
+                    state.AssetName.choices == null ||
+                    request.ChoiceIndex >= state.AssetName.choices.Count ||
+                    !IsEligibleCuaChoice(
+                        state.AssetName.choices[request.ChoiceIndex]))
+                {
+                    throw new Exception(
+                        "choiceIndex was not present in the published CUA choices.");
+                }
+                selectedChoice =
+                    state.AssetName.choices[request.ChoiceIndex];
+                selectedUrl = state.AssetUrl.val;
+                state.AssetName.val = selectedChoice;
+            }
+            catch (Exception exception)
+            {
+                validationError =
+                    "Could not select Custom Unity Asset choice: " +
+                    DescribeException(exception);
+            }
+            if (validationError.Length != 0)
+            {
+                FinishAtomActionError(request, startedAt, validationError);
+                yield break;
+            }
+
+            yield return new WaitForEndOfFrame();
+            float deadline =
+                Time.realtimeSinceStartup + MaximumOperationWaitSeconds;
+            while (!state.Loader.isAssetLoaded &&
+                   Time.realtimeSinceStartup < deadline)
+            {
+                CuaLoaderState currentState = new CuaLoaderState();
+                string liveError =
+                    ValidateLiveCuaOperation(
+                        request,
+                        target,
+                        state.Loader,
+                        selectedUrl,
+                        currentState);
+                if (liveError.Length == 0)
+                {
+                    if (!IsCurrentCuaChoiceSnapshot(
+                            request.TargetUid,
+                            snapshot,
+                            request.ChoiceToken,
+                            currentState.AssetName.choices))
+                    {
+                        liveError =
+                            "The CUA choice token became stale while selecting.";
+                    }
+                }
+                if (liveError.Length == 0)
+                {
+                    string currentGeneration =
+                        BuildCuaGenerationKey(
+                            currentState.AssetUrl,
+                            currentState.AssetName,
+                            snapshot.PublishedIndices);
+                    if (!string.Equals(
+                            snapshot.GenerationKey,
+                            currentGeneration,
+                            StringComparison.Ordinal))
+                    {
+                        liveError =
+                            "The CUA bundle choices changed while selecting.";
+                    }
+                }
+                if (liveError.Length != 0)
+                {
+                    FinishAtomActionError(request, startedAt, liveError);
+                    yield break;
+                }
+                yield return null;
+            }
+
+            string finishError = "";
+            CuaLoaderState finalState = new CuaLoaderState();
+            finishError =
+                ValidateLiveCuaOperation(
+                    request,
+                    target,
+                    state.Loader,
+                    selectedUrl,
+                    finalState);
+            if (finishError.Length == 0)
+            {
+                if (!IsCurrentCuaChoiceSnapshot(
+                        request.TargetUid,
+                        snapshot,
+                        request.ChoiceToken,
+                        finalState.AssetName.choices))
+                {
+                    finishError =
+                        "The CUA choice token became stale while selecting.";
+                }
+            }
+            if (finishError.Length == 0)
+            {
+                string currentGeneration =
+                    BuildCuaGenerationKey(
+                        finalState.AssetUrl,
+                        finalState.AssetName,
+                        snapshot.PublishedIndices);
+                if (!string.Equals(
+                        snapshot.GenerationKey,
+                        currentGeneration,
+                        StringComparison.Ordinal))
+                {
+                    finishError =
+                        "The CUA bundle choices changed while selecting.";
+                }
+                else if (!finalState.Loader.isAssetLoaded ||
+                         !string.Equals(
+                             finalState.AssetName.val,
+                             selectedChoice,
+                             StringComparison.Ordinal))
+                {
+                    finishError =
+                        "The selected CUA asset did not finish loading within " +
+                        "120 seconds.";
+                }
+            }
+            if (finishError.Length != 0)
+            {
+                FinishAtomActionError(request, startedAt, finishError);
+                yield break;
+            }
+
+            FinishAtomActionOk(
+                request,
+                startedAt,
+                "Custom Unity Asset choice loaded.");
+        }
+
         private void ExecuteSelectAtom(
             BridgeRequest request,
             bool requirePerson)
@@ -1991,6 +2730,210 @@ namespace VAMPip
             _lastCompletedRequestId = requestId;
         }
 
+        private static string SanitizeCuaChoiceLabel(string value)
+        {
+            if (value == null)
+            {
+                return "";
+            }
+            char[] characters = value.ToCharArray();
+            int index;
+            for (index = 0; index < characters.Length; index++)
+            {
+                if (characters[index] < ' ' || characters[index] == '\u007f')
+                {
+                    characters[index] = ' ';
+                }
+            }
+            string result = new string(characters).Trim();
+            if (result.Length > MaximumCuaChoiceLabelLength)
+            {
+                result = result.Substring(0, MaximumCuaChoiceLabelLength);
+            }
+            return result;
+        }
+
+        private static void HashCuaText(
+            ref ulong first,
+            ref ulong second,
+            string value)
+        {
+            unchecked
+            {
+                if (value == null)
+                {
+                    first = (first ^ 0xffffffffUL) * 1099511628211UL;
+                    second = (second ^ 0xfffffffeUL) * 14029467366897019727UL;
+                    return;
+                }
+                first = (first ^ (ulong)value.Length) * 1099511628211UL;
+                second =
+                    (second ^ ((ulong)value.Length + 0x9e3779b97f4a7c15UL)) *
+                    14029467366897019727UL;
+                int index;
+                for (index = 0; index < value.Length; index++)
+                {
+                    ulong character = value[index];
+                    first = (first ^ character) * 1099511628211UL;
+                    second =
+                        (second ^ (character + 0x517cc1b727220a95UL)) *
+                        14029467366897019727UL;
+                }
+                first = (first ^ 0xffUL) * 1099511628211UL;
+                second = (second ^ 0xfeUL) * 14029467366897019727UL;
+            }
+        }
+
+        private static string BuildCuaGenerationKey(
+            JSONStorableUrl assetUrl,
+            JSONStorableStringChooser assetName,
+            List<int> publishedIndices)
+        {
+            ulong first = 1469598103934665603UL;
+            ulong second = 7809847782465536322UL;
+            HashCuaText(
+                ref first,
+                ref second,
+                assetUrl == null ? null : assetUrl.val);
+
+            List<string> choices =
+                assetName == null ? null : assetName.choices;
+            HashCuaText(
+                ref first,
+                ref second,
+                choices == null ? "-1" : choices.Count.ToString());
+
+            int publishedCount =
+                publishedIndices == null ? 0 : publishedIndices.Count;
+            HashCuaText(
+                ref first,
+                ref second,
+                publishedCount.ToString());
+            if (publishedIndices != null)
+            {
+                int publishedOffset;
+                for (publishedOffset = 0;
+                     publishedOffset < publishedIndices.Count;
+                     publishedOffset++)
+                {
+                    int originalIndex = publishedIndices[publishedOffset];
+                    HashCuaText(
+                        ref first,
+                        ref second,
+                        originalIndex.ToString());
+                    string raw =
+                        choices != null &&
+                        originalIndex >= 0 &&
+                        originalIndex < choices.Count
+                        ? choices[originalIndex]
+                        : null;
+                    HashCuaText(
+                        ref first,
+                        ref second,
+                        raw);
+                }
+            }
+            return first.ToString("x16") + second.ToString("x16");
+        }
+
+        private JSONClass BuildCuaStatus(
+            Atom atom,
+            ref int globalChoiceBudget)
+        {
+            CuaLoaderState state = new CuaLoaderState();
+            ResolveCuaLoader(atom, state);
+
+            JSONArray publishedChoices = new JSONArray();
+            List<int> publishedIndices = new List<int>();
+            int eligibleCount = 0;
+            int selectedIndex = -1;
+            if (state.AssetName != null && state.AssetName.choices != null)
+            {
+                int index;
+                for (index = 0;
+                     index < state.AssetName.choices.Count;
+                     index++)
+                {
+                    string rawChoice = state.AssetName.choices[index];
+                    if (selectedIndex < 0 &&
+                        string.Equals(
+                            state.AssetName.val,
+                            rawChoice,
+                            StringComparison.Ordinal))
+                    {
+                        selectedIndex = index;
+                    }
+                    if (!IsEligibleCuaChoice(rawChoice))
+                    {
+                        continue;
+                    }
+                    eligibleCount++;
+                    if (publishedIndices.Count >= MaximumCuaChoicesPerAtom ||
+                        globalChoiceBudget <= 0)
+                    {
+                        continue;
+                    }
+
+                    JSONClass publishedChoice = new JSONClass();
+                    publishedChoice["index"].AsInt = index;
+                    publishedChoice["label"] =
+                        SanitizeCuaChoiceLabel(rawChoice);
+                    publishedChoices.Add(publishedChoice);
+                    publishedIndices.Add(index);
+                    globalChoiceBudget--;
+                }
+            }
+
+            string generationKey =
+                BuildCuaGenerationKey(
+                    state.AssetUrl,
+                    state.AssetName,
+                    publishedIndices);
+            CuaChoiceSnapshot snapshot = null;
+            bool reuse =
+                _cuaChoiceSnapshots.TryGetValue(atom.uid, out snapshot) &&
+                object.ReferenceEquals(snapshot.Atom, atom) &&
+                object.ReferenceEquals(snapshot.Loader, state.Loader) &&
+                object.ReferenceEquals(
+                    snapshot.ChoiceList,
+                    state.AssetName == null
+                    ? null
+                    : state.AssetName.choices) &&
+                string.Equals(
+                    snapshot.GenerationKey,
+                    generationKey,
+                    StringComparison.Ordinal);
+            if (!reuse)
+            {
+                snapshot = new CuaChoiceSnapshot();
+                snapshot.ChoiceToken = Guid.NewGuid().ToString("N");
+            }
+            snapshot.Atom = atom;
+            snapshot.Loader = state.Loader;
+            snapshot.ChoiceList =
+                state.AssetName == null ? null : state.AssetName.choices;
+            snapshot.GenerationKey = generationKey;
+            snapshot.PublishedIndices = publishedIndices;
+            _cuaChoiceSnapshots[atom.uid] = snapshot;
+
+            bool ready =
+                state.Loader != null &&
+                state.Error.Length == 0 &&
+                state.Loader.isAssetLoaded;
+            JSONClass cua = new JSONClass();
+            cua["loadDll"].AsBool =
+                state.LoadDll == null || state.LoadDll.val;
+            cua["ready"].AsBool = ready;
+            cua["isAssetLoaded"].AsBool = ready;
+            cua["choiceToken"] = snapshot.ChoiceToken;
+            cua["choiceCount"].AsInt = eligibleCount;
+            cua["selectedIndex"].AsInt = selectedIndex;
+            cua["choices"] = publishedChoices;
+            cua["choicesTruncated"].AsBool =
+                eligibleCount > publishedIndices.Count;
+            return cua;
+        }
+
         private static JSONArray Capabilities()
         {
             JSONArray capabilities = new JSONArray();
@@ -1999,6 +2942,8 @@ namespace VAMPip
             capabilities.Add("atom-add");
             capabilities.Add("atom-preset-apply");
             capabilities.Add("subscene-load");
+            capabilities.Add("custom-unity-asset-load");
+            capabilities.Add("custom-unity-asset-choice");
             capabilities.Add("scene-load");
             capabilities.Add("person-roster");
             capabilities.Add("person-preset-apply");
@@ -2045,6 +2990,8 @@ namespace VAMPip
 
                 JSONArray atoms = new JSONArray();
                 JSONArray persons = new JSONArray();
+                int globalCuaChoiceBudget = MaximumCuaChoicesGlobally;
+                HashSet<string> liveCuaUids = new HashSet<string>();
                 if (controller != null)
                 {
                     foreach (Atom atom in controller.GetAtoms())
@@ -2060,6 +3007,14 @@ namespace VAMPip
                         atomStatus["uid"] = atom.uid ?? "";
                         atomStatus["type"] = atom.type ?? "";
                         atomStatus["selected"].AsBool = isSelected;
+                        if (atom.type == "CustomUnityAsset")
+                        {
+                            liveCuaUids.Add(atom.uid);
+                            atomStatus["cua"] =
+                                BuildCuaStatus(
+                                    atom,
+                                    ref globalCuaChoiceBudget);
+                        }
                         atoms.Add(atomStatus);
 
                         if (atom.type != "Person")
@@ -2071,6 +3026,24 @@ namespace VAMPip
                         person["selected"].AsBool = isSelected;
                         persons.Add(person);
                     }
+                }
+                List<string> removedCuaUids = new List<string>();
+                foreach (
+                    KeyValuePair<string, CuaChoiceSnapshot> entry
+                    in _cuaChoiceSnapshots)
+                {
+                    if (!liveCuaUids.Contains(entry.Key))
+                    {
+                        removedCuaUids.Add(entry.Key);
+                    }
+                }
+                int removedOffset;
+                for (removedOffset = 0;
+                     removedOffset < removedCuaUids.Count;
+                     removedOffset++)
+                {
+                    _cuaChoiceSnapshots.Remove(
+                        removedCuaUids[removedOffset]);
                 }
                 scene["atoms"] = atoms;
                 scene["persons"] = persons;

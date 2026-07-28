@@ -35,6 +35,10 @@ class WorkspaceWebUITests(unittest.TestCase):
         self.assertIn('id="atom-mode-create"', self.html)
         self.assertIn('id="atom-new-uid"', self.html)
         self.assertIn('id="add-atom-button"', self.html)
+        self.assertIn('id="cua-choice-panel"', self.html)
+        self.assertIn('id="cua-choice-select"', self.html)
+        self.assertIn('id="cua-choice-button"', self.html)
+        self.assertIn('id="cua-dll-state"', self.html)
         self.assertIn('category.targetKind !== "person"', self.javascript)
         self.assertIn('api("/api/vam/person/add"', self.javascript)
         self.assertIn('api("/api/vam/person/select"', self.javascript)
@@ -66,9 +70,10 @@ class WorkspaceWebUITests(unittest.TestCase):
         )
         self.assertIn("confirm_critical: confirmedRisk", self.javascript)
 
-    def test_atom_and_subscene_apply_use_catalog_owned_actions(self) -> None:
+    def test_atom_subscene_and_cua_apply_use_catalog_owned_actions(self) -> None:
         self.assertIn('"apply-atom-preset"', self.javascript)
         self.assertIn('"load-subscene"', self.javascript)
+        self.assertIn('"load-custom-unity-asset"', self.javascript)
         self.assertIn("create_if_missing: createIfMissing", self.javascript)
         self.assertIn("entry.create_supported", self.javascript)
         self.assertIn("entry.create_capability", self.javascript)
@@ -84,6 +89,115 @@ class WorkspaceWebUITests(unittest.TestCase):
         self.assertNotIn("body.atom_type", self.javascript)
         self.assertNotIn("body.resource_path", self.javascript)
         self.assertNotIn("body.operation", self.javascript)
+
+    def test_custom_unity_asset_load_is_typed_and_dll_safe(self) -> None:
+        self.assertIn('"custom-unity-asset": "customunityasset"', self.javascript)
+        self.assertIn("Create & load Unity asset", self.javascript)
+        self.assertIn("Load Unity asset", self.javascript)
+        self.assertIn(
+            "DLL loading is forced off before this bundle loads",
+            self.javascript,
+        )
+        self.assertIn(
+            "Code already active in this VaM session cannot be unloaded",
+            self.javascript,
+        )
+        self.assertIn(
+            "Single-item bundles load automatically; multi-item bundles stay at None",
+            self.javascript,
+        )
+        self.assertIn(
+            'category.operation === "load-custom-unity-asset"',
+            self.javascript,
+        )
+
+    def test_cua_choice_uses_only_live_token_and_numeric_index(self) -> None:
+        block_start = self.javascript.index(
+            "async function selectCuaChoiceInVam()"
+        )
+        block_end = self.javascript.index(
+            "async function selectPersonInVam()", block_start
+        )
+        block = self.javascript[block_start:block_end]
+        self.assertIn(
+            'api("/api/vam/custom-unity-asset/choice"',
+            block,
+        )
+        self.assertIn("target_uid: target.uid", block)
+        self.assertIn("choice_index: choice.index", block)
+        self.assertIn("choice_token: state.choiceToken", block)
+        self.assertIn("integerValue(elements.cuaChoiceSelect.value)", block)
+        for forbidden in (
+            "asset_name:",
+            "assetName:",
+            "resource_path:",
+            "atom_type:",
+            "loadDll:",
+            "load_dll:",
+            "operation:",
+        ):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, block)
+
+    def test_cua_choice_panel_consumes_bounded_bridge_state(self) -> None:
+        for field in (
+            "raw.loadDll",
+            "raw.ready",
+            "raw.choiceToken",
+            "raw.choiceCount",
+            "raw.selectedIndex",
+            "raw.choicesTruncated",
+        ):
+            with self.subTest(field=field):
+                self.assertIn(field, self.javascript)
+        self.assertIn("choice.index", self.javascript)
+        self.assertIn("choice.label", self.javascript)
+        self.assertIn('new Option(choice.label, String(choice.index))', self.javascript)
+        self.assertIn('"custom-unity-asset-choice"', self.javascript)
+        self.assertIn("state.loadDll !== false", self.javascript)
+        self.assertIn("!state.choiceToken", self.javascript)
+        self.assertIn("state.choicesTruncated", self.javascript)
+        self.assertIn("Multi-item bundles stay at None", self.javascript)
+        self.assertNotIn(".innerHTML", self.javascript)
+
+    def test_cua_choice_requires_server_owned_fresh_live_context(self) -> None:
+        helper_start = self.javascript.index(
+            "function cuaChoiceLiveContextReason("
+        )
+        helper_end = self.javascript.index(
+            "function updateCuaChoiceButton()", helper_start
+        )
+        helper = self.javascript[helper_start:helper_end]
+        for guard in (
+            "category?.liveAction",
+            'app.workspaceCategoriesSource !== "server"',
+            "app.workspaceCategoriesError",
+            "app.personError",
+            "personVamRunning(snapshot)",
+            "!snapshot.available",
+        ):
+            with self.subTest(guard=guard):
+                self.assertIn(guard, helper)
+
+        action_start = self.javascript.index(
+            "async function selectCuaChoiceInVam()"
+        )
+        action_end = self.javascript.index(
+            "async function selectPersonInVam()", action_start
+        )
+        action = self.javascript[action_start:action_end]
+        self.assertIn(
+            "cuaChoiceLiveContextReason(category, snapshot)",
+            action,
+        )
+        self.assertIn("liveContextReason ||", action)
+
+    def test_cua_fallback_stays_browse_only(self) -> None:
+        category_start = self.javascript.index('id: "custom-unity-assets"')
+        category_end = self.javascript.index('id: "plugins"', category_start)
+        fallback = self.javascript[category_start:category_end]
+        self.assertIn('operation: "load-custom-unity-asset"', fallback)
+        self.assertIn("live_action: false", fallback)
 
     def test_new_atom_target_cannot_request_merge(self) -> None:
         self.assertIn("const creatingManagedTarget =", self.javascript)
@@ -130,13 +244,15 @@ class WorkspaceWebUITests(unittest.TestCase):
             ".asset-apply-mode",
             ".target-mode",
             ".person-context",
+            ".cua-choice-panel",
+            ".cua-dll-state",
         ):
             with self.subTest(selector=selector):
                 self.assertIn(selector, self.styles)
 
     def test_static_assets_use_the_current_cache_version(self) -> None:
-        self.assertIn("/styles.css?v=0.5.0", self.html)
-        self.assertIn("/app.js?v=0.5.0", self.html)
+        self.assertIn("/styles.css?v=0.6.0", self.html)
+        self.assertIn("/app.js?v=0.6.0", self.html)
 
 
 if __name__ == "__main__":

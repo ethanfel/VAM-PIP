@@ -7,6 +7,7 @@ import unittest
 
 from vampip.bridge import (
     ATOM_TYPE_ALLOWLIST,
+    CUSTOM_UNITY_ASSET_RESOURCE_PREFIX,
     PERSON_PRESET_PREFIXES,
     SUBSCENE_RESOURCE_PREFIX,
     bridge_directory,
@@ -16,6 +17,8 @@ from vampip.bridge import (
     request_add_atom,
     request_add_person,
     request_atom_preset,
+    request_custom_unity_asset_choice,
+    request_custom_unity_asset_load,
     request_person_preset,
     request_rescan,
     request_scene_load,
@@ -361,6 +364,130 @@ class BridgeProtocolTests(unittest.TestCase):
                 create_if_missing=1,  # type: ignore[arg-type]
             )
 
+    def test_custom_unity_asset_load_accepts_only_asset_resources(self) -> None:
+        local_ref = (
+            f"{CUSTOM_UNITY_ASSET_RESOURCE_PREFIX}"
+            "Creator/Room.assetbundle"
+        )
+        request_id = request_custom_unity_asset_load(
+            self.vam_root,
+            "Room",
+            local_ref,
+            rescan=False,
+            create_if_missing=True,
+        )
+        request = self.read_request()
+        self.assertEqual(request["requestId"], request_id)
+        self.assertEqual(request["command"], "loadCustomUnityAsset")
+        self.assertEqual(request["targetUid"], "Room")
+        self.assertEqual(request["resourceRef"], local_ref)
+        self.assertIs(request["rescan"], False)
+        self.assertIs(request["createIfMissing"], True)
+        self.assertNotIn("loadDll", request)
+        self.assertNotIn("assetName", request)
+        self.assertNotIn("atomType", request)
+
+        package_ref = (
+            "Author.Rooms.2:/Custom/Assets/Rooms/Apartment.SCENE"
+        )
+        request_custom_unity_asset_load(
+            self.vam_root,
+            "Apartment",
+            package_ref,
+        )
+        request = self.read_request()
+        self.assertEqual(request["resourceRef"], package_ref)
+        self.assertIs(request["rescan"], True)
+        self.assertIs(request["createIfMissing"], False)
+
+        for invalid_ref in (
+            "",
+            "Custom/Assets/Room.vap",
+            "Custom/Asset/Room.assetbundle",
+            "Custom/Assets/../Room.assetbundle",
+            r"Custom\Assets\Room.assetbundle",
+            "Author.Rooms:/Custom/Assets/Room.assetbundle",
+            "Author.Rooms.1:/Custom/Assets/Bad:Room.scene",
+            "Saves/scene/Room.scene",
+        ):
+            with self.subTest(invalid_ref=invalid_ref):
+                with self.assertRaises(ValueError):
+                    request_custom_unity_asset_load(
+                        self.vam_root,
+                        "Room",
+                        invalid_ref,
+                    )
+        with self.assertRaises(TypeError):
+            request_custom_unity_asset_load(
+                self.vam_root,
+                "Room",
+                local_ref,
+                rescan=1,  # type: ignore[arg-type]
+            )
+        with self.assertRaises(TypeError):
+            request_custom_unity_asset_load(
+                self.vam_root,
+                "Room",
+                local_ref,
+                create_if_missing=1,  # type: ignore[arg-type]
+            )
+
+    def test_custom_unity_asset_choice_is_token_and_index_bounded(self) -> None:
+        token = "A1" * 16
+        request_id = request_custom_unity_asset_choice(
+            self.vam_root,
+            "Room",
+            7,
+            token,
+        )
+        request = self.read_request()
+        self.assertEqual(request["requestId"], request_id)
+        self.assertEqual(
+            request["command"],
+            "selectCustomUnityAssetChoice",
+        )
+        self.assertEqual(request["targetUid"], "Room")
+        self.assertEqual(request["choiceIndex"], 7)
+        self.assertEqual(request["choiceToken"], token.casefold())
+        self.assertEqual(
+            set(request)
+            - {"protocol", "requestId", "createdAtUtc"},
+            {"command", "targetUid", "choiceIndex", "choiceToken"},
+        )
+
+        for invalid_index in (True, 0, -1, 2_147_483_648, 1.5, "1"):
+            with self.subTest(invalid_index=invalid_index):
+                expected = TypeError if invalid_index in (True, 1.5, "1") else ValueError
+                with self.assertRaises(expected):
+                    request_custom_unity_asset_choice(
+                        self.vam_root,
+                        "Room",
+                        invalid_index,  # type: ignore[arg-type]
+                        token,
+                    )
+        for invalid_token in (
+            "",
+            "0" * 31,
+            "0" * 33,
+            "g" * 32,
+            "0" * 31 + "\n",
+        ):
+            with self.subTest(invalid_token=invalid_token):
+                with self.assertRaises(ValueError):
+                    request_custom_unity_asset_choice(
+                        self.vam_root,
+                        "Room",
+                        1,
+                        invalid_token,
+                    )
+        with self.assertRaises(TypeError):
+            request_custom_unity_asset_choice(
+                self.vam_root,
+                "Room",
+                1,
+                1,  # type: ignore[arg-type]
+            )
+
     def test_scene_load_request_accepts_allowlisted_local_and_package_refs(
         self,
     ) -> None:
@@ -452,6 +579,23 @@ class BridgeProtocolTests(unittest.TestCase):
                             "type": "InvisibleLight",
                             "selected": "false",
                         },
+                        {
+                            "uid": "Room",
+                            "type": "CustomUnityAsset",
+                            "selected": "false",
+                            "cua": {
+                                "loadDll": "false",
+                                "ready": "true",
+                                "isAssetLoaded": "true",
+                                "choiceToken": "1" * 32,
+                                "choiceCount": 1,
+                                "selectedIndex": 1,
+                                "choices": [
+                                    {"index": 1, "label": "assets/room.prefab"}
+                                ],
+                                "choicesTruncated": "false",
+                            },
+                        },
                     ],
                     "persons": [
                         {"uid": "Person", "selected": "true"},
@@ -484,6 +628,12 @@ class BridgeProtocolTests(unittest.TestCase):
         assert isinstance(atoms, list)
         self.assertIs(atoms[0]["selected"], True)
         self.assertIs(atoms[1]["selected"], False)
+        self.assertIs(atoms[2]["selected"], False)
+        cua = atoms[2]["cua"]
+        self.assertIs(cua["loadDll"], False)
+        self.assertIs(cua["ready"], True)
+        self.assertIs(cua["isAssetLoaded"], True)
+        self.assertIs(cua["choicesTruncated"], False)
 
     def test_scene_and_request_readers_reject_other_protocols(self) -> None:
         directory = bridge_directory(self.vam_root)
@@ -551,11 +701,13 @@ class BridgeSourceTests(unittest.TestCase):
             repository / "src" / "vampip" / "bridge_assets" / "VAMPipBridge.cs"
         ).read_text(encoding="utf-8")
         self.assertIn("ProtocolVersion = 2", source)
-        self.assertIn('BridgeVersion = "0.4.0"', source)
+        self.assertIn('BridgeVersion = "0.5.0"', source)
         self.assertIn('"applyPersonPreset"', source)
         self.assertIn('"addAtom"', source)
         self.assertIn('"applyAtomPreset"', source)
         self.assertIn('"loadSubscene"', source)
+        self.assertIn('"loadCustomUnityAsset"', source)
+        self.assertIn('"selectCustomUnityAssetChoice"', source)
         self.assertIn('"loadScene"', source)
         self.assertIn('"selectAtom"', source)
         self.assertIn('"atom-roster"', source)
@@ -563,6 +715,8 @@ class BridgeSourceTests(unittest.TestCase):
         self.assertIn('"atom-add"', source)
         self.assertIn('"atom-preset-apply"', source)
         self.assertIn('"subscene-load"', source)
+        self.assertIn('"custom-unity-asset-load"', source)
+        self.assertIn('"custom-unity-asset-choice"', source)
         self.assertIn('"scene-load"', source)
         self.assertIn('"person-roster"', source)
         self.assertIn('"person-preset-apply"', source)
@@ -642,6 +796,96 @@ class BridgeSourceTests(unittest.TestCase):
         self.assertIn("Never collapse an atom or resource", source)
         self.assertNotIn("System.Reflection", source)
         self.assertNotIn(".GetType(", source)
+
+    def test_bridge_source_has_bounded_tokenized_cua_surface(self) -> None:
+        repository = Path(__file__).resolve().parents[1]
+        source = (
+            repository / "src" / "vampip" / "bridge_assets" / "VAMPipBridge.cs"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn('parsed.AtomType = "CustomUnityAsset"', source)
+        self.assertIn(
+            'GetStorableByID("asset") as CustomUnityAssetLoader',
+            source,
+        )
+        self.assertIn('GetUrlJSONParam("assetUrl")', source)
+        self.assertIn('GetStringChooserJSONParam("assetName")', source)
+        self.assertIn('GetBoolJSONParam("loadDll")', source)
+        self.assertIn('"Custom/Assets/"', source)
+        self.assertIn('".assetbundle"', source)
+        self.assertIn('".scene"', source)
+        self.assertIn("state.Loader.isAssetLoaded", source)
+        self.assertIn("MaximumCuaChoicesPerAtom = 128", source)
+        self.assertIn("MaximumCuaChoicesGlobally = 512", source)
+        self.assertIn("MaximumCuaChoiceLabelLength = 256", source)
+        self.assertIn("choicesTruncated", source)
+        self.assertIn(
+            "state.LoadDll == null || state.LoadDll.val",
+            source,
+        )
+        self.assertIn("choiceToken", source)
+        self.assertIn("choiceCount", source)
+        self.assertIn("selectedIndex", source)
+        self.assertIn("snapshot.PublishedIndices.Contains", source)
+        self.assertIn("public List<string> ChoiceList;", source)
+        self.assertIn(
+            "object.ReferenceEquals(current.ChoiceList, currentChoices)",
+            source,
+        )
+        self.assertIn("IsCurrentCuaChoiceSnapshot(", source)
+        self.assertIn("BuildCuaGenerationKey(", source)
+        self.assertIn("Guid.NewGuid().ToString(\"N\")", source)
+        self.assertIn("object.ReferenceEquals(snapshot.Atom, target)", source)
+        self.assertIn(
+            "object.ReferenceEquals(snapshot.Loader, state.Loader)",
+            source,
+        )
+        self.assertIn("SanitizeCuaChoiceLabel", source)
+        self.assertIn("eligible.Count > 1", source)
+        self.assertIn(
+            "bundle is ready; choose one contained",
+            source,
+        )
+
+        # loadDll must be the final mutation/check immediately before VaM's
+        # assetUrl callback. NormalizePath and the None selection happen first.
+        normalized = source.index(
+            "normalizedUrl =",
+            source.index("ExecuteLoadCustomUnityAsset"),
+        )
+        dll_off = source.index("state.LoadDll.val = false;", normalized)
+        url_set = source.index("state.AssetUrl.val = normalizedUrl;", dll_off)
+        safety_window = source[dll_off:url_set]
+        self.assertIn("if (state.LoadDll.val)", safety_window)
+        self.assertNotIn("NormalizePath", safety_window)
+        self.assertNotIn("yield return", safety_window)
+        self.assertNotIn('request["loadDll"]', source)
+        self.assertNotIn('request["assetName"]', source)
+
+        # The live roster publishes labels and indices, never the CUA URL.
+        roster_start = source.index("private JSONClass BuildCuaStatus")
+        roster_end = source.index(
+            "private static JSONArray Capabilities",
+            roster_start,
+        )
+        roster_source = source[roster_start:roster_end]
+        self.assertIn('publishedChoice["index"]', roster_source)
+        self.assertIn('publishedChoice["label"]', roster_source)
+        self.assertNotIn('cua["assetUrl"]', roster_source)
+
+        # Selected choice changes alone do not participate in token rotation.
+        generation_start = source.index(
+            "private static string BuildCuaGenerationKey"
+        )
+        generation_end = source.index(
+            "private JSONClass BuildCuaStatus",
+            generation_start,
+        )
+        generation_source = source[generation_start:generation_end]
+        self.assertNotIn("selectedIndex", generation_source)
+        self.assertNotIn("assetName.val", generation_source)
+        self.assertNotIn("index < choices.Count", generation_source)
+        self.assertIn("choices[originalIndex]", generation_source)
 
 
 if __name__ == "__main__":

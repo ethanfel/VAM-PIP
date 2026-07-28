@@ -21,7 +21,7 @@ leaving managed mode restores that baseline.
 
 ## Current status
 
-Version 0.5.0 is functional but should still be treated as an early release.
+Version 0.6.0 is functional but should still be treated as an early release.
 Package switching is deliberately conservative:
 
 - entering managed mode requires explicit confirmation;
@@ -165,14 +165,17 @@ families. Every category says whether it is:
 This version can load or merge a Scene; list, select, and create allowlisted
 native atoms; replace or merge matching non-Person atom presets; and load a
 SubScene into a matching existing or newly created `SubScene` atom. It can
-also add/select a Person and replace or merge all eleven native Person preset
-families: Appearance, Animation, Breast Physics, Clothing, General, Glute
-Physics, Hair, Morphs, Person Plugins, Pose, and Skin.
+also load raw Custom Unity Asset bundles into an existing or new
+`CustomUnityAsset`, expose VaM's bounded contained-asset choices, add/select a
+Person, and replace or merge all eleven native Person preset families:
+Appearance, Animation, Breast Physics, Clothing, General, Glute Physics, Hair,
+Morphs, Person Plugins, Pose, and Skin.
 
 Replacing a Scene requires explicit confirmation in both the browser and API.
-General and Person Plugin presets, non-Person atom presets, and SubScenes also
-require a separate critical-action confirmation because their contents can
-replace broad state or load executable plugin code.
+General and Person Plugin presets, non-Person atom presets, SubScenes, and raw
+Custom Unity Asset bundles also require a separate critical-action
+confirmation because their contents can replace broad state or carry
+executable or otherwise active Unity content.
 
 For every live resource action VAM-PIP:
 
@@ -190,10 +193,17 @@ in the audited native allowlist remain browse-only.
 occupied before the request executes, the load fails instead of changing the
 newly appeared atom.
 
-Individual clothing, Custom Unity Assets, and raw plugins are browseable but
-remain action-disabled until their target state and safety options have
-explicit contracts. In particular, raw plugins execute code and the
-BrowserAssist catalogue mixes entry scripts with helper source files.
+For direct Custom Unity Asset loads, the bridge forces VaM's `loadDll` option
+off immediately before assigning the bundle URL and never accepts that option
+from the browser. This prevents a new sibling DLL from being loaded by the
+operation, but cannot unload code already active in the VaM session.
+Single-choice bundles load immediately; multi-choice bundles expose a
+bridge-issued, stale-safe numeric picker without accepting a raw asset name.
+
+Individual clothing and raw plugins are browseable but remain action-disabled
+until their target state and safety options have explicit contracts. In
+particular, raw plugins execute code and the BrowserAssist catalogue mixes
+entry scripts with helper source files.
 
 See [the external workspace map](docs/EXTERNAL-WORKSPACE.md) and the
 [Person-specific capability map](docs/PERSON-WORKSPACE.md) for the exact

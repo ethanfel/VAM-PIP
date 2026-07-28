@@ -15,6 +15,7 @@ BRIDGE_RELATIVE_DIR = Path("Saves") / "PluginData" / "VAMPip" / "Bridge"
 MAX_RESOURCE_REF_LENGTH = 1000
 SCENE_RESOURCE_PREFIX = "Saves/scene/"
 SUBSCENE_RESOURCE_PREFIX = "Custom/SubScene/"
+CUSTOM_UNITY_ASSET_RESOURCE_PREFIX = "Custom/Assets/"
 PERSON_PRESET_PREFIXES = {
     "appearance": "Custom/Atom/Person/Appearance/",
     "animation": "Custom/Atom/Person/AnimationPresets/",
@@ -484,6 +485,80 @@ def request_subscene_load(
     )
 
 
+def _validate_custom_unity_asset_resource_ref(resource_ref: str) -> None:
+    folded = resource_ref.casefold()
+    if folded.endswith(".assetbundle"):
+        extension = ".assetbundle"
+    elif folded.endswith(".scene"):
+        extension = ".scene"
+    else:
+        raise ValueError(
+            "resource_ref must name a .assetbundle or .scene resource"
+        )
+    _validate_allowlisted_resource_ref(
+        resource_ref,
+        required_prefix=CUSTOM_UNITY_ASSET_RESOURCE_PREFIX,
+        extension=extension,
+        require_preset_basename=False,
+    )
+
+
+def request_custom_unity_asset_load(
+    vam_root: Path,
+    target_uid: str,
+    resource_ref: str,
+    *,
+    rescan: bool = True,
+    create_if_missing: bool = False,
+) -> str:
+    target_uid = _validate_target_uid(target_uid)
+    if not isinstance(resource_ref, str):
+        raise TypeError("resource_ref must be a string")
+    _validate_custom_unity_asset_resource_ref(resource_ref)
+    if not isinstance(rescan, bool):
+        raise TypeError("rescan must be a bool")
+    if not isinstance(create_if_missing, bool):
+        raise TypeError("create_if_missing must be a bool")
+    return _write_request(
+        vam_root,
+        {
+            "command": "loadCustomUnityAsset",
+            "targetUid": target_uid,
+            "resourceRef": resource_ref,
+            "rescan": rescan,
+            "createIfMissing": create_if_missing,
+        },
+    )
+
+
+def request_custom_unity_asset_choice(
+    vam_root: Path,
+    target_uid: str,
+    choice_index: int,
+    choice_token: str,
+) -> str:
+    target_uid = _validate_target_uid(target_uid)
+    if isinstance(choice_index, bool) or not isinstance(choice_index, int):
+        raise TypeError("choice_index must be an int")
+    if choice_index <= 0 or choice_index > 2_147_483_647:
+        raise ValueError("choice_index must be a positive 32-bit chooser index")
+    if not isinstance(choice_token, str):
+        raise TypeError("choice_token must be a string")
+    if len(choice_token) != 32 or any(
+        character not in "0123456789abcdefABCDEF" for character in choice_token
+    ):
+        raise ValueError("choice_token must contain exactly 32 hexadecimal characters")
+    return _write_request(
+        vam_root,
+        {
+            "command": "selectCustomUnityAssetChoice",
+            "targetUid": target_uid,
+            "choiceIndex": choice_index,
+            "choiceToken": choice_token.casefold(),
+        },
+    )
+
+
 def request_scene_load(
     vam_root: Path,
     resource_ref: str,
@@ -563,6 +638,15 @@ def read_scene_status(vam_root: Path) -> dict[str, object] | None:
         for atom in atoms:
             if isinstance(atom, dict):
                 _normalize_bool(atom, "selected")
+                cua = atom.get("cua")
+                if isinstance(cua, dict):
+                    for key in (
+                        "loadDll",
+                        "ready",
+                        "isAssetLoaded",
+                        "choicesTruncated",
+                    ):
+                        _normalize_bool(cua, key)
     return document
 
 

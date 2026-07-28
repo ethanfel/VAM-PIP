@@ -19,6 +19,9 @@ HAIR_MEMBER = "Custom/Atom/Person/Hair/Example/Preset_Soft Bob.vap"
 SCENE_MEMBER = "Saves/scene/Example Scene.json"
 EMPTY_PRESET_MEMBER = "Custom/Atom/Empty/Example/Preset_Empty.vap"
 SUBSCENE_MEMBER = "Custom/SubScene/Example/Room.json"
+CUA_BUNDLE_MEMBER = "Custom/Assets/Example/Props.assetbundle"
+CUA_SCENE_MEMBER = "Custom/Assets/Example/Environment.scene"
+CUA_WRONG_SUFFIX_MEMBER = "Custom/Assets/Example/NotABundle.json"
 UNSUPPORTED_ATOM_PRESET_MEMBER = (
     "Custom/Atom/PackageDefinedWidget/Preset_Unsafe.vap"
 )
@@ -85,6 +88,9 @@ def make_hair_var(path: Path) -> None:
         archive.writestr(SCENE_MEMBER, json.dumps({"atoms": []}))
         archive.writestr(EMPTY_PRESET_MEMBER, json.dumps({"storables": []}))
         archive.writestr(SUBSCENE_MEMBER, json.dumps({"storables": []}))
+        archive.writestr(CUA_BUNDLE_MEMBER, b"asset bundle")
+        archive.writestr(CUA_SCENE_MEMBER, b"asset bundle")
+        archive.writestr(CUA_WRONG_SUFFIX_MEMBER, b"not an asset bundle")
         archive.writestr(
             UNSUPPORTED_ATOM_PRESET_MEMBER,
             json.dumps({"storables": []}),
@@ -170,6 +176,23 @@ class PersonWorkspaceTests(unittest.TestCase):
                     "type": "SubScene",
                     "selected": False,
                 },
+                {
+                    "uid": "CUA Target",
+                    "type": "CustomUnityAsset",
+                    "selected": False,
+                    "cua": {
+                        "loadDll": False,
+                        "ready": True,
+                        "choiceToken": "a" * 32,
+                        "choiceCount": 2,
+                        "selectedIndex": 0,
+                        "choicesTruncated": False,
+                        "choices": [
+                            {"index": 1, "label": "Chair"},
+                            {"index": 3, "label": "Table"},
+                        ],
+                    },
+                },
                 {"uid": "Wrong Target", "type": "Button", "selected": False},
             ],
             "persons": [
@@ -181,6 +204,8 @@ class PersonWorkspaceTests(unittest.TestCase):
                 "atom-add",
                 "atom-preset-apply",
                 "atom-select",
+                "custom-unity-asset-choice",
+                "custom-unity-asset-load",
                 "scene-load",
                 "subscene-load",
                 "person-roster",
@@ -480,6 +505,18 @@ class PersonWorkspaceTests(unittest.TestCase):
             UNSUPPORTED_ATOM_PRESET_MEMBER,
             atom_type="PackageDefinedWidget",
         )
+        self.insert_resource(
+            "Custom Unity Assets",
+            CUA_BUNDLE_MEMBER,
+            atom_type="",
+            key="cua-blank-atom-type",
+        )
+        self.insert_resource(
+            "Custom Unity Assets",
+            CUA_SCENE_MEMBER,
+            atom_type="CustomUnityAsset",
+            key="cua-explicit-atom-type",
+        )
 
         document = self.service.workspace_categories()
         categories = {
@@ -513,6 +550,19 @@ class PersonWorkspaceTests(unittest.TestCase):
         self.assertTrue(subscenes["create_supported"])
         self.assertEqual(subscenes["target_atom_type"], "SubScene")
         self.assertEqual(subscenes["risk"], "critical")
+
+        custom_assets = categories["custom-unity-assets"]
+        self.assertEqual(custom_assets["count"], 2)
+        self.assertTrue(custom_assets["live_action"])
+        self.assertFalse(custom_assets["merge_supported"])
+        self.assertTrue(custom_assets["create_supported"])
+        self.assertEqual(custom_assets["create_capability"], "atom-add")
+        self.assertEqual(
+            custom_assets["target_atom_type"],
+            "CustomUnityAsset",
+        )
+        self.assertIn("DLL loading is forced off", custom_assets["risk_reason"])
+        self.assertIn("already-running code is not unloaded", custom_assets["risk_reason"])
 
         search = self.service.search_resources(category="preset-appearance")
         self.assertEqual(search["category"], "preset-appearance")
@@ -840,6 +890,404 @@ class PersonWorkspaceTests(unittest.TestCase):
             ],
         )
 
+    def test_custom_unity_asset_apply_is_catalog_owned_and_safe(self) -> None:
+        bundle_id = self.insert_resource(
+            "Custom Unity Assets",
+            CUA_BUNDLE_MEMBER,
+            atom_type="",
+            key="cua-bundle",
+        )
+        scene_id = self.insert_resource(
+            "Custom Unity Assets",
+            CUA_SCENE_MEMBER,
+            atom_type="CustomUnityAsset",
+            key="cua-scene",
+        )
+        invalid_atom_type_id = self.insert_resource(
+            "Custom Unity Assets",
+            CUA_BUNDLE_MEMBER,
+            atom_type="Person",
+            key="cua-invalid-atom-type",
+        )
+        wrong_prefix_id = self.insert_resource(
+            "Custom Unity Assets",
+            SCENE_MEMBER,
+            atom_type="",
+            key="cua-wrong-prefix",
+        )
+        wrong_suffix_id = self.insert_resource(
+            "Custom Unity Assets",
+            CUA_WRONG_SUFFIX_MEMBER,
+            atom_type="",
+            key="cua-wrong-suffix",
+        )
+        wrong_resource_type_id = self.insert_resource(
+            "Plugins",
+            CUA_BUNDLE_MEMBER,
+            atom_type="",
+            key="cua-wrong-resource-type",
+        )
+        wrong_case_resource_type_id = self.insert_resource(
+            "custom unity assets",
+            CUA_BUNDLE_MEMBER,
+            atom_type="",
+            key="cua-wrong-case-resource-type",
+        )
+        lease_results = (
+            {"applied": True, "reconcile": {"enable": 1}},
+            {"applied": True, "reconcile": {"enable": 0}},
+        )
+        with (
+            mock.patch.object(self.service, "persons", return_value=self.roster()),
+            mock.patch.object(
+                self.service,
+                "lease_resource",
+                side_effect=lease_results,
+            ) as lease,
+            mock.patch(
+                "vampip.service.request_custom_unity_asset_load",
+                side_effect=("bundle-request", "scene-request"),
+            ) as request,
+        ):
+            with self.assertRaisesRegex(ValueError, "confirm_critical"):
+                self.service.apply_resource(
+                    bundle_id,
+                    target_uid="CUA Target",
+                    confirm_replace=True,
+                )
+            with self.assertRaisesRegex(ValueError, "confirm_replace"):
+                self.service.apply_resource(
+                    bundle_id,
+                    target_uid="CUA Target",
+                    confirm_critical=True,
+                )
+            with self.assertRaisesRegex(ValueError, "merge is not supported"):
+                self.service.apply_resource(
+                    bundle_id,
+                    target_uid="CUA Target",
+                    merge=True,
+                    confirm_critical=True,
+                )
+            with self.assertRaisesRegex(ValueError, "no longer available"):
+                self.service.apply_resource(
+                    bundle_id,
+                    target_uid="Missing CUA",
+                    confirm_critical=True,
+                    confirm_replace=True,
+                )
+            with self.assertRaisesRegex(
+                ValueError,
+                "create_if_missing requires target_uid to be absent",
+            ):
+                self.service.apply_resource(
+                    bundle_id,
+                    target_uid="CUA Target",
+                    create_if_missing=True,
+                    confirm_critical=True,
+                )
+            with self.assertRaisesRegex(ValueError, "expected CustomUnityAsset"):
+                self.service.apply_resource(
+                    bundle_id,
+                    target_uid="Wrong Target",
+                    confirm_critical=True,
+                    confirm_replace=True,
+                )
+            with self.assertRaisesRegex(ValueError, "invalid atom type"):
+                self.service.apply_resource(
+                    invalid_atom_type_id,
+                    target_uid="CUA Target",
+                    confirm_critical=True,
+                    confirm_replace=True,
+                )
+            with self.assertRaisesRegex(ValueError, "outside Custom/Assets"):
+                self.service.apply_resource(
+                    wrong_prefix_id,
+                    target_uid="CUA Target",
+                    confirm_critical=True,
+                    confirm_replace=True,
+                )
+            with self.assertRaisesRegex(ValueError, r"\.assetbundle or \.scene"):
+                self.service.apply_resource(
+                    wrong_suffix_id,
+                    target_uid="CUA Target",
+                    confirm_critical=True,
+                    confirm_replace=True,
+                )
+            with self.assertRaisesRegex(ValueError, "browse-only"):
+                self.service.apply_resource(
+                    wrong_resource_type_id,
+                    target_uid="CUA Target",
+                    confirm_critical=True,
+                    confirm_replace=True,
+                )
+            with self.assertRaisesRegex(ValueError, "browse-only"):
+                self.service.apply_resource(
+                    wrong_case_resource_type_id,
+                    target_uid="CUA Target",
+                    confirm_critical=True,
+                    confirm_replace=True,
+                )
+
+            existing = self.service.apply_resource(
+                bundle_id,
+                target_uid="CUA Target",
+                confirm_critical=True,
+                confirm_replace=True,
+            )
+            created = self.service.apply_resource(
+                scene_id,
+                target_uid="New CUA",
+                create_if_missing=True,
+                confirm_critical=True,
+            )
+
+        self.assertEqual(existing["category"], "custom-unity-assets")
+        self.assertEqual(existing["target_atom_type"], "CustomUnityAsset")
+        self.assertTrue(existing["target_existed"])
+        self.assertTrue(existing["rescan"])
+        self.assertFalse(created["target_existed"])
+        self.assertFalse(created["rescan"])
+        self.assertEqual(
+            lease.call_args_list,
+            [
+                mock.call(
+                    bundle_id,
+                    days=3.0,
+                    label="Custom Unity Asset: Props",
+                    apply=True,
+                    bridge_rescan=False,
+                ),
+                mock.call(
+                    scene_id,
+                    days=3.0,
+                    label="Custom Unity Asset: Environment",
+                    apply=True,
+                    bridge_rescan=False,
+                ),
+            ],
+        )
+        self.assertEqual(
+            request.call_args_list,
+            [
+                mock.call(
+                    self.vam_root,
+                    target_uid="CUA Target",
+                    resource_ref=f"Creator.HairPack.1:/{CUA_BUNDLE_MEMBER}",
+                    rescan=True,
+                    create_if_missing=False,
+                ),
+                mock.call(
+                    self.vam_root,
+                    target_uid="New CUA",
+                    resource_ref=f"Creator.HairPack.1:/{CUA_SCENE_MEMBER}",
+                    rescan=False,
+                    create_if_missing=True,
+                ),
+            ],
+        )
+
+    def test_loose_custom_unity_asset_uses_the_catalog_relative_path(self) -> None:
+        local_member = "Custom/Assets/Loose/Local Environment.scene"
+        local_path = self.vam_root / local_member
+        local_path.parent.mkdir(parents=True)
+        local_path.write_bytes(b"local asset bundle")
+        with connect(self.state) as connection:
+            cursor = connection.execute(
+                """
+                INSERT INTO catalog_resources (
+                    root, source, resource_key, creator, package_name,
+                    versions_json, resource_path, resource_type, atom_type,
+                    favorite, hidden, tags_json, imported_utc
+                ) VALUES (?, 'browserassist', 'local-cua', '', '', '[]',
+                          ?, 'Custom Unity Assets', 'CustomUnityAsset',
+                          0, 0, '[]', '2026-01-01T00:00:00+00:00')
+                """,
+                (str(self.vam_root), local_member.replace("/", "\\")),
+            )
+            resource_id = int(cursor.lastrowid)
+
+        with (
+            mock.patch.object(self.service, "persons", return_value=self.roster()),
+            mock.patch(
+                "vampip.service.request_custom_unity_asset_load",
+                return_value="local-cua-request",
+            ) as request,
+        ):
+            result = self.service.apply_resource(
+                resource_id,
+                target_uid="CUA Target",
+                confirm_critical=True,
+                confirm_replace=True,
+            )
+
+        self.assertEqual(result["resource_ref"], local_member)
+        self.assertFalse(result["rescan"])
+        self.assertTrue(result["lease"]["already_local"])
+        request.assert_called_once_with(
+            self.vam_root,
+            target_uid="CUA Target",
+            resource_ref=local_member,
+            rescan=False,
+            create_if_missing=False,
+        )
+
+    def test_custom_unity_asset_capability_and_choice_are_fresh_and_bounded(
+        self,
+    ) -> None:
+        bundle_id = self.insert_resource(
+            "Custom Unity Assets",
+            CUA_BUNDLE_MEMBER,
+            atom_type="",
+            key="cua-capability",
+        )
+        missing_load_capability = self.roster()
+        missing_load_capability["capabilities"] = [
+            capability
+            for capability in missing_load_capability["capabilities"]
+            if capability != "custom-unity-asset-load"
+        ]
+        with (
+            mock.patch.object(
+                self.service,
+                "persons",
+                return_value=missing_load_capability,
+            ),
+            mock.patch.object(self.service, "lease_resource") as lease,
+        ):
+            with self.assertRaisesRegex(ValueError, "does not provide"):
+                self.service.apply_resource(
+                    bundle_id,
+                    target_uid="CUA Target",
+                    confirm_critical=True,
+                    confirm_replace=True,
+                )
+        lease.assert_not_called()
+
+        token = "a" * 32
+        with mock.patch(
+            "vampip.service.request_custom_unity_asset_choice",
+            return_value="choice-request",
+        ) as request:
+            with self.assertRaisesRegex(ValueError, "positive integer"):
+                self.service.select_custom_unity_asset_choice(
+                    "CUA Target",
+                    True,  # type: ignore[arg-type]
+                    token,
+                )
+            with self.assertRaisesRegex(ValueError, "32 hexadecimal"):
+                self.service.select_custom_unity_asset_choice(
+                    "CUA Target",
+                    1,
+                    "not-a-token",
+                )
+
+            stale = self.roster()
+            with (
+                mock.patch.object(self.service, "persons", return_value=stale),
+                self.assertRaisesRegex(ValueError, "stale or invalid"),
+            ):
+                self.service.select_custom_unity_asset_choice(
+                    "CUA Target",
+                    1,
+                    "b" * 32,
+                )
+
+            missing_index = self.roster()
+            with (
+                mock.patch.object(
+                    self.service,
+                    "persons",
+                    return_value=missing_index,
+                ),
+                self.assertRaisesRegex(ValueError, "not present"),
+            ):
+                self.service.select_custom_unity_asset_choice(
+                    "CUA Target",
+                    2,
+                    token,
+                )
+
+            dll_on = self.roster()
+            dll_atom = next(
+                atom for atom in dll_on["atoms"] if atom["uid"] == "CUA Target"
+            )
+            dll_atom["cua"]["loadDll"] = 0
+            with (
+                mock.patch.object(self.service, "persons", return_value=dll_on),
+                self.assertRaisesRegex(ValueError, "DLL loading is off"),
+            ):
+                self.service.select_custom_unity_asset_choice(
+                    "CUA Target",
+                    1,
+                    token,
+                )
+
+            with (
+                mock.patch.object(self.service, "persons", return_value=self.roster()),
+                self.assertRaisesRegex(ValueError, "expected CustomUnityAsset"),
+            ):
+                self.service.select_custom_unity_asset_choice(
+                    "Wrong Target",
+                    1,
+                    token,
+                )
+
+            missing_choice_capability = self.roster()
+            missing_choice_capability["capabilities"] = [
+                capability
+                for capability in missing_choice_capability["capabilities"]
+                if capability != "custom-unity-asset-choice"
+            ]
+            with (
+                mock.patch.object(
+                    self.service,
+                    "persons",
+                    return_value=missing_choice_capability,
+                ),
+                self.assertRaisesRegex(ValueError, "does not provide"),
+            ):
+                self.service.select_custom_unity_asset_choice(
+                    "CUA Target",
+                    1,
+                    token,
+                )
+
+            with (
+                mock.patch.object(
+                    self.service,
+                    "_ensure_bridge_mailbox_idle",
+                    side_effect=LiveActionBusyError("bridge busy"),
+                ),
+                self.assertRaisesRegex(LiveActionBusyError, "bridge busy"),
+            ):
+                self.service.select_custom_unity_asset_choice(
+                    "CUA Target",
+                    1,
+                    token,
+                )
+
+            with mock.patch.object(
+                self.service,
+                "persons",
+                return_value=self.roster(),
+            ):
+                selected = self.service.select_custom_unity_asset_choice(
+                    "CUA Target",
+                    3,
+                    token,
+                )
+
+        self.assertEqual(selected["operation"], "select-custom-unity-asset-choice")
+        self.assertEqual(selected["target_atom_type"], "CustomUnityAsset")
+        self.assertEqual(selected["choice_index"], 3)
+        self.assertEqual(selected["bridge_request"], "choice-request")
+        request.assert_called_once_with(
+            self.vam_root,
+            target_uid="CUA Target",
+            choice_index=3,
+            choice_token=token,
+        )
+
     def test_atom_add_derives_allowlisted_type_only_from_category(self) -> None:
         self.insert_resource(
             "Preset Atom",
@@ -867,12 +1315,20 @@ class PersonWorkspaceTests(unittest.TestCase):
             mock.patch.object(self.service, "persons", return_value=self.roster()),
             mock.patch(
                 "vampip.service.request_add_atom",
-                side_effect=("empty-request", "subscene-request"),
+                side_effect=("empty-request", "subscene-request", "cua-request"),
             ) as request,
         ):
             existing = self.service.add_atom(empty_category, "Empty Target")
             created = self.service.add_atom(empty_category, "New Empty")
             subscene = self.service.add_atom("subscenes", "New SubScene")
+            existing_cua = self.service.add_atom(
+                "custom-unity-assets",
+                "CUA Target",
+            )
+            created_cua = self.service.add_atom(
+                "custom-unity-assets",
+                "New CUA",
+            )
             with self.assertRaisesRegex(ValueError, "expected Empty"):
                 self.service.add_atom(empty_category, "Wrong Target")
             with self.assertRaisesRegex(ValueError, "browse-only"):
@@ -886,6 +1342,8 @@ class PersonWorkspaceTests(unittest.TestCase):
         self.assertIsNone(existing["bridge_request"])
         self.assertEqual(created["target_atom_type"], "Empty")
         self.assertEqual(subscene["target_atom_type"], "SubScene")
+        self.assertTrue(existing_cua["already_exists"])
+        self.assertEqual(created_cua["target_atom_type"], "CustomUnityAsset")
         self.assertEqual(
             request.call_args_list,
             [
@@ -898,6 +1356,11 @@ class PersonWorkspaceTests(unittest.TestCase):
                     self.vam_root,
                     atom_type="SubScene",
                     target_uid="New SubScene",
+                ),
+                mock.call(
+                    self.vam_root,
+                    atom_type="CustomUnityAsset",
+                    target_uid="New CUA",
                 ),
             ],
         )

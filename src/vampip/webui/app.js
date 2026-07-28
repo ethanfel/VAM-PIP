@@ -359,6 +359,7 @@ const app = {
   newAtomUid: "",
   pendingAtomUid: "",
   atomMutationInFlight: false,
+  cuaChoiceInFlight: false,
   applyingWorkspaceResources: new Set(),
   workspaceCategories: [],
   workspaceCategoriesError: null,
@@ -452,6 +453,12 @@ function cacheElements() {
     "atom-new-uid",
     "add-atom-button",
     "select-atom-button",
+    "cua-choice-panel",
+    "cua-choice-title",
+    "cua-choice-detail",
+    "cua-dll-state",
+    "cua-choice-select",
+    "cua-choice-button",
     "atom-live-state",
     "atom-live-title",
     "atom-live-detail",
@@ -562,6 +569,8 @@ function bindEvents() {
   });
   elements.selectAtomButton.addEventListener("click", selectAtomInVam);
   elements.addAtomButton.addEventListener("click", addAtomInVam);
+  elements.cuaChoiceSelect.addEventListener("change", updateCuaChoiceButton);
+  elements.cuaChoiceButton.addEventListener("click", selectCuaChoiceInVam);
   for (const modeInput of [
     elements.atomModeExisting,
     elements.atomModeCreate,
@@ -1239,6 +1248,7 @@ function workspaceApplyModes(category) {
       "apply-person-preset",
       "apply-atom-preset",
       "load-subscene",
+      "load-custom-unity-asset",
     ].includes(category.operation)
   ) {
     return [];
@@ -1265,7 +1275,9 @@ function syncWorkspaceApplyModeControls(category) {
     input.closest("label").title = supported
       ? `${prettyType(input.value)} this ${category.noun}`
       : input.value === "merge" && creatingManagedTarget
-        ? "Create new uses Replace because BrowserAssist cannot merge into a target that does not exist yet"
+        ? category.operation === "apply-atom-preset"
+          ? "Create new uses Replace because BrowserAssist cannot merge into a target that does not exist yet"
+          : "Create new uses Replace because merge requires an existing target"
         : category.liveAction
           ? `${prettyType(input.value)} is not supported for ${category.label}`
           : `${category.label} is browse-only with the current manager`;
@@ -1378,6 +1390,81 @@ function atomList(snapshot = app.person) {
     .filter((atom) => atom.uid);
 }
 
+function integerValue(value) {
+  if (typeof value === "boolean") return null;
+  if (typeof value === "string" && !value.trim()) return null;
+  const parsed = Number(value);
+  return Number.isInteger(parsed) ? parsed : null;
+}
+
+function cuaStateForAtom(atom) {
+  const raw = atom && typeof atom.cua === "object" ? atom.cua : null;
+  if (!raw || Array.isArray(raw)) return null;
+
+  const loadDllRaw = raw.loadDll ?? raw.load_dll;
+  const readyRaw = raw.ready;
+  const selectedIndexRaw = raw.selectedIndex ?? raw.selected_index;
+  const choiceCountRaw = raw.choiceCount ?? raw.choice_count;
+  const choicesTruncatedRaw =
+    raw.choicesTruncated ?? raw.choices_truncated;
+  const seen = new Set();
+  const choices = [];
+  for (const choice of asArray(raw.choices)) {
+    if (!choice || typeof choice !== "object" || Array.isArray(choice)) continue;
+    const index = integerValue(choice.index);
+    if (index === null || index < 1 || seen.has(index)) continue;
+    seen.add(index);
+    choices.push({
+      index,
+      label: String(choice.label || `Asset ${index}`),
+    });
+  }
+
+  const selectedIndex = integerValue(selectedIndexRaw);
+  const publishedCount = integerValue(choiceCountRaw);
+  return {
+    loadDll:
+      loadDllRaw === undefined || loadDllRaw === null
+        ? null
+        : booleanValue(loadDllRaw),
+    ready:
+      readyRaw === undefined || readyRaw === null
+        ? false
+        : booleanValue(readyRaw),
+    choiceToken: String(raw.choiceToken ?? raw.choice_token ?? "").trim(),
+    choiceCount:
+      publishedCount === null || publishedCount < 0
+        ? choices.length
+        : publishedCount,
+    selectedIndex:
+      selectedIndex === null || selectedIndex < 0 ? null : selectedIndex,
+    choices,
+    choicesTruncated:
+      choicesTruncatedRaw === undefined || choicesTruncatedRaw === null
+        ? false
+        : booleanValue(choicesTruncatedRaw),
+  };
+}
+
+function isCuaCategory(category = currentWorkspaceCategory()) {
+  return category?.operation === "load-custom-unity-asset";
+}
+
+function selectedCuaTarget(category = currentWorkspaceCategory()) {
+  if (
+    !isCuaCategory(category) ||
+    app.atomTargetMode === "create" ||
+    !app.selectedAtomUid
+  ) {
+    return null;
+  }
+  return (
+    atomsForCategory(category).find(
+      (atom) => atom.uid === app.selectedAtomUid,
+    ) || null
+  );
+}
+
 function atomsForCategory(category = currentWorkspaceCategory()) {
   const atoms = atomList();
   const explicitType = String(category?.targetAtomType || "").toLowerCase();
@@ -1396,7 +1483,11 @@ function categoryUsesManagedAtomTarget(category = currentWorkspaceCategory()) {
   return Boolean(
     category &&
       category.liveAction &&
-      ["apply-atom-preset", "load-subscene"].includes(category.operation),
+      [
+        "apply-atom-preset",
+        "load-subscene",
+        "load-custom-unity-asset",
+      ].includes(category.operation),
   );
 }
 
@@ -1506,6 +1597,7 @@ function personControlKey() {
       atom.uid,
       atom.type,
       Boolean(atom.selected),
+      atom.cua || null,
     ]),
   });
 }
@@ -1705,6 +1797,254 @@ function renderPersonContext() {
   elements.personLiveDetail.textContent = detail;
 }
 
+function cuaChoiceUnavailableOption(label) {
+  elements.cuaChoiceSelect.replaceChildren(new Option(label, ""));
+  elements.cuaChoiceSelect.value = "";
+}
+
+function cuaChoiceLiveContextReason(category, snapshot = app.person || {}) {
+  if (
+    !category?.liveAction ||
+    app.workspaceCategoriesSource !== "server" ||
+    app.workspaceCategoriesError
+  ) {
+    return "This category is browse-only until the manager publishes its current workspace map";
+  }
+  if (app.personError) {
+    return "Refresh the live VaM state before choosing a contained asset";
+  }
+  if (!personVamRunning(snapshot)) {
+    return "Start VaM before choosing a contained asset";
+  }
+  if (!snapshot.available) {
+    return "Wait for a fresh scene snapshot from the loaded bridge";
+  }
+  return "";
+}
+
+function updateCuaChoiceButton() {
+  const category = currentWorkspaceCategory();
+  const snapshot = app.person || {};
+  const target = selectedCuaTarget(category);
+  const state = cuaStateForAtom(target);
+  const index = integerValue(elements.cuaChoiceSelect.value);
+  const choice =
+    index === null
+      ? null
+      : state?.choices.find((entry) => entry.index === index) || null;
+  const bridgeBusy = snapshotBridgeBusy(snapshot);
+  const capabilities = personCapabilities(snapshot);
+  const liveContextReason = cuaChoiceLiveContextReason(category, snapshot);
+  let reason = "";
+
+  if (!isCuaCategory(category)) {
+    reason = "Contained choices are available only for Custom Unity Assets";
+  } else if (liveContextReason) {
+    reason = liveContextReason;
+  } else if (app.atomTargetMode === "create") {
+    reason = "Load a bundle into the new target before choosing its contents";
+  } else if (!target) {
+    reason = "Choose an existing CustomUnityAsset target first";
+  } else if (!state) {
+    reason = "Load a Unity bundle into this target first";
+  } else if (state.loadDll !== false) {
+    reason =
+      state.loadDll === true
+        ? "Choice switching is disabled while DLL loading is enabled"
+        : "The bridge has not confirmed that DLL loading is off";
+  } else if (!capabilities.has("custom-unity-asset-choice")) {
+    reason = "Update and reload the bridge to choose contained assets";
+  } else if (!state.choiceToken) {
+    reason = "Waiting for a fresh contained-asset token";
+  } else if (!state.choices.length) {
+    reason = "This bundle has not published any selectable scenes or prefabs";
+  } else if (!choice) {
+    reason = "Choose a contained scene or prefab";
+  } else if (state.ready && state.selectedIndex === choice.index) {
+    reason = "This contained item is already loaded";
+  } else if (
+    app.cuaChoiceInFlight ||
+    app.atomMutationInFlight ||
+    app.applyingWorkspaceResources.size > 0 ||
+    Boolean(snapshot.loading) ||
+    bridgeBusy
+  ) {
+    reason = "Wait for the current VaM bridge action to finish";
+  }
+
+  elements.cuaChoiceButton.disabled = reason !== "";
+  elements.cuaChoiceButton.title = reason;
+}
+
+function renderCuaChoicePanel(category = currentWorkspaceCategory()) {
+  const isCua = isCuaCategory(category);
+  elements.cuaChoicePanel.hidden = !isCua;
+  if (!isCua) return;
+
+  const snapshot = app.person || {};
+  const creating = app.atomTargetMode === "create";
+  const target = selectedCuaTarget(category);
+  const state = cuaStateForAtom(target);
+  const bridgeBusy = snapshotBridgeBusy(snapshot);
+  const capabilities = personCapabilities(snapshot);
+  const canChoose = capabilities.has("custom-unity-asset-choice");
+  const liveContextReason = cuaChoiceLiveContextReason(category, snapshot);
+  const previousKey = elements.cuaChoicePanel.dataset.choiceKey || "";
+  const previousValue = elements.cuaChoiceSelect.value;
+  const currentKey = target && state
+    ? `${target.uid}\n${state.choiceToken}`
+    : "";
+
+  elements.cuaChoicePanel.classList.remove(
+    "is-ready",
+    "is-warning",
+    "is-danger",
+  );
+  elements.cuaDllState.classList.remove("is-safe", "is-danger", "is-muted");
+
+  if (liveContextReason) {
+    cuaChoiceUnavailableOption("Live choices unavailable");
+    elements.cuaChoiceTitle.textContent = "Contained choices are read-only";
+    elements.cuaChoiceDetail.textContent = liveContextReason;
+    elements.cuaDllState.textContent = "Fresh DLL state required";
+    elements.cuaDllState.classList.add("is-muted");
+    elements.cuaChoicePanel.classList.add("is-warning");
+  } else if (creating) {
+    cuaChoiceUnavailableOption("Available after the target is created");
+    elements.cuaChoiceTitle.textContent = "Contained choices appear after loading";
+    elements.cuaChoiceDetail.textContent =
+      "Load a bundle below. Single-item bundles load automatically; multi-item bundles stay at None until you choose a scene or prefab.";
+    elements.cuaDllState.textContent = "DLL loading forced off on load";
+    elements.cuaDllState.classList.add("is-safe");
+    elements.cuaChoicePanel.classList.add("is-warning");
+  } else if (!target) {
+    cuaChoiceUnavailableOption("Choose an existing target first");
+    elements.cuaChoiceTitle.textContent = "No CustomUnityAsset target selected";
+    elements.cuaChoiceDetail.textContent =
+      "Choose an existing compatible atom, or switch to Create new.";
+    elements.cuaDllState.textContent = "DLL state unavailable";
+    elements.cuaDllState.classList.add("is-muted");
+    elements.cuaChoicePanel.classList.add("is-warning");
+  } else if (!state) {
+    cuaChoiceUnavailableOption("No contained choices available");
+    elements.cuaChoiceTitle.textContent = "No Unity bundle loaded";
+    elements.cuaChoiceDetail.textContent =
+      "Choose a bundle below. VAM-PIP forces DLL loading off before assigning it to this target.";
+    elements.cuaDllState.textContent = "DLL state unavailable";
+    elements.cuaDllState.classList.add("is-muted");
+    elements.cuaChoicePanel.classList.add("is-warning");
+  } else {
+    elements.cuaChoiceSelect.replaceChildren();
+    elements.cuaChoiceSelect.append(
+      new Option(
+        state.choices.length
+          ? "Choose a contained scene or prefab…"
+          : "No selectable scenes or prefabs",
+        "",
+      ),
+    );
+    for (const choice of state.choices) {
+      elements.cuaChoiceSelect.append(
+        new Option(choice.label, String(choice.index)),
+      );
+    }
+    const canPreserveSelection =
+      previousKey === currentKey &&
+      state.choices.some(
+        (choice) => String(choice.index) === previousValue,
+      );
+    if (canPreserveSelection) {
+      elements.cuaChoiceSelect.value = previousValue;
+    } else if (
+      state.selectedIndex !== null &&
+      state.choices.some((choice) => choice.index === state.selectedIndex)
+    ) {
+      elements.cuaChoiceSelect.value = String(state.selectedIndex);
+    } else {
+      elements.cuaChoiceSelect.value = "";
+    }
+
+    const selectedChoice =
+      state.selectedIndex === null
+        ? null
+        : state.choices.find(
+            (choice) => choice.index === state.selectedIndex,
+          ) || null;
+    const countText = `${formatNumber(state.choiceCount)} ${plural(
+      "choice",
+      state.choiceCount,
+    )}`;
+    const truncatedNote = state.choicesTruncated
+      ? ` Showing ${formatNumber(state.choices.length)} bounded choices in this browser.`
+      : "";
+
+    if (state.loadDll === false) {
+      elements.cuaDllState.textContent = "DLL loading off";
+      elements.cuaDllState.classList.add("is-safe");
+    } else if (state.loadDll === true) {
+      elements.cuaDllState.textContent = "DLL loading enabled";
+      elements.cuaDllState.classList.add("is-danger");
+    } else {
+      elements.cuaDllState.textContent = "DLL state unavailable";
+      elements.cuaDllState.classList.add("is-muted");
+    }
+
+    if (state.loadDll === true) {
+      elements.cuaChoiceTitle.textContent = "DLL loading is enabled";
+      elements.cuaChoiceDetail.textContent =
+        "Contained switching is disabled. Reload the bundle through VAM-PIP to force DLL loading off; code already active in this VaM session cannot be unloaded.";
+      elements.cuaChoicePanel.classList.add("is-danger");
+    } else if (state.loadDll !== false) {
+      elements.cuaChoiceTitle.textContent = "Waiting for a safe loader state";
+      elements.cuaChoiceDetail.textContent =
+        "Choices remain disabled until the bridge confirms that DLL loading is off.";
+      elements.cuaChoicePanel.classList.add("is-warning");
+    } else if (!canChoose) {
+      elements.cuaChoiceTitle.textContent = "Bridge update required";
+      elements.cuaChoiceDetail.textContent =
+        "The bundle state is visible, but this bridge does not advertise custom-unity-asset-choice.";
+      elements.cuaChoicePanel.classList.add("is-warning");
+    } else if (!state.choices.length) {
+      elements.cuaChoiceTitle.textContent = "Waiting for contained assets";
+      elements.cuaChoiceDetail.textContent =
+        `The loader reports ${countText}, but none are currently selectable.${truncatedNote}`;
+      elements.cuaChoicePanel.classList.add("is-warning");
+    } else if (state.ready && selectedChoice) {
+      elements.cuaChoiceTitle.textContent = "Contained item loaded";
+      elements.cuaChoiceDetail.textContent =
+        `${selectedChoice.label} is active · ${countText}.${truncatedNote}`;
+      elements.cuaChoicePanel.classList.add("is-ready");
+    } else if (state.choiceCount === 1) {
+      elements.cuaChoiceTitle.textContent = "Loading the bundle’s single item";
+      elements.cuaChoiceDetail.textContent =
+        `Single-item bundles are selected automatically.${truncatedNote}`;
+      elements.cuaChoicePanel.classList.add("is-warning");
+    } else {
+      elements.cuaChoiceTitle.textContent = "Choose a contained item";
+      elements.cuaChoiceDetail.textContent =
+        `${countText} are available. Multi-item bundles stay at None until you choose one.${truncatedNote}`;
+      elements.cuaChoicePanel.classList.add("is-ready");
+    }
+  }
+
+  elements.cuaChoicePanel.dataset.choiceKey = currentKey;
+  elements.cuaChoiceSelect.disabled =
+    Boolean(liveContextReason) ||
+    creating ||
+    !target ||
+    !state ||
+    state.loadDll !== false ||
+    !canChoose ||
+    !state.choiceToken ||
+    !state.choices.length ||
+    app.cuaChoiceInFlight ||
+    app.atomMutationInFlight ||
+    app.applyingWorkspaceResources.size > 0 ||
+    Boolean(snapshot.loading) ||
+    bridgeBusy;
+  updateCuaChoiceButton();
+}
+
 function renderAtomContext() {
   const category = currentWorkspaceCategory();
   const visible = category && ATOM_TARGET_KINDS.has(category.targetKind);
@@ -1773,6 +2113,7 @@ function renderAtomContext() {
   );
   const targetControlsBusy =
     app.atomMutationInFlight ||
+    app.cuaChoiceInFlight ||
     Boolean(snapshot.loading) ||
     bridgeBusy ||
     app.applyingWorkspaceResources.size > 0;
@@ -1796,6 +2137,7 @@ function renderAtomContext() {
 
   elements.selectAtomButton.disabled =
     app.atomMutationInFlight ||
+    app.cuaChoiceInFlight ||
     !personVamRunning(snapshot) ||
     !snapshot.available ||
     Boolean(snapshot.loading) ||
@@ -1815,6 +2157,7 @@ function renderAtomContext() {
   }
   elements.addAtomButton.disabled =
     app.atomMutationInFlight ||
+    app.cuaChoiceInFlight ||
     !personVamRunning(snapshot) ||
     !snapshot.available ||
     Boolean(snapshot.loading) ||
@@ -1830,6 +2173,8 @@ function renderAtomContext() {
         : uidAlreadyExists
           ? "An atom already uses this UID"
           : "";
+
+  renderCuaChoicePanel(category);
 
   const state = elements.atomLiveState;
   state.classList.remove("is-ready", "is-warning", "is-error");
@@ -1893,13 +2238,74 @@ function renderAtomContext() {
     detail = creating
       ? category.operation === "load-subscene"
         ? "Loading a SubScene below will create this SubScene atom and fill it."
-        : "Load a preset below to create the typed atom and apply it, or add the empty atom now."
+        : category.operation === "load-custom-unity-asset"
+          ? "Loading a bundle below will create this CustomUnityAsset atom with DLL loading forced off."
+          : "Load a preset below to create the typed atom and apply it, or add the empty atom now."
+      : category.operation === "load-custom-unity-asset"
+        ? "Choose a bundle below. Multi-item bundles expose a separate contained-asset picker."
       : canSelect
         ? "Choose an asset below to load it onto this target, or select it in VaM."
         : "Choose an asset below to load it onto this target.";
   }
   elements.atomLiveTitle.textContent = title;
   elements.atomLiveDetail.textContent = detail;
+}
+
+async function selectCuaChoiceInVam() {
+  const category = currentWorkspaceCategory();
+  const snapshot = app.person || {};
+  const target = selectedCuaTarget(category);
+  const state = cuaStateForAtom(target);
+  const liveContextReason = cuaChoiceLiveContextReason(category, snapshot);
+  const choiceIndex = integerValue(elements.cuaChoiceSelect.value);
+  const choice =
+    choiceIndex === null
+      ? null
+      : state?.choices.find((entry) => entry.index === choiceIndex) || null;
+
+  updateCuaChoiceButton();
+  if (
+    liveContextReason ||
+    elements.cuaChoiceButton.disabled ||
+    !target ||
+    !state ||
+    !choice ||
+    !state.choiceToken
+  ) {
+    return;
+  }
+
+  app.cuaChoiceInFlight = true;
+  setButtonBusy(elements.cuaChoiceButton, true, "Queuing…");
+  renderAtomContext();
+  try {
+    const result = await api("/api/vam/custom-unity-asset/choice", {
+      method: "POST",
+      body: {
+        target_uid: target.uid,
+        choice_index: choice.index,
+        choice_token: state.choiceToken,
+      },
+    });
+    requireBridgeQueue(result, "Contained Unity asset selection");
+    toast(
+      "Contained asset queued",
+      result.message ||
+        `${choice.label} will be loaded into ${target.uid} with DLL loading kept off.`,
+    );
+    app.personPollAt = 0;
+    await loadPersons({ quiet: true });
+  } catch (error) {
+    toast(
+      "Could not load contained asset",
+      errorMessage(error),
+      "error",
+    );
+  } finally {
+    app.cuaChoiceInFlight = false;
+    setButtonBusy(elements.cuaChoiceButton, false);
+    renderAtomContext();
+  }
 }
 
 async function selectPersonInVam() {
@@ -1930,7 +2336,7 @@ async function selectPersonInVam() {
 
 async function selectAtomInVam() {
   const targetUid = app.selectedAtomUid;
-  if (!targetUid || app.atomMutationInFlight) return;
+  if (!targetUid || app.atomMutationInFlight || app.cuaChoiceInFlight) return;
   app.atomMutationInFlight = true;
   setButtonBusy(elements.selectAtomButton, true, "Selecting…");
   renderAtomContext();
@@ -1968,7 +2374,8 @@ async function addAtomInVam() {
     ) ||
     (createCapability &&
       !personCapabilities().has(createCapability)) ||
-    app.atomMutationInFlight
+    app.atomMutationInFlight ||
+    app.cuaChoiceInFlight
   ) {
     return;
   }
@@ -2634,7 +3041,7 @@ function workspaceApplyAvailability(item, category = currentWorkspaceCategory())
     reason = "Wait for VaM to finish loading the scene";
   } else if (snapshotBridgeBusy(snapshot)) {
     reason = "Wait for the current bridge action to finish";
-  } else if (app.atomMutationInFlight) {
+  } else if (app.atomMutationInFlight || app.cuaChoiceInFlight) {
     reason = "Wait for the current atom action to finish";
   } else if (
     (category.targetKind === "person" &&
@@ -2675,6 +3082,10 @@ function workspaceApplyAvailability(item, category = currentWorkspaceCategory())
     label = app.workspaceApplyMode === "merge" ? "Merge scene" : "Replace scene";
   } else if (category?.operation === "load-subscene") {
     label = creatingAtomTarget ? "Create & load SubScene" : "Load SubScene";
+  } else if (category?.operation === "load-custom-unity-asset") {
+    label = creatingAtomTarget
+      ? "Create & load Unity asset"
+      : "Load Unity asset";
   } else if (category?.operation === "apply-atom-preset") {
     label = creatingAtomTarget
       ? "Create atom & load"
@@ -2725,6 +3136,9 @@ async function confirmRiskyAssetLoad(item, category, merge) {
       ? ` A new ${category.targetAtomType || "compatible"} atom named “${targetUid}” will be created.`
       : ` Existing atom “${targetUid}” will be changed.`
     : "";
+  const cuaSafetyNote = isCuaCategory(category)
+    ? " DLL loading is forced off before this bundle loads. Bundles that require their own DLL may be incomplete. Code already active in this VaM session cannot be unloaded. Single-item bundles load automatically; multi-item bundles stay at None until you choose a contained scene or prefab."
+    : "";
   return showDialog({
     eyebrow: critical ? "Critical live action" : "High-impact live action",
     title: `Load “${resourceTitle(item)}”?`,
@@ -2732,7 +3146,7 @@ async function confirmRiskyAssetLoad(item, category, merge) {
       `${
         category.riskReason ||
         `This ${category.noun} can make broad or executable changes to the selected target.`
-      }${targetNote}`,
+      }${targetNote}${cuaSafetyNote}`,
     confirmLabel: merge ? "Merge asset" : "Load asset",
     icon: critical ? "danger" : "warning",
   });
@@ -2746,7 +3160,8 @@ async function applyWorkspaceResource(item, category, sourceButton) {
   const createIfMissing =
     managedTarget && app.atomTargetMode === "create";
   const merge =
-    !createIfMissing && app.workspaceApplyMode === "merge";
+    category.mergeSupported &&
+    (!createIfMissing && app.workspaceApplyMode === "merge");
   const atomTargetUid = managedTarget ? activeAtomTargetUid(category) : "";
   let confirmedReplace = false;
   let confirmedRisk = false;

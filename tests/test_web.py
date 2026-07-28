@@ -156,8 +156,8 @@ class WebSecurityTests(unittest.TestCase):
             "frame-ancestors 'none'", response.getheader("Content-Security-Policy")
         )
         document = response.read().decode("utf-8")
-        self.assertIn("/styles.css?v=0.5.0", document)
-        self.assertIn("/app.js?v=0.5.0", document)
+        self.assertIn("/styles.css?v=0.6.0", document)
+        self.assertIn("/app.js?v=0.6.0", document)
 
     def test_session_plugin_endpoints_report_and_import_defaults(self) -> None:
         preset_path = write_web_session_defaults(self.vam_root)
@@ -353,6 +353,126 @@ class WebSecurityTests(unittest.TestCase):
             confirm_replace=True,
             confirm_critical=False,
         )
+
+    def test_custom_unity_asset_choice_route_is_strict_and_opaque(self) -> None:
+        token = "a" * 32
+        choice_result = {
+            "operation": "select-custom-unity-asset-choice",
+            "target_uid": "CUA Target",
+            "choice_index": 3,
+            "bridge_request": "choice-request",
+        }
+        self.server.service.select_custom_unity_asset_choice = mock.Mock(
+            return_value=choice_result
+        )
+        headers = {
+            "X-VAMPIP-Token": self.token,
+            "Content-Type": "application/json",
+        }
+
+        body = json.dumps(
+            {
+                "target_uid": "CUA Target",
+                "choice_index": 3,
+                "choice_token": token,
+            }
+        ).encode("utf-8")
+        self.connection.request(
+            "POST",
+            "/api/vam/custom-unity-asset/choice",
+            body=body,
+            headers={**headers, "Content-Length": str(len(body))},
+        )
+        response = self.connection.getresponse()
+        self.assertEqual(response.status, 200)
+        self.assertEqual(self.response_json(response), choice_result)
+        self.server.service.select_custom_unity_asset_choice.assert_called_once_with(
+            "CUA Target",
+            3,
+            token,
+        )
+
+        forbidden = json.dumps(
+            {
+                "target_uid": "CUA Target",
+                "choice_index": 3,
+                "choice_token": token,
+                "asset_name": "Assets/attacker.prefab",
+                "loadDll": True,
+                "resource_path": "/tmp/attacker.assetbundle",
+                "atom_type": "Person",
+                "action": "anything",
+                "options": {"loadDll": True},
+            }
+        ).encode("utf-8")
+        self.connection.request(
+            "POST",
+            "/api/vam/custom-unity-asset/choice",
+            body=forbidden,
+            headers={**headers, "Content-Length": str(len(forbidden))},
+        )
+        response = self.connection.getresponse()
+        self.assertEqual(response.status, 400)
+        payload = self.response_json(response)
+        self.assertIn("unsupported Custom Unity Asset choice field", payload["error"])
+        self.assertEqual(
+            self.server.service.select_custom_unity_asset_choice.call_count,
+            1,
+        )
+
+    def test_custom_unity_asset_choice_route_requires_exact_field_types(self) -> None:
+        self.server.service.select_custom_unity_asset_choice = mock.Mock()
+        headers = {
+            "X-VAMPIP-Token": self.token,
+            "Content-Type": "application/json",
+        }
+        invalid_documents = (
+            (
+                {
+                    "target_uid": None,
+                    "choice_index": 1,
+                    "choice_token": "a" * 32,
+                },
+                "target_uid must be a string",
+            ),
+            (
+                {
+                    "target_uid": "CUA Target",
+                    "choice_index": True,
+                    "choice_token": "a" * 32,
+                },
+                "choice_index must be a positive integer",
+            ),
+            (
+                {
+                    "target_uid": "CUA Target",
+                    "choice_index": 0,
+                    "choice_token": "a" * 32,
+                },
+                "choice_index must be a positive integer",
+            ),
+            (
+                {
+                    "target_uid": "CUA Target",
+                    "choice_index": 1,
+                    "choice_token": None,
+                },
+                "choice_token must be a string",
+            ),
+        )
+        for document, expected in invalid_documents:
+            with self.subTest(document=document):
+                body = json.dumps(document).encode("utf-8")
+                self.connection.request(
+                    "POST",
+                    "/api/vam/custom-unity-asset/choice",
+                    body=body,
+                    headers={**headers, "Content-Length": str(len(body))},
+                )
+                response = self.connection.getresponse()
+                self.assertEqual(response.status, 400)
+                self.assertIn(expected, self.response_json(response)["error"])
+        self.server.service.select_custom_unity_asset_choice.assert_not_called()
 
     def test_person_and_atom_lifecycle_routes(self) -> None:
         self.server.service.add_person = mock.Mock(

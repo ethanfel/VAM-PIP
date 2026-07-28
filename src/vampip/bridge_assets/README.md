@@ -4,8 +4,8 @@ This is a deliberately small VaM **session plugin**. The external VAM-PIP
 manager enables packages and resolves dependencies. The bridge asks VaM to
 rescan packages, publishes bounded atom and Person rosters, and can load an
 allowlisted scene or SubScene, apply one allowlisted Person or generic atom
-preset, add one allowlisted native atom, or select one existing atom on VaM's
-Unity main thread.
+preset, safely load one Custom Unity Asset, add one allowlisted native atom,
+or select one existing atom on VaM's Unity main thread.
 
 ## Install
 
@@ -189,13 +189,80 @@ identity and fixed VaM API surface, but cannot inspect or approve the semantic
 contents of a `.vap` or SubScene `.json`. The external client must surface that
 risk and require confirmation for unknown or untrusted content.
 
+A Custom Unity Asset load uses only a fixed `CustomUnityAsset` target and
+VaM's native `asset` storable:
+
+```json
+{
+  "protocol": 2,
+  "requestId": "unique-7",
+  "command": "loadCustomUnityAsset",
+  "targetUid": "Apartment asset",
+  "resourceRef": "creator.rooms.2:/Custom/Assets/Apartment.assetbundle",
+  "rescan": true,
+  "createIfMissing": true
+}
+```
+
+Only local or packaged `.assetbundle` and legacy `.scene` members below
+`Custom/Assets/` are accepted. Target mode is strict: with
+`createIfMissing: false`, the exact `CustomUnityAsset` must exist; with
+`createIfMissing: true`, the UID must be absent at execution.
+
+The request intentionally has no DLL, asset-name, light-map, probe, or canvas
+options. The bridge resolves and normalizes the catalog-selected bundle, sets
+the loader's `assetName` to its `None` sentinel, then sets and verifies
+`loadDll: false` immediately before assigning `assetUrl`. It checks the flag
+throughout the bounded load and makes a best-effort clear if the flag becomes
+true. VaM samples `loadDll` during the URL callback, so setting it false later
+would be too late. A DLL that has already executed in VaM's process cannot be
+unloaded; the bridge can prevent a new bridge-initiated DLL load, not undo an
+earlier VaM or plugin load.
+
+After the bundle is ready, the bridge excludes blank and `None` entries. If
+there is exactly one eligible scene or prefab, it selects it and waits for
+VaM's native `isAssetLoaded` completion flag. If there are several, it leaves
+the loader at `None`, completes successfully, and publishes a bounded picker
+in `scene.json`. It does not assume VaM's first scene-first bundle entry is the
+user's intended asset.
+
+A picker selection is a separate command:
+
+```json
+{
+  "protocol": 2,
+  "requestId": "unique-8",
+  "command": "selectCustomUnityAssetChoice",
+  "targetUid": "Apartment asset",
+  "choiceIndex": 7,
+  "choiceToken": "0123456789abcdef0123456789abcdef"
+}
+```
+
+The index is VaM's original chooser index, not the row's position in the
+published subset. The 32-hex token binds the exact atom and loader instances,
+the current raw bundle URL and choice generation, and the exact subset that
+was published. It rotates when any of those change, but not merely when the
+selected index changes. The bridge rechecks the live generation, requires
+that the original index was actually published, derives the raw choice from
+VaM rather than accepting a path or name from the client, requires
+`loadDll: false`, and waits for `isAssetLoaded`. Stale tokens fail without
+selecting anything.
+
+Each CUA roster entry reports the actual `loadDll` flag, native ready state,
+eligible `choiceCount`, original `selectedIndex`, token, and sanitized
+`{index,label}` choices. Labels are limited to 256 characters. Publication is
+limited to 128 choices per CUA atom and 512 across the roster; the total count
+and `choicesTruncated` reveal omitted choices. The raw `assetUrl` is never
+published.
+
 Scene loading accepts only a local or packaged member below `Saves/scene/`
 whose name ends in `.json`:
 
 ```json
 {
   "protocol": 2,
-  "requestId": "unique-7",
+  "requestId": "unique-9",
   "command": "loadScene",
   "resourceRef": "creator.scenes.1:/Saves/scene/Example.json",
   "rescan": true,
@@ -216,7 +283,7 @@ The bridge writes `status.json`:
 ```json
 {
   "protocol": 2,
-  "bridgeVersion": "0.4.0",
+  "bridgeVersion": "0.5.0",
   "instanceId": "id-created-when-the-plugin-started",
   "requestId": "a-new-unique-id",
   "lastCompletedRequestId": "a-new-unique-id",
@@ -233,6 +300,8 @@ The bridge writes `status.json`:
     "atom-add",
     "atom-preset-apply",
     "subscene-load",
+    "custom-unity-asset-load",
+    "custom-unity-asset-choice",
     "scene-load",
     "person-roster",
     "person-preset-apply",
@@ -275,14 +344,32 @@ The bridge refreshes `scene.json` once per second:
 ```json
 {
   "protocol": 2,
-  "bridgeVersion": "0.4.0",
+  "bridgeVersion": "0.5.0",
   "instanceId": "id-created-when-the-plugin-started",
   "updatedAtUtc": "2026-07-28T12:00:02.0000000Z",
   "loading": false,
   "selectedUid": "Person",
   "atoms": [
     {"uid": "Person", "type": "Person", "selected": true},
-    {"uid": "InvisibleLight#1", "type": "InvisibleLight", "selected": false}
+    {"uid": "InvisibleLight#1", "type": "InvisibleLight", "selected": false},
+    {
+      "uid": "Apartment asset",
+      "type": "CustomUnityAsset",
+      "selected": false,
+      "cua": {
+        "loadDll": false,
+        "ready": false,
+        "isAssetLoaded": false,
+        "choiceToken": "0123456789abcdef0123456789abcdef",
+        "choiceCount": 2,
+        "selectedIndex": 0,
+        "choices": [
+          {"index": 1, "label": "assets/room.prefab"},
+          {"index": 7, "label": "assets/props/chair.prefab"}
+        ],
+        "choicesTruncated": false
+      }
+    }
   ],
   "persons": [
     {"uid": "Person", "selected": true},
@@ -294,6 +381,8 @@ The bridge refreshes `scene.json` once per second:
     "atom-add",
     "atom-preset-apply",
     "subscene-load",
+    "custom-unity-asset-load",
+    "custom-unity-asset-choice",
     "scene-load",
     "person-roster",
     "person-preset-apply",
@@ -330,10 +419,16 @@ not establish support for every preset kind.
   requests, arbitrary storable IDs, or arbitrary action names. Resource inputs
   are tightly constrained VaM `.vap` references in mapped Person preset
   directories or `Custom/Atom/<allowlisted-type>/`, and `.json` references
-  below `Custom/SubScene/` or `Saves/scene/`.
+  below `Custom/SubScene/` or `Saves/scene/`. CUA inputs are only
+  `.assetbundle` or `.scene` references below `Custom/Assets/`.
 - The generic atom and SubScene resource containers can include plugin
   configurations. Path/type validation does not establish that their semantic
   contents are trusted or side-effect free.
+- CUA loading is a critical operation even with DLL loading forced off. Unity
+  content can instantiate components already available in VaM and can expose
+  canvases or other active objects. The external client must require explicit
+  confirmation for untrusted bundles. Never represent `loadDll: false` as a
+  guarantee that the bundle is inert.
 - Rescans are synchronous and may briefly freeze VaM. Requests are deferred
   while a scene is loading and rate-limited to one every five seconds.
 - `loadScene` is intentionally a separate high-impact capability. Replacing a

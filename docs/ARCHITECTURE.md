@@ -513,9 +513,12 @@ pins, leases, reconciliation, deactivation, settings, VaM launch, atom
 selection/creation, Person add/select, and catalogue-backed resource
 application at `/api/vam/resource/apply`. The generic apply route dispatches
 the eleven allowlisted Person preset types, Scene replace/merge, typed native
-atom presets, and SubScenes. `/api/vam/atom/add` creates only the native type
-derived from a server-owned live category. Unsupported atom types and the
-remaining workspace categories stay browse-only. The older
+atom presets, SubScenes, and Custom Unity Asset bundles.
+`/api/vam/custom-unity-asset/choice` selects only a bridge-published member of
+the bundle currently assigned to a live `CustomUnityAsset` atom.
+`/api/vam/atom/add` creates only the native type derived from a server-owned
+live category. Unsupported atom types and the remaining workspace categories
+stay browse-only. The older
 `/api/vam/person/apply` remains as a narrower compatibility route. The HTTP
 layer only validates and translates requests; it delegates behavior to
 `ManagerService`.
@@ -630,6 +633,25 @@ Typed atom presets and SubScenes use the same resource-ID-derived contract:
 `createIfMissing` fields, fixes the target type to `SubScene`, and does not
 offer merge mode.
 
+Custom Unity Assets also use a server-derived resource reference:
+
+```json
+{
+  "protocol": 2,
+  "requestId": "105dc0af6f2a4d0db3843c95fb93dcf4",
+  "command": "loadCustomUnityAsset",
+  "createdAtUtc": "2026-07-28T12:03:00+00:00",
+  "targetUid": "Environment",
+  "resourceRef": "Creator.Bundle.1:/Custom/Assets/Room.assetbundle",
+  "rescan": true,
+  "createIfMissing": true
+}
+```
+
+Legacy `.scene` Unity bundles below `Custom/Assets/` use the same command. The
+bridge fixes the target type to `CustomUnityAsset`; the caller cannot supply an
+atom type or loader storable.
+
 The generic resource web API accepts only a numeric catalogue resource ID plus
 typed options and, for targeted resources, a target UID. Standalone native
 atom creation accepts a server-owned category ID and caller-chosen UID rather
@@ -637,6 +659,10 @@ than an atom type. `ManagerService` derives the allowlisted type and resolves
 the resource ID to an installed archive member or safe loose file, creates the
 exact dependency lease, enables it, and derives `resourceRef`; the browser
 cannot provide a reference, type, storable, or action.
+
+Bundle-member selection is deliberately separate. The web endpoint accepts
+only a target UID, an integer choice index, and the opaque token from the
+latest live scene snapshot. It cannot submit a bundle URL or member name.
 
 Create mode is a strict execution-time precondition, not permission to reuse a
 target: both the service snapshot and bridge reject the request if its UID is
@@ -646,16 +672,18 @@ in-process gate.
 
 Non-merge Scene loading additionally requires `confirm_replace: true` at the
 API boundary. Critical General and Person Plugin presets, native atom presets,
-and SubScenes require `confirm_critical: true`.
+SubScenes, and Custom Unity Assets require `confirm_critical: true`.
 
 Both Python and C# require Person presets to be `.vap` files named `Preset_*`
 below the preset kind's static `Custom/Atom/Person/.../` prefix. Native atom
 presets must be `Preset_*.vap` below the matching
 `Custom/Atom/<AllowlistedType>/` prefix. SubScenes must be `.json` below
-`Custom/SubScene/`; Scene references must be `.json` below `Saves/scene/`.
-Both layers reject traversal, absolute/URI/control-character forms,
-backslashes, malformed package identities, and mismatched prefixes. The
-plugin confirms every file through `FileManagerSecure`.
+`Custom/SubScene/`; Custom Unity Assets must be `.assetbundle` or legacy
+`.scene` files below `Custom/Assets/`; Scene references must be `.json` below
+`Saves/scene/`. Both layers reject traversal,
+absolute/URI/control-character forms, backslashes, malformed package
+identities, and mismatched prefixes. The plugin confirms every file through
+`FileManagerSecure`.
 
 The session plugin:
 
@@ -674,6 +702,14 @@ The session plugin:
   only its fixed `Preset` storable;
 - targets `SubScene` or creates it only while its UID remains unused, then sets
   only the fixed `SubScene.browsePath` URL;
+- targets `CustomUnityAsset` or creates it only while its UID remains unused,
+  uses only its fixed `asset` loader, forces `loadDll` off immediately before
+  assigning the validated bundle URL, and verifies that safety setting and URL;
+- auto-selects a bundle member only when exactly one eligible member exists;
+  otherwise it leaves `None` selected and publishes a bounded, token-bound
+  member list for the external picker;
+- accepts a later member choice only when its opaque token and published index
+  still match the same atom and current bundle generation;
 - loads Scenes only through `SuperController.Load` or `LoadMerge`;
 - lists/selects atoms and idempotently creates allowlisted atoms with a
   caller-chosen UID;
@@ -712,9 +748,16 @@ repeatedly within one session.
 
 The plugin also rewrites `scene.json` once per second with its instance ID,
 loading state, selected atom UID, bounded all-atom roster, compatibility
-Person roster, and capabilities. The manager requires a recent heartbeat
-whose instance matches `status.json`; stale files from a previous VaM process
-do not enable live controls.
+Person roster, and capabilities. Each `CustomUnityAsset` row may contain a
+bounded nested chooser snapshot with `loadDll`, readiness, selected index,
+sanitized labels, and an opaque generation token. It does not expose the
+bundle URL. Choice publication is capped per atom and globally. The manager
+requires a recent heartbeat whose instance matches `status.json`; stale files
+from a previous VaM process do not enable live controls.
+
+Forcing `loadDll` off prevents this workflow from loading a sibling DLL. It
+cannot unload code that VaM or another plugin already loaded earlier in the
+session.
 
 The manager publishes a request but does not block until `ok`; callers that
 need confirmation must poll status and match `requestId` themselves.

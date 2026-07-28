@@ -696,7 +696,7 @@ class ManagerServiceTests(unittest.TestCase):
         self.assertEqual(len(installed), 2)
         self.assertTrue(all(path.is_file() for path in installed))
         source = installed[0].read_text(encoding="utf-8")
-        self.assertIn('BridgeVersion = "0.4.0"', source)
+        self.assertIn('BridgeVersion = "0.5.0"', source)
         self.assertNotRegex(source, r"(?m)^\s*Type(?:\s|\.)")
         self.assertNotIn("new Type[]", source)
         self.assertNotIn("System.Reflection", source)

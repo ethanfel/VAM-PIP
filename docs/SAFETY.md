@@ -148,7 +148,8 @@ own status and scene-snapshot mailbox files. Protocol 2 accepts core package
 rescans and a small registry of bounded live operations: list/select atoms,
 idempotently create allowlisted native atoms, add/select a Person, apply
 matching native atom or Person presets, load a SubScene into a typed target,
-and replace or merge a Scene.
+load a Custom Unity Asset through its fixed loader, choose a published bundle
+member, and replace or merge a Scene.
 
 The Linux manager completes archive renames and its inventory update before
 publishing `request.json`. The generic resource HTTP endpoint accepts only a
@@ -158,23 +159,37 @@ caller-chosen UID. The manager derives the allowlisted atom type and resolves
 the exact installed archive member or safe loose file; clients cannot provide
 a path, atom type, storable ID, or action name.
 
+The Custom Unity Asset choice endpoint accepts only a target UID, integer
+choice index, and opaque token from the current bounded scene snapshot. It
+cannot provide a bundle URL or member name.
+
 Scene replacement requires a strict `confirm_replace: true` value at the
 service boundary. General and Person Plugin presets, non-Person atom presets,
-and SubScenes require a separate strict `confirm_critical: true` value because
-the selected content can include executable plugin state.
+SubScenes, and Custom Unity Assets require a separate strict
+`confirm_critical: true` value because the selected content can include active
+or executable state.
 
 The Python writer and C# reader both allow Person `.vap` files named
 `Preset_*` only below a static kind-specific `Custom/Atom/Person/.../`
 directory. Non-Person atom presets must be `Preset_*.vap` below the matching
 `Custom/Atom/<AllowlistedType>/` directory. SubScenes must be `.json` below
-`Custom/SubScene/`, and Scenes must be `.json` below `Saves/scene/`. They
-reject absolute paths, URIs, traversal, backslashes, control characters,
-mismatched prefixes, and malformed package references.
+`Custom/SubScene/`, Custom Unity Assets must be `.assetbundle` or legacy
+`.scene` files below `Custom/Assets/`, and Scenes must be `.json` below
+`Saves/scene/`. They reject absolute paths, URIs, traversal, backslashes,
+control characters, mismatched prefixes, and malformed package references.
 
 The plugin also requires `FileManagerSecure.FileExists`, revalidates live atom
-types, and invokes only the fixed `Preset` or `SubScene` storables, the static
-Person-preset registry, or `SuperController.Load`/`LoadMerge`. It contains no
-arbitrary storable/action surface.
+types, and invokes only the fixed `Preset`, `SubScene`, or
+`CustomUnityAsset.asset` storables, the static Person-preset registry, or
+`SuperController.Load`/`LoadMerge`. It contains no arbitrary storable/action
+surface. Custom Unity Asset loading forces and verifies `loadDll = false`
+immediately before the validated URL is assigned. A member selection must
+match a fresh opaque generation token and an index that the bridge actually
+published; the client never supplies the member label.
+
+This DLL control prevents the VAM-PIP load operation from loading the bundle's
+sibling DLL. It cannot unload assemblies that VaM or another plugin already
+loaded earlier in the process.
 
 Create-new is checked twice. The manager requires the UID to be absent from a
 fresh scene roster, and the bridge refuses the load if the UID is occupied by
@@ -200,6 +215,7 @@ the web UI enables a live action.
 | Create native atom | Unavailable | Allowed only for a shared static atom-type allowlist |
 | Apply native atom preset | Unavailable; browse only | Enabled closure, critical confirmation, then typed replace/merge |
 | Load SubScene | Unavailable; browse only | Enabled closure, critical confirmation, then load into an existing/new `SubScene` atom |
+| Load Custom Unity Asset | Unavailable; browse only | Enabled closure, critical confirmation, forced DLL-off load into an existing/new `CustomUnityAsset` atom, then tokenized member choice when needed |
 | Load or merge Scene | Unavailable; browse only | Enabled closure, rescan, then confirmed load/merge |
 | Add/select Person or select atom | Unavailable | Allowed through an idempotent/bounded command |
 | Apply managed-mode deactivation | Allowed | Refused |
@@ -397,10 +413,10 @@ can freeze VaM briefly.
 | Partial multi-file switch | Prewritten canonical plan, batched `fsync`ed append-only progress, filesystem identity inspection, preflighted rollback, best-effort automatic reverse rollback | SIGKILL can leave a rename ahead of a progress batch; archive directories are not `fsync`ed, and no transaction spans every rename |
 | SQLite/filesystem split state | Baseline and mode updates are deliberately ordered around switches | No transaction spans SQLite and archive renames; a crash requires checking both |
 | Live package removal | Running VaM gets enable-only plans | A false-negative process probe can make an unsafe disable possible |
-| Bridge abuse | Allowlisted commands and native atom types, server-side catalogue resolution, process-shared mailbox locking, duplicate/single-flight handling, strict create-new preconditions, dual kind/path validation, fixed preset/SubScene/Scene actions, fresh atom-roster heartbeat, loading deferral, five-second rescan rate limit | A same-user process with token or mailbox access can still request a valid atom, preset, SubScene, or Scene change or periodic rescan; a VaM plugin already has comparable scene authority |
+| Bridge abuse | Allowlisted commands and native atom types, server-side catalogue resolution, process-shared mailbox locking, duplicate/single-flight handling, strict create-new preconditions, dual kind/path validation, fixed preset/SubScene/CustomUnityAsset/Scene actions, forced DLL-off bundle assignment, token-bound published member indices, fresh atom-roster heartbeat, loading deferral, five-second rescan rate limit | A same-user process with token or mailbox access can still request a valid atom, preset, SubScene, Custom Unity Asset, or Scene change or periodic rescan; a VaM plugin already has comparable scene authority |
 | BrowserAssist volatility | Pre-read 64 MiB size check, before/after fingerprint snapshot, schema validation, savepoint, preservation of exact installed hidden-package rows | A concurrently growing file is read before rejection and can exceed 64 MiB in memory; metadata for hidden resources remains last-good until BrowserAssist sees them again |
 | Malformed session defaults | Fixed preset path, 16 MiB read bound, strict JSON/slot/reference validation, complete package resolution before activation | The preset expresses availability intent only; VaM remains responsible for executing the selected plugins |
-| Malicious package payload | No archive extraction; targeted bounded thumbnail/reference reads | VaM itself executes plugins; VAM-PIP does not establish package trust |
+| Malicious package payload | No archive extraction; targeted bounded thumbnail/reference reads; VAM-PIP Custom Unity Asset loads force the native loader's sibling-DLL option off | VaM still consumes bundle and preset content and executes plugins loaded through other paths; already-loaded assemblies cannot be unloaded, and VAM-PIP does not establish package trust |
 | Launch command injection | Script must be executable below VaM root and is passed without a shell | A malicious configured script file still executes with the user's authority |
 
 ## Web token handling

@@ -6,8 +6,8 @@
     <meta name="color-scheme" content="dark">
     <meta name="theme-color" content="#111316">
     <title>VAM-PIP Manager</title>
-    <link rel="stylesheet" href="/styles.css?v=0.5.0">
-    <script src="/app.js?v=0.5.0" defer></script>
+    <link rel="stylesheet" href="/styles.css?v=0.6.0">
+    <script src="/app.js?v=0.6.0" defer></script>
   </head>
   <body>
     <a class="skip-link" href="#main-content">Skip to library</a>
@@ -340,6 +340,40 @@
                   Add atom now
                 </button>
               </div>
+
+              <section
+                class="cua-choice-panel"
+                id="cua-choice-panel"
+                aria-labelledby="cua-choice-title"
+                hidden
+              >
+                <div class="cua-choice-heading">
+                  <div>
+                    <p class="eyebrow">Contained asset</p>
+                    <strong id="cua-choice-title">No Unity bundle loaded</strong>
+                    <p id="cua-choice-detail">
+                      Load a bundle below to inspect its scenes and prefabs.
+                    </p>
+                  </div>
+                  <span class="cua-dll-state" id="cua-dll-state">DLL state unavailable</span>
+                </div>
+                <div class="person-target-controls">
+                  <label class="person-target-field" for="cua-choice-select">
+                    <span>Scene or prefab</span>
+                    <select id="cua-choice-select" aria-describedby="cua-choice-detail" disabled>
+                      <option value="">No contained choices available</option>
+                    </select>
+                  </label>
+                  <button
+                    class="secondary-button"
+                    id="cua-choice-button"
+                    type="button"
+                    disabled
+                  >
+                    Load selected item
+                  </button>
+                </div>
+              </section>
 
               <div class="person-live-state" id="atom-live-state" role="status" aria-live="polite">
                 <span class="status-dot" aria-hidden="true"></span>

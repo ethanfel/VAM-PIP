@@ -23,6 +23,8 @@ from vampip.bridge import (
     request_add_atom,
     request_add_person,
     request_atom_preset,
+    request_custom_unity_asset_choice,
+    request_custom_unity_asset_load,
     request_person_preset,
     request_rescan,
     request_scene_load,
@@ -235,10 +237,15 @@ _OTHER_WORKSPACE_CATEGORIES: tuple[dict[str, object], ...] = (
         "operation": "load-custom-unity-asset",
         "required_capability": "custom-unity-asset-load",
         "risk": "critical",
-        "risk_reason": "Unity assets may contain executable plugin assemblies.",
+        "risk_reason": (
+            "DLL loading is forced off, but already-running code is not unloaded."
+        ),
         "browseable": True,
-        "live_action": False,
+        "live_action": "CustomUnityAsset" in ATOM_TYPE_ALLOWLIST,
         "merge_supported": False,
+        "target_atom_type": "CustomUnityAsset",
+        "create_supported": "CustomUnityAsset" in ATOM_TYPE_ALLOWLIST,
+        "create_capability": "atom-add",
     },
     {
         "id": "plugins",
@@ -942,7 +949,7 @@ class ManagerService:
         location: object,
         *,
         required_prefix: str,
-        extension: str,
+        extension: str | tuple[str, ...],
         require_preset_basename: bool,
     ) -> str:
         resource_path = str(getattr(location, "resource_path", "")).replace("\\", "/")
@@ -970,8 +977,16 @@ class ManagerService:
                 f"the selected catalog resource is outside {required_prefix}"
             )
         filename = parts[-1]
-        if not filename.casefold().endswith(extension.casefold()):
-            raise ValueError(f"the selected catalog resource is not a {extension} file")
+        extensions = (extension,) if isinstance(extension, str) else extension
+        if not extensions or any(
+            not isinstance(value, str) or not value for value in extensions
+        ):
+            raise ValueError("catalog resource extension policy is invalid")
+        if not any(
+            filename.casefold().endswith(value.casefold()) for value in extensions
+        ):
+            expected = " or ".join(extensions)
+            raise ValueError(f"the selected catalog resource is not a {expected} file")
         if require_preset_basename and not filename.casefold().startswith("preset_"):
             raise ValueError("the selected preset basename must begin with Preset_")
 
@@ -1259,6 +1274,10 @@ class ManagerService:
             target_kind = "subscene"
             operation = "load-subscene"
             category_id = "subscenes"
+        elif resource_type == "Custom Unity Assets":
+            target_kind = "custom-unity-asset"
+            operation = "load-custom-unity-asset"
+            category_id = "custom-unity-assets"
         elif resource_type.casefold() == "scene":
             target_kind = "none"
             operation = "load-scene"
@@ -1414,6 +1433,80 @@ class ManagerService:
                 "lease": lease,
             }
 
+        if target_kind == "custom-unity-asset":
+            target_atom_type = "CustomUnityAsset"
+            if atom_type not in {"", target_atom_type}:
+                raise ValueError(
+                    "the selected Custom Unity Asset catalog resource has an "
+                    "invalid atom type"
+                )
+            if merge:
+                raise ValueError(
+                    "merge is not supported when loading a Custom Unity Asset"
+                )
+            if not confirm_critical:
+                raise ValueError(
+                    "confirm_critical must be true before loading a "
+                    "Custom Unity Asset"
+                )
+            scene = self._require_live_capability(
+                "custom-unity-asset-load",
+                action_label="a Custom Unity Asset can be loaded",
+            )
+            uid, target_exists = self._validate_live_atom_target(
+                scene,
+                target_uid,
+                expected_atom_type=target_atom_type,
+                create_if_missing=create_if_missing,
+            )
+            if target_exists and not confirm_replace:
+                raise ValueError(
+                    "confirm_replace must be true when replacing an existing "
+                    "Custom Unity Asset"
+                )
+            resource_ref = self._catalog_resource_reference(
+                location,
+                required_prefix="Custom/Assets/",
+                extension=(".assetbundle", ".scene"),
+                require_preset_basename=False,
+            )
+            lease = self.lease_resource(
+                resource_id,
+                days=float(days),
+                label=f"Custom Unity Asset: {label}",
+                apply=location.packaged,
+                bridge_rescan=False,
+            )
+            rescan = self._lease_requires_bridge_rescan(
+                lease,
+                packaged=location.packaged,
+            )
+            request_id, bridge_message = self._try_queue_bridge_request(
+                lambda: request_custom_unity_asset_load(
+                    self.vam_root,
+                    target_uid=uid,
+                    resource_ref=resource_ref,
+                    rescan=rescan,
+                    create_if_missing=create_if_missing,
+                )
+            )
+            return {
+                "resource_id": resource_id,
+                "category": category_id,
+                "operation": operation,
+                "target_uid": uid,
+                "target_atom_type": target_atom_type,
+                "target_existed": target_exists,
+                "create_if_missing": create_if_missing,
+                "resource_ref": resource_ref,
+                "merge": False,
+                "rescan": rescan,
+                "bridge_request": request_id,
+                "bridge_busy": bridge_message is not None,
+                "bridge_message": bridge_message,
+                "lease": lease,
+            }
+
         if target_kind == "subscene":
             if "SubScene" not in ATOM_TYPE_ALLOWLIST:
                 raise ValueError(
@@ -1538,6 +1631,100 @@ class ManagerService:
             "lease": lease,
         }
 
+    def select_custom_unity_asset_choice(
+        self,
+        target_uid: str,
+        choice_index: int,
+        choice_token: str,
+    ) -> dict[str, object]:
+        """Select one bridge-published asset from a loaded CUA bundle."""
+
+        uid = self._validate_target_uid(target_uid)
+        if (
+            isinstance(choice_index, bool)
+            or not isinstance(choice_index, int)
+            or choice_index < 1
+        ):
+            raise ValueError("choice_index must be a positive integer")
+        if not isinstance(choice_token, str):
+            raise TypeError("choice_token must be a string")
+        if re.fullmatch(r"[0-9a-fA-F]{32}", choice_token) is None:
+            raise ValueError("choice_token must be exactly 32 hexadecimal characters")
+
+        with self._bridge_mailbox_lock:
+            self._ensure_bridge_mailbox_idle()
+            scene = self._require_live_capability(
+                "custom-unity-asset-choice",
+                action_label="a Custom Unity Asset choice can be selected",
+            )
+            atom = next(
+                (
+                    value
+                    for value in scene.get("atoms", [])
+                    if isinstance(value, dict)
+                    and str(value.get("uid") or "") == uid
+                ),
+                None,
+            )
+            if atom is None:
+                raise ValueError(f"Atom is no longer available: {uid}")
+            actual_type = str(atom.get("type") or "")
+            if actual_type != "CustomUnityAsset":
+                raise ValueError(
+                    f"Atom {uid} has type {actual_type or '<unknown>'}; "
+                    "expected CustomUnityAsset"
+                )
+            cua = atom.get("cua")
+            if not isinstance(cua, dict):
+                raise ValueError(
+                    "the Custom Unity Asset atom has no current bundle choices"
+                )
+            if cua.get("loadDll") is not False:
+                raise ValueError(
+                    "asset choices are unavailable unless DLL loading is off"
+                )
+            live_token = cua.get("choiceToken")
+            if (
+                not isinstance(live_token, str)
+                or re.fullmatch(r"[0-9a-fA-F]{32}", live_token) is None
+                or live_token != choice_token
+            ):
+                raise ValueError(
+                    "the Custom Unity Asset choice token is stale or invalid"
+                )
+            choices = cua.get("choices")
+            choice_exists = bool(
+                isinstance(choices, list)
+                and any(
+                    isinstance(choice, dict)
+                    and type(choice.get("index")) is int
+                    and choice["index"] == choice_index
+                    for choice in choices
+                )
+            )
+            if not choice_exists:
+                raise ValueError(
+                    "choice_index is not present in the current bundle choices"
+                )
+            request_id, bridge_message = self._try_queue_bridge_request(
+                lambda: request_custom_unity_asset_choice(
+                    self.vam_root,
+                    target_uid=uid,
+                    choice_index=choice_index,
+                    choice_token=choice_token,
+                )
+            )
+            return {
+                "operation": "select-custom-unity-asset-choice",
+                "target_uid": uid,
+                "target_atom_type": "CustomUnityAsset",
+                "choice_index": choice_index,
+                "choice_token": choice_token,
+                "bridge_request": request_id,
+                "bridge_busy": bridge_message is not None,
+                "bridge_message": bridge_message,
+            }
+
     def add_person(self, target_uid: str) -> dict[str, object]:
         """Idempotently add a Person atom through the bridge."""
 
@@ -1585,6 +1772,7 @@ class ManagerService:
         operation = str(category.get("operation") or "")
         if not bool(category.get("live_action")) or operation not in {
             "apply-atom-preset",
+            "load-custom-unity-asset",
             "load-subscene",
         }:
             raise ValueError(
@@ -1596,9 +1784,18 @@ class ManagerService:
                 raise ValueError(
                     f"workspace category {category['id']} has an unsupported atom type"
                 )
-        elif atom_type != "SubScene" or atom_type not in ATOM_TYPE_ALLOWLIST:
+        elif operation == "load-subscene":
+            if atom_type != "SubScene" or atom_type not in ATOM_TYPE_ALLOWLIST:
+                raise ValueError(
+                    "the SubScene category has an invalid or unsupported atom type"
+                )
+        elif (
+            atom_type != "CustomUnityAsset"
+            or atom_type not in ATOM_TYPE_ALLOWLIST
+        ):
             raise ValueError(
-                "the SubScene category has an invalid or unsupported atom type"
+                "the Custom Unity Asset category has an invalid or unsupported "
+                "atom type"
             )
 
         uid = self._validate_target_uid(target_uid)

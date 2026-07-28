@@ -481,6 +481,43 @@ class ManagerRequestHandler(BaseHTTPRequestHandler):
                     ),
                 )
                 return
+            if (
+                method == "POST"
+                and parsed.path == "/api/vam/custom-unity-asset/choice"
+            ):
+                allowed_fields = {
+                    "target_uid",
+                    "choice_index",
+                    "choice_token",
+                }
+                unexpected_fields = sorted(set(document) - allowed_fields)
+                if unexpected_fields:
+                    raise ValueError(
+                        "unsupported Custom Unity Asset choice field(s): "
+                        + ", ".join(unexpected_fields)
+                    )
+                target_uid = document.get("target_uid")
+                choice_index = document.get("choice_index")
+                choice_token = document.get("choice_token")
+                if not isinstance(target_uid, str):
+                    raise ValueError("target_uid must be a string")
+                if (
+                    isinstance(choice_index, bool)
+                    or not isinstance(choice_index, int)
+                    or choice_index < 1
+                ):
+                    raise ValueError("choice_index must be a positive integer")
+                if not isinstance(choice_token, str):
+                    raise ValueError("choice_token must be a string")
+                self._json(
+                    HTTPStatus.OK,
+                    service.select_custom_unity_asset_choice(
+                        target_uid,
+                        choice_index,
+                        choice_token,
+                    ),
+                )
+                return
             if method == "POST" and parsed.path == "/api/vam/person/apply":
                 resource_id = document.get("resource_id")
                 target_uid = document.get("target_uid")
