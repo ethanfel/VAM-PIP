@@ -14,7 +14,7 @@ import webbrowser
 
 from vampip.database import connect
 from vampip.manager_state import get_or_create_api_token
-from vampip.service import ManagerService
+from vampip.service import LiveActionBusyError, ManagerService
 
 
 MAX_REQUEST_BYTES = 1024 * 1024
@@ -216,6 +216,21 @@ class ManagerRequestHandler(BaseHTTPRequestHandler):
                     self.server.service.session_plugins(),
                 )
                 return
+            if parsed.path == "/api/vam/scene":
+                self._json(HTTPStatus.OK, self.server.service.scene())
+                return
+            if parsed.path == "/api/vam/persons":
+                self._json(HTTPStatus.OK, self.server.service.persons())
+                return
+            if parsed.path in {
+                "/api/workspace/categories",
+                "/api/person/categories",
+            }:
+                self._json(
+                    HTTPStatus.OK,
+                    self.server.service.workspace_categories(),
+                )
+                return
             if parsed.path == "/api/packages":
                 self._json(
                     HTTPStatus.OK,
@@ -230,7 +245,8 @@ class ManagerRequestHandler(BaseHTTPRequestHandler):
             if parsed.path == "/api/resources":
                 result = self.server.service.search_resources(
                     query=query.get("q", [""])[0],
-                    resource_type=query.get("type", [""])[0],
+                    resource_types=query.get("type", []),
+                    category=query.get("category", [""])[0],
                     state=query.get("state", ["all"])[0],
                     favorite=_bool_query(query, "favorite"),
                     limit=int(query.get("limit", ["100"])[0]),
@@ -267,6 +283,8 @@ class ManagerRequestHandler(BaseHTTPRequestHandler):
         except FileNotFoundError as exc:
             self._error(HTTPStatus.NOT_FOUND, str(exc))
         except FileExistsError as exc:
+            self._error(HTTPStatus.CONFLICT, str(exc))
+        except LiveActionBusyError as exc:
             self._error(HTTPStatus.CONFLICT, str(exc))
         except Exception as exc:
             self.log_error("GET failed: %s", exc)
@@ -305,10 +323,7 @@ class ManagerRequestHandler(BaseHTTPRequestHandler):
             if method == "POST" and parsed.path == "/api/catalog/import":
                 self._json(HTTPStatus.OK, service.import_catalog())
                 return
-            if (
-                method == "POST"
-                and parsed.path == "/api/session-plugins/import"
-            ):
+            if method == "POST" and parsed.path == "/api/session-plugins/import":
                 include_disabled = document.get("include_disabled", False)
                 apply = document.get("apply", False)
                 if not isinstance(include_disabled, bool):
@@ -427,12 +442,98 @@ class ManagerRequestHandler(BaseHTTPRequestHandler):
                     service.launch_vam(reconcile=bool(document.get("reconcile", True))),
                 )
                 return
+            if method == "POST" and parsed.path == "/api/vam/resource/apply":
+                resource_id = document.get("resource_id")
+                target_uid = document.get("target_uid")
+                if (
+                    isinstance(resource_id, bool)
+                    or not isinstance(resource_id, int)
+                    or resource_id < 1
+                ):
+                    raise ValueError("resource_id must be a positive integer")
+                if target_uid is not None and not isinstance(target_uid, str):
+                    raise ValueError("target_uid must be a string or null")
+                days = document.get("days", 3)
+                if isinstance(days, bool) or not isinstance(days, (int, float)):
+                    raise ValueError("days must be a number")
+                merge = document.get("merge", False)
+                if not isinstance(merge, bool):
+                    raise ValueError("merge must be a boolean")
+                confirm_replace = document.get("confirm_replace", False)
+                if not isinstance(confirm_replace, bool):
+                    raise ValueError("confirm_replace must be a boolean")
+                confirm_critical = document.get("confirm_critical", False)
+                if not isinstance(confirm_critical, bool):
+                    raise ValueError("confirm_critical must be a boolean")
+                self._json(
+                    HTTPStatus.OK,
+                    service.apply_resource(
+                        resource_id,
+                        target_uid=target_uid,
+                        days=float(days),
+                        merge=merge,
+                        confirm_replace=confirm_replace,
+                        confirm_critical=confirm_critical,
+                    ),
+                )
+                return
+            if method == "POST" and parsed.path == "/api/vam/person/apply":
+                resource_id = document.get("resource_id")
+                target_uid = document.get("target_uid")
+                if (
+                    isinstance(resource_id, bool)
+                    or not isinstance(resource_id, int)
+                    or resource_id < 1
+                ):
+                    raise ValueError("resource_id must be a positive integer")
+                if not isinstance(target_uid, str):
+                    raise ValueError("target_uid must be a string")
+                days = document.get("days", 3)
+                if isinstance(days, bool) or not isinstance(days, (int, float)):
+                    raise ValueError("days must be a number")
+                merge = document.get("merge", False)
+                if not isinstance(merge, bool):
+                    raise ValueError("merge must be a boolean")
+                confirm_critical = document.get("confirm_critical", False)
+                if not isinstance(confirm_critical, bool):
+                    raise ValueError("confirm_critical must be a boolean")
+                self._json(
+                    HTTPStatus.OK,
+                    service.apply_person_resource(
+                        resource_id,
+                        target_uid=target_uid,
+                        days=float(days),
+                        merge=merge,
+                        confirm_critical=confirm_critical,
+                    ),
+                )
+                return
+            if method == "POST" and parsed.path == "/api/vam/person/add":
+                target_uid = document.get("target_uid")
+                if not isinstance(target_uid, str):
+                    raise ValueError("target_uid must be a string")
+                self._json(HTTPStatus.OK, service.add_person(target_uid))
+                return
+            if method == "POST" and parsed.path == "/api/vam/person/select":
+                target_uid = document.get("target_uid")
+                if not isinstance(target_uid, str):
+                    raise ValueError("target_uid must be a string")
+                self._json(HTTPStatus.OK, service.select_person(target_uid))
+                return
+            if method == "POST" and parsed.path == "/api/vam/atom/select":
+                target_uid = document.get("target_uid")
+                if not isinstance(target_uid, str):
+                    raise ValueError("target_uid must be a string")
+                self._json(HTTPStatus.OK, service.select_atom(target_uid))
+                return
             self._error(HTTPStatus.NOT_FOUND, "API route not found")
         except (ValueError, TypeError) as exc:
             self._error(HTTPStatus.BAD_REQUEST, str(exc))
         except FileNotFoundError as exc:
             self._error(HTTPStatus.NOT_FOUND, str(exc))
         except FileExistsError as exc:
+            self._error(HTTPStatus.CONFLICT, str(exc))
+        except LiveActionBusyError as exc:
             self._error(HTTPStatus.CONFLICT, str(exc))
         except Exception as exc:
             self.log_error("%s failed: %s", method, exc)

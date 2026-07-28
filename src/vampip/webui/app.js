@@ -2,6 +2,328 @@
 
 const PAGE_SIZE = 60;
 const TOKEN_KEY = "vampip-token";
+const PERSON_BRIDGE_BUSY_STATES = new Set([
+  "queued",
+  "deferred-loading",
+  "rescanning",
+  "applying",
+  "adding",
+  "selecting",
+  "loading-scene",
+]);
+const ATOM_TARGET_KINDS = new Set([
+  "atom",
+  "subscene",
+  "custom-unity-asset",
+  "cua",
+  "plugin-target",
+]);
+const WORKSPACE_CATEGORY_FALLBACK = Object.freeze([
+  {
+    id: "scene",
+    label: "Scenes",
+    group: "Scenes",
+    resource_types: ["Scene"],
+    target_kind: "none",
+    operation: "load-scene",
+    required_capability: "scene-load",
+    risk: "critical",
+    browseable: true,
+    live_action: true,
+    merge_supported: true,
+    noun: "scene",
+    description:
+      "Complete VaM scenes. Replacing the current scene is destructive and always requires confirmation.",
+  },
+  {
+    id: "subscenes",
+    label: "SubScenes",
+    group: "Scenes",
+    resource_types: ["SubScenes"],
+    target_kind: "subscene",
+    operation: "load-subscene",
+    required_capability: "subscene-load",
+    risk: "high",
+    browseable: true,
+    live_action: false,
+    merge_supported: false,
+    noun: "subscene",
+    description:
+      "Reusable groups of atoms that can be brought into a running scene.",
+  },
+  {
+    id: "atom-presets",
+    label: "Atom presets",
+    group: "Atoms",
+    resource_types: ["Preset Atom"],
+    target_kind: "atom",
+    operation: "apply-atom-preset",
+    required_capability: "atom-preset-apply",
+    risk: "high",
+    browseable: true,
+    live_action: false,
+    merge_supported: true,
+    noun: "atom preset",
+    description:
+      "Presets for Empty, UI, camera, CUA, and other atom types. Compatibility depends on a live target atom.",
+  },
+  {
+    id: "custom-unity-assets",
+    label: "Unity assets",
+    group: "Atoms",
+    resource_types: ["Custom Unity Assets"],
+    target_kind: "custom-unity-asset",
+    operation: "load-custom-unity-asset",
+    required_capability: "custom-unity-asset-load",
+    risk: "critical",
+    browseable: true,
+    live_action: false,
+    merge_supported: false,
+    noun: "Unity asset",
+    description:
+      "Custom Unity Asset bundles. Loading needs a typed CUA target and explicit bridge support.",
+  },
+  {
+    id: "plugins",
+    label: "Plugins",
+    group: "Extensions",
+    resource_types: ["Plugins"],
+    target_kind: "plugin-target",
+    operation: "load-plugin",
+    required_capability: "plugin-apply",
+    risk: "critical",
+    browseable: true,
+    live_action: false,
+    merge_supported: true,
+    noun: "plugin",
+    description:
+      "VaM scripts and plugins. Browsing is safe; loading code needs dedicated trust and target rules.",
+  },
+  {
+    id: "preset-appearance",
+    label: "Looks",
+    group: "Person presets",
+    resource_types: ["Preset Appearance"],
+    target_kind: "person",
+    noun: "look preset",
+    description:
+      "Full appearance presets can change morphs, skin, hair, clothing, and scale together.",
+    operation: "apply-person-preset",
+    required_capability: "person-preset-appearance",
+    risk: "high",
+    browseable: true,
+    live_action: true,
+    merge_supported: true,
+  },
+  {
+    id: "preset-hair",
+    label: "Hair",
+    group: "Person presets",
+    resource_types: ["Preset Hair"],
+    target_kind: "person",
+    noun: "hair preset",
+    description:
+      "Hair presets select one or more styles and can include simulation and material settings.",
+    operation: "apply-person-preset",
+    required_capability: "person-preset-hair",
+    risk: "medium",
+    browseable: true,
+    live_action: true,
+    merge_supported: true,
+  },
+  {
+    id: "preset-skin",
+    label: "Skin",
+    group: "Person presets",
+    resource_types: ["Preset Skin"],
+    target_kind: "person",
+    noun: "skin preset",
+    description:
+      "Skin presets bundle Person skin textures and material settings.",
+    operation: "apply-person-preset",
+    required_capability: "person-preset-skin",
+    risk: "medium",
+    browseable: true,
+    live_action: true,
+    merge_supported: true,
+  },
+  {
+    id: "preset-morphs",
+    label: "Morphs",
+    group: "Person presets",
+    resource_types: ["Preset Morphs"],
+    target_kind: "person",
+    noun: "morph preset",
+    description:
+      "Morph presets store groups of body or expression values. Individual live sliders require a live schema.",
+    operation: "apply-person-preset",
+    required_capability: "person-preset-morphs",
+    risk: "high",
+    browseable: true,
+    live_action: true,
+    merge_supported: true,
+  },
+  {
+    id: "preset-clothing",
+    label: "Outfits",
+    group: "Clothing",
+    resource_types: ["Preset Clothing"],
+    target_kind: "person",
+    noun: "outfit preset",
+    description:
+      "Clothing presets load a saved outfit. They are different from individual clothing items.",
+    operation: "apply-person-preset",
+    required_capability: "person-preset-clothing",
+    risk: "high",
+    browseable: true,
+    live_action: true,
+    merge_supported: true,
+  },
+  {
+    id: "clothing-items-female",
+    label: "Female items",
+    group: "Clothing",
+    resource_types: ["Clothing (Female)"],
+    target_kind: "person",
+    noun: "clothing item",
+    description:
+      "Individual female clothing definitions. The catalogue can find them, but worn state comes from VaM.",
+    operation: "toggle-clothing-item",
+    required_capability: "person-clothing-item-toggle",
+    risk: "medium",
+    browseable: true,
+    live_action: false,
+    merge_supported: false,
+  },
+  {
+    id: "clothing-items-male",
+    label: "Male items",
+    group: "Clothing",
+    resource_types: ["Clothing (Male)"],
+    target_kind: "person",
+    noun: "clothing item",
+    description:
+      "Individual male clothing definitions. Target compatibility must be confirmed by the live Person.",
+    operation: "toggle-clothing-item",
+    required_capability: "person-clothing-item-toggle",
+    risk: "medium",
+    browseable: true,
+    live_action: false,
+    merge_supported: false,
+  },
+  {
+    id: "clothing-item-presets",
+    label: "Item styles",
+    group: "Clothing",
+    resource_types: ["Clothing Item Presets"],
+    target_kind: "person-clothing-item",
+    noun: "item style",
+    description:
+      "Material and physics presets for one specific clothing item, not complete outfits.",
+    operation: "load-clothing-item-preset",
+    required_capability: "person-clothing-item-preset",
+    risk: "medium",
+    browseable: true,
+    live_action: false,
+    merge_supported: true,
+  },
+  {
+    id: "preset-pose",
+    label: "Pose",
+    group: "Person presets",
+    resource_types: ["Preset Pose"],
+    target_kind: "person",
+    noun: "pose preset",
+    description:
+      "Pose presets can move many controllers at once. Loading must wait until the scene is ready.",
+    operation: "apply-person-preset",
+    required_capability: "person-preset-pose",
+    risk: "high",
+    browseable: true,
+    live_action: true,
+    merge_supported: true,
+  },
+  {
+    id: "preset-animation",
+    label: "Animation",
+    group: "Person presets",
+    resource_types: ["Preset Animation"],
+    target_kind: "person",
+    noun: "animation preset",
+    description:
+      "Person animation presets discovered by the catalogue. Live playback controls are a separate capability.",
+    operation: "apply-person-preset",
+    required_capability: "person-preset-animation",
+    risk: "medium",
+    browseable: true,
+    live_action: true,
+    merge_supported: true,
+  },
+  {
+    id: "preset-breast-physics",
+    label: "Breast physics",
+    group: "Person presets",
+    resource_types: ["Preset Breast Physics"],
+    target_kind: "person",
+    noun: "physics preset",
+    description:
+      "Saved breast-physics settings for compatible Persons.",
+    operation: "apply-person-preset",
+    required_capability: "person-preset-breast-physics",
+    risk: "medium",
+    browseable: true,
+    live_action: true,
+    merge_supported: true,
+  },
+  {
+    id: "preset-glute-physics",
+    label: "Glute physics",
+    group: "Person presets",
+    resource_types: ["Preset Glute Physics"],
+    target_kind: "person",
+    noun: "physics preset",
+    description:
+      "Saved glute-physics settings for compatible Persons.",
+    operation: "apply-person-preset",
+    required_capability: "person-preset-glute-physics",
+    risk: "medium",
+    browseable: true,
+    live_action: true,
+    merge_supported: true,
+  },
+  {
+    id: "preset-general",
+    label: "General",
+    group: "Person presets",
+    resource_types: ["Preset General"],
+    target_kind: "person",
+    noun: "general preset",
+    description:
+      "Broad Person presets that may include physical, appearance, and optional pose data.",
+    operation: "apply-person-preset",
+    required_capability: "person-preset-general",
+    risk: "critical",
+    browseable: true,
+    live_action: true,
+    merge_supported: true,
+  },
+  {
+    id: "preset-plugins",
+    label: "Person plugins",
+    group: "Person presets",
+    resource_types: ["Preset Plugins"],
+    target_kind: "person",
+    noun: "plugin preset",
+    description:
+      "Saved Person plugin configurations. External loading needs dedicated plugin safety rules.",
+    operation: "apply-person-preset",
+    required_capability: "person-preset-plugins",
+    risk: "critical",
+    browseable: true,
+    live_action: true,
+    merge_supported: true,
+  },
+]);
 
 const app = {
   status: null,
@@ -27,6 +349,19 @@ const app = {
   lastTerminalOperation: null,
   refreshing: false,
   refreshQueued: false,
+  person: null,
+  personError: null,
+  personInFlight: false,
+  personPollAt: 0,
+  selectedPersonUid: "",
+  selectedAtomUid: "",
+  applyingWorkspaceResources: new Set(),
+  workspaceCategories: [],
+  workspaceCategoriesError: null,
+  workspaceCategoriesSource: "fallback",
+  selectedWorkspaceCategoryId: "scene",
+  workspaceApplyMode: "replace",
+  personMutationInFlight: false,
 };
 
 const elements = {};
@@ -90,10 +425,34 @@ function cacheElements() {
     "pending-progress",
     "pending-action",
     "resources-tab-count",
+    "workspace-tab-count",
     "packages-tab-count",
     "access-tab-count",
     "library-view",
     "access-view",
+    "asset-workspace",
+    "person-context",
+    "person-target",
+    "select-person-button",
+    "add-person-button",
+    "person-live-state",
+    "person-live-title",
+    "person-live-detail",
+    "atom-context",
+    "atom-target",
+    "select-atom-button",
+    "atom-live-state",
+    "atom-live-title",
+    "atom-live-detail",
+    "asset-category-list",
+    "asset-category-kicker",
+    "asset-category-title",
+    "asset-category-description",
+    "asset-category-support",
+    "asset-category-note",
+    "asset-apply-mode",
+    "asset-mode-replace",
+    "asset-mode-merge",
     "search-input",
     "type-filter-wrap",
     "type-filter",
@@ -178,6 +537,35 @@ function bindEvents() {
   elements.loadMore.addEventListener("click", () => loadLibrary({ append: true }));
   elements.clearFilters.addEventListener("click", clearFilters);
   elements.emptyAction.addEventListener("click", handleEmptyAction);
+  elements.personTarget.addEventListener("change", () => {
+    app.selectedPersonUid = elements.personTarget.value;
+    renderPersonContext();
+    if (app.view === "workspace") renderLibrary();
+  });
+  elements.selectPersonButton.addEventListener("click", selectPersonInVam);
+  elements.addPersonButton.addEventListener("click", addPersonInVam);
+  elements.atomTarget.addEventListener("change", () => {
+    app.selectedAtomUid = elements.atomTarget.value;
+    renderAtomContext();
+  });
+  elements.selectAtomButton.addEventListener("click", selectAtomInVam);
+  elements.assetCategoryList.addEventListener("click", (event) => {
+    const categoryButton = event.target.closest("[data-workspace-category]");
+    if (categoryButton) {
+      setWorkspaceCategory(categoryButton.dataset.workspaceCategory);
+    }
+  });
+  for (const modeInput of [
+    elements.assetModeReplace,
+    elements.assetModeMerge,
+  ]) {
+    modeInput.addEventListener("change", () => {
+      if (!modeInput.checked || modeInput.disabled) return;
+      app.workspaceApplyMode = modeInput.value;
+      renderWorkspaceCategorySummary();
+      if (app.view === "workspace") renderLibrary();
+    });
+  }
 
   elements.searchInput.addEventListener("input", () => {
     window.clearTimeout(app.searchTimer);
@@ -314,6 +702,22 @@ async function loadActivity({ refreshOnTerminal = true } = {}) {
       app.activityRefreshNeeded = true;
     }
     renderLiveState(app.status || {});
+    const workspaceCategory =
+      app.view === "workspace" ? currentWorkspaceCategory() : null;
+    const bridgeState = String(
+      (app.person?.bridge && app.person.bridge.state) || "",
+    ).toLowerCase();
+    const shouldPollScene =
+      PERSON_BRIDGE_BUSY_STATES.has(bridgeState) ||
+      Boolean(
+        workspaceCategory &&
+          (workspaceCategory.liveAction ||
+            workspaceCategory.targetKind === "person" ||
+            ATOM_TARGET_KINDS.has(workspaceCategory.targetKind)),
+      );
+    if (shouldPollScene && Date.now() - app.personPollAt > 3000) {
+      loadPersons({ quiet: true });
+    }
     setConnection("online", "Local manager");
 
     const operation = app.activity.operation || {};
@@ -350,6 +754,24 @@ async function loadActivity({ refreshOnTerminal = true } = {}) {
   }
 }
 
+async function fetchLiveSceneSnapshot() {
+  try {
+    return await api("/api/vam/scene");
+  } catch (error) {
+    if (error.status !== 404) throw error;
+    return api("/api/vam/persons");
+  }
+}
+
+async function fetchWorkspaceCategories() {
+  try {
+    return await api("/api/workspace/categories");
+  } catch (error) {
+    if (error.status !== 404) throw error;
+    return api("/api/person/categories");
+  }
+}
+
 async function refreshAll(options = {}) {
   const force = Boolean(options && options.force);
   if (operationIsBusy() && !force) {
@@ -364,11 +786,20 @@ async function refreshAll(options = {}) {
   app.refreshing = true;
   setButtonBusy(elements.refreshButton, true);
   try {
-    const [statusResult, facetResult, sessionPluginResult] = await Promise.allSettled([
-      api("/api/status"),
-      api("/api/catalog/facets"),
-      api("/api/session-plugins"),
-    ]);
+    const [
+      statusResult,
+      facetResult,
+      sessionPluginResult,
+      sceneResult,
+      workspaceCategoriesResult,
+    ] =
+      await Promise.allSettled([
+        api("/api/status"),
+        api("/api/catalog/facets"),
+        api("/api/session-plugins"),
+        fetchLiveSceneSnapshot(),
+        fetchWorkspaceCategories(),
+      ]);
 
     if (statusResult.status === "rejected") {
       throw statusResult.reason;
@@ -392,6 +823,23 @@ async function refreshAll(options = {}) {
       app.sessionPluginsError = sessionPluginResult.reason;
     }
     renderSessionPlugins();
+
+    if (sceneResult.status === "fulfilled") {
+      acceptPersonSnapshot(sceneResult.value || {});
+    } else {
+      app.personError = sceneResult.reason;
+      app.personPollAt = Date.now();
+    }
+    if (workspaceCategoriesResult.status === "fulfilled") {
+      acceptWorkspaceCategories(workspaceCategoriesResult.value);
+    } else {
+      app.workspaceCategoriesError = workspaceCategoriesResult.reason;
+      if (!app.workspaceCategories.length) {
+        app.workspaceCategories = fallbackWorkspaceCategories();
+      }
+    }
+    renderWorkspaceCategoryNavigation();
+    renderWorkspaceCategorySummary();
 
     if (app.view !== "access") {
       await loadLibrary();
@@ -503,6 +951,816 @@ async function ensureSessionPlugins({ refresh = false } = {}) {
   }
 }
 
+function booleanValue(value, fallback = false) {
+  if (value === undefined || value === null) return fallback;
+  if (typeof value === "string") {
+    const folded = value.trim().toLowerCase();
+    if (["false", "0", "no", "off"].includes(folded)) return false;
+    if (["true", "1", "yes", "on"].includes(folded)) return true;
+  }
+  return Boolean(value);
+}
+
+function workspaceCategoryId(value, index = 0) {
+  const normalized = String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return normalized || `category-${index + 1}`;
+}
+
+function workspaceCategoryNoun(entry, label) {
+  const explicit = String(entry.noun || entry.item_name || "").trim();
+  if (explicit) return explicit;
+  const normalized = label.trim().toLowerCase();
+  if (normalized.endsWith(" presets")) {
+    return `${normalized.slice(0, -" presets".length)} preset`;
+  }
+  if (normalized.endsWith(" items")) {
+    return normalized.slice(0, -" items".length) + " item";
+  }
+  if (normalized.endsWith("s") && normalized.length > 1) {
+    return normalized.slice(0, -1);
+  }
+  return normalized || "resource";
+}
+
+function normalizeWorkspaceCategories(payload) {
+  const document =
+    payload && typeof payload === "object" && !Array.isArray(payload)
+      ? payload
+      : {};
+  const rows = Array.isArray(payload)
+    ? payload
+    : asArray(document.categories || document.items);
+
+  return rows
+    .filter((entry) => entry && typeof entry === "object")
+    .map((entry, index) => {
+      let resourceTypes =
+        entry.resource_types ??
+        entry.resourceTypes ??
+        entry.types ??
+        entry.resource_type ??
+        entry.type ??
+        [];
+      if (!Array.isArray(resourceTypes)) resourceTypes = [resourceTypes];
+      resourceTypes = Array.from(
+        new Set(
+          resourceTypes
+            .map((value) => String(value || "").trim())
+            .filter(Boolean),
+          ),
+      );
+      let atomTypes = entry.atom_types ?? entry.atomTypes ?? [];
+      if (!Array.isArray(atomTypes)) atomTypes = [atomTypes];
+      atomTypes = atomTypes
+        .map((value) => String(value || "").trim())
+        .filter(Boolean);
+
+      const operation = String(
+        entry.operation || entry.action_kind || "browse",
+      )
+        .trim()
+        .toLowerCase();
+
+      const label = String(
+        entry.label || entry.title || entry.name || resourceTypes[0] || "Resources",
+      ).trim();
+      const countValue = entry.count ?? entry.total;
+      return {
+        id: workspaceCategoryId(entry.id || entry.key || label, index),
+        label,
+        group: prettyType(
+          String(entry.group || entry.section || "Other").trim() || "Other",
+        ),
+        kicker: String(entry.kicker || entry.kind_label || "Catalogue resources"),
+        description: String(
+          entry.description ||
+            `Browse ${label.toLowerCase()} from the imported local catalogue.`,
+        ),
+        noun: workspaceCategoryNoun(entry, label),
+        resourceTypes,
+        atomTypes,
+        targetAtomType: String(
+          entry.target_atom_type || entry.targetAtomType || atomTypes[0] || "",
+        ).trim(),
+        targetKind: String(entry.target_kind || entry.targetKind || "none")
+          .trim()
+          .toLowerCase(),
+        operation,
+        browseable: booleanValue(entry.browseable, resourceTypes.length > 0),
+        liveAction: booleanValue(
+          entry.live_action ?? entry.load_supported ?? entry.apply_supported,
+          false,
+        ),
+        mergeSupported: booleanValue(entry.merge_supported, false),
+        requiredCapability: String(
+          entry.required_capability ||
+            entry.capability ||
+            "",
+        ).trim(),
+        risk: String(entry.risk || "low").trim().toLowerCase(),
+        riskReason: String(entry.risk_reason || "").trim(),
+        count:
+          countValue === undefined || countValue === null
+            ? null
+            : Math.max(0, numberOr(countValue, 0)),
+        note: String(entry.note || entry.unsupported_reason || "").trim(),
+      };
+    })
+    .filter((category) => category.resourceTypes.length || category.id);
+}
+
+function fallbackWorkspaceCategories() {
+  return normalizeWorkspaceCategories(WORKSPACE_CATEGORY_FALLBACK);
+}
+
+function acceptWorkspaceCategories(payload) {
+  const published = normalizeWorkspaceCategories(payload);
+  const categories = published.length ? published : fallbackWorkspaceCategories();
+  app.workspaceCategories = categories;
+  app.workspaceCategoriesError = null;
+  app.workspaceCategoriesSource = published.length ? "server" : "fallback";
+
+  if (
+    !categories.some(
+      (category) => category.id === app.selectedWorkspaceCategoryId,
+    )
+  ) {
+    app.selectedWorkspaceCategoryId =
+      categories.find((category) => category.id === "scene")?.id ||
+      categories[0]?.id ||
+      "";
+  }
+  renderWorkspaceCategoryNavigation();
+  renderWorkspaceCategorySummary();
+}
+
+function ensureWorkspaceCategories() {
+  if (!app.workspaceCategories.length) {
+    app.workspaceCategories = fallbackWorkspaceCategories();
+    app.workspaceCategoriesSource = "fallback";
+  }
+  return app.workspaceCategories;
+}
+
+function currentWorkspaceCategory() {
+  const categories = ensureWorkspaceCategories();
+  return (
+    categories.find(
+      (category) => category.id === app.selectedWorkspaceCategoryId,
+    ) ||
+    categories[0] ||
+    null
+  );
+}
+
+function workspaceFacetCounts() {
+  const counts = new Map();
+  for (const facet of normalizeFacetTypes(app.facets)) {
+    counts.set(String(facet.value).toLowerCase(), facet.count);
+  }
+  return counts;
+}
+
+function workspaceCategoryCount(category) {
+  if (category && category.count !== null) return category.count;
+  const facets = workspaceFacetCounts();
+  return asArray(category && category.resourceTypes).reduce(
+    (total, resourceType) =>
+      total + Math.max(0, numberOr(facets.get(resourceType.toLowerCase()), 0)),
+    0,
+  );
+}
+
+function renderWorkspaceCategoryNavigation() {
+  const categories = ensureWorkspaceCategories();
+  const renderKey = JSON.stringify(
+    categories.map((category) => [
+      category.id,
+      category.label,
+      category.group,
+      workspaceCategoryCount(category),
+      category.id === app.selectedWorkspaceCategoryId,
+    ]),
+  );
+  if (elements.assetCategoryList.dataset.renderKey === renderKey) return;
+  elements.assetCategoryList.dataset.renderKey = renderKey;
+  elements.assetCategoryList.replaceChildren();
+
+  const groups = new Map();
+  for (const category of categories) {
+    if (!groups.has(category.group)) groups.set(category.group, []);
+    groups.get(category.group).push(category);
+  }
+
+  for (const [groupName, groupCategories] of groups) {
+    const group = createElement("section", "asset-category-group");
+    group.setAttribute("aria-label", groupName);
+    const heading = createElement("span", "asset-category-group-label");
+    heading.textContent = groupName;
+    const choices = createElement("div", "asset-category-choices");
+    for (const category of groupCategories) {
+      const active = category.id === app.selectedWorkspaceCategoryId;
+      const categoryButton = button(category.label, "asset-category-button");
+      categoryButton.dataset.workspaceCategory = category.id;
+      categoryButton.classList.toggle("is-active", active);
+      categoryButton.setAttribute("aria-pressed", String(active));
+      categoryButton.setAttribute("aria-controls", "card-grid");
+      const count = createElement("span", "asset-category-count");
+      count.textContent = formatCompact(workspaceCategoryCount(category));
+      categoryButton.append(count);
+      choices.append(categoryButton);
+    }
+    group.append(heading, choices);
+    elements.assetCategoryList.append(group);
+  }
+
+  const uniqueTypes = new Set(
+    categories.flatMap((category) => category.resourceTypes),
+  );
+  const facets = workspaceFacetCounts();
+  const total = Array.from(uniqueTypes).reduce(
+    (sum, resourceType) =>
+      sum + Math.max(0, numberOr(facets.get(resourceType.toLowerCase()), 0)),
+    0,
+  );
+  elements.workspaceTabCount.textContent = total ? formatCompact(total) : "Assets";
+}
+
+function workspaceSupportBadge(label, state) {
+  return badge(label, `asset-support-badge is-${state}`);
+}
+
+function workspaceApplyModes(category) {
+  if (!category || !category.liveAction) return [];
+  if (
+    !["load-scene", "load-preset", "apply-person-preset"].includes(
+      category.operation,
+    )
+  ) {
+    return [];
+  }
+  return category.mergeSupported ? ["replace", "merge"] : ["replace"];
+}
+
+function renderWorkspaceCategorySummary() {
+  const category = currentWorkspaceCategory();
+  if (!category) return;
+
+  elements.assetCategoryKicker.textContent = category.kicker;
+  elements.assetCategoryTitle.textContent = category.label;
+  elements.assetCategoryDescription.textContent = category.description;
+  elements.assetCategorySupport.replaceChildren(
+    workspaceSupportBadge(
+      category.browseable ? "Browse · available" : "Browse · unavailable",
+      category.browseable ? "ready" : "muted",
+    ),
+    workspaceSupportBadge(
+      category.liveAction ? "Live load · supported" : "Live load · browse only",
+      category.liveAction ? "ready" : "muted",
+    ),
+    workspaceSupportBadge(
+      `${prettyType(category.risk)} risk`,
+      ["high", "critical"].includes(category.risk) ? "warning" : "muted",
+    ),
+  );
+
+  let note = category.note;
+  if (!note && category.id === "clothing-item-presets") {
+    note =
+      "An item style belongs to a specific worn clothing item. VAM-PIP will not guess that relationship from its folder name.";
+  } else if (!note && category.operation === "toggle-clothing-item") {
+    note =
+      "The offline catalogue cannot tell which items this Person is wearing. Item toggles stay disabled until VaM publishes that live state.";
+  } else if (!note && !category.liveAction) {
+    note =
+      "This category is indexed now, but loading is intentionally disabled until the bridge validates this exact resource type.";
+  } else if (!note) {
+    note =
+      "The manager resolves the catalogue ID and package lease; the browser never sends a filesystem path to VaM.";
+  }
+  if (category.riskReason) {
+    note = `${note} ${category.riskReason}`;
+  }
+  if (app.workspaceCategoriesSource === "fallback") {
+    note +=
+      " The manager has not published its Workspace map, so this page is using its built-in catalogue map.";
+  }
+  elements.assetCategoryNote.textContent = note;
+
+  const supportedModes = new Set(workspaceApplyModes(category));
+  for (const input of [
+    elements.assetModeReplace,
+    elements.assetModeMerge,
+  ]) {
+    const supported = supportedModes.has(input.value);
+    input.disabled = !supported;
+    input.closest("label").title = supported
+      ? `${prettyType(input.value)} this ${category.noun}`
+      : category.liveAction
+        ? `${prettyType(input.value)} is not supported for ${category.label}`
+        : `${category.label} is browse-only with the current manager`;
+  }
+  if (!supportedModes.has(app.workspaceApplyMode)) {
+    app.workspaceApplyMode = supportedModes.has("replace")
+      ? "replace"
+      : supportedModes.has("merge")
+        ? "merge"
+        : "replace";
+  }
+  elements.assetModeReplace.checked = app.workspaceApplyMode === "replace";
+  elements.assetModeMerge.checked = app.workspaceApplyMode === "merge";
+  elements.assetApplyMode.hidden = supportedModes.size === 0;
+  elements.personContext.hidden = category.targetKind !== "person";
+  elements.atomContext.hidden = !ATOM_TARGET_KINDS.has(category.targetKind);
+  renderPersonContext();
+  renderAtomContext();
+}
+
+function setWorkspaceCategory(categoryId) {
+  const category = ensureWorkspaceCategories().find(
+    (candidate) => candidate.id === categoryId,
+  );
+  if (!category || category.id === app.selectedWorkspaceCategoryId) return;
+  app.selectedWorkspaceCategoryId = category.id;
+  app.items = [];
+  app.total = 0;
+  app.offset = 0;
+  renderWorkspaceCategoryNavigation();
+  renderWorkspaceCategorySummary();
+  updateWorkspaceSearchPlaceholder();
+  if (
+    category.liveAction ||
+    category.targetKind === "person" ||
+    ATOM_TARGET_KINDS.has(category.targetKind)
+  ) {
+    loadPersons({ quiet: true });
+  }
+  loadLibrary();
+}
+
+function personList(snapshot = app.person) {
+  return asArray(snapshot && snapshot.persons)
+    .filter((person) => person && typeof person === "object")
+    .map((person) => ({
+      ...person,
+      uid: String(person.uid || "").trim(),
+    }))
+    .filter((person) => person.uid);
+}
+
+function atomList(snapshot = app.person) {
+  return asArray(snapshot && snapshot.atoms)
+    .filter((atom) => atom && typeof atom === "object")
+    .map((atom) => ({
+      ...atom,
+      uid: String(atom.uid || "").trim(),
+      type: String(atom.type || atom.atom_type || "").trim(),
+    }))
+    .filter((atom) => atom.uid);
+}
+
+function atomsForCategory(category = currentWorkspaceCategory()) {
+  const atoms = atomList();
+  const explicitType = String(category?.targetAtomType || "").toLowerCase();
+  const impliedTypes = {
+    subscene: "subscene",
+    "custom-unity-asset": "customunityasset",
+    cua: "customunityasset",
+  };
+  const expectedType = explicitType || impliedTypes[category?.targetKind] || "";
+  return expectedType
+    ? atoms.filter((atom) => atom.type.toLowerCase() === expectedType)
+    : atoms;
+}
+
+function personCapabilities(snapshot = app.person) {
+  return new Set(
+    asArray(snapshot && snapshot.capabilities)
+      .map((capability) => String(capability || "").trim())
+      .filter(Boolean),
+  );
+}
+
+function personVamRunning(snapshot = app.person) {
+  if (snapshot && snapshot.vam_running !== undefined) {
+    return Boolean(snapshot.vam_running);
+  }
+  if (app.activity && app.activity.vam) {
+    return Boolean(app.activity.vam.running);
+  }
+  return Boolean(app.status && app.status.vam && app.status.vam.running);
+}
+
+function personControlKey() {
+  const snapshot = app.person || {};
+  return JSON.stringify({
+    error: app.personError ? errorMessage(app.personError) : "",
+    vamRunning: personVamRunning(snapshot),
+    available: Boolean(snapshot.available),
+    loading: Boolean(snapshot.loading),
+    selected: app.selectedPersonUid,
+    capabilities: Array.from(personCapabilities(snapshot)).sort(),
+    persons: personList(snapshot).map((person) => [
+      person.uid,
+      Boolean(person.selected),
+    ]),
+    atoms: atomList(snapshot).map((atom) => [
+      atom.uid,
+      atom.type,
+      Boolean(atom.selected),
+    ]),
+  });
+}
+
+function acceptPersonSnapshot(snapshot) {
+  if (!snapshot || typeof snapshot !== "object") snapshot = {};
+  app.person = snapshot;
+  app.personError = null;
+  app.personPollAt = Date.now();
+
+  const persons = personList(snapshot);
+  const known = new Set(persons.map((person) => person.uid));
+  if (!known.has(app.selectedPersonUid)) {
+    const requested = String(snapshot.selected_uid || "").trim();
+    const selected = persons.find((person) => Boolean(person.selected));
+    app.selectedPersonUid = known.has(requested)
+      ? requested
+      : selected
+        ? selected.uid
+        : persons[0]?.uid || "";
+  }
+
+  const atoms = atomList(snapshot);
+  const knownAtoms = new Set(atoms.map((atom) => atom.uid));
+  if (!knownAtoms.has(app.selectedAtomUid)) {
+    const requested = String(snapshot.selected_uid || "").trim();
+    const selected = atoms.find((atom) => Boolean(atom.selected));
+    app.selectedAtomUid = knownAtoms.has(requested)
+      ? requested
+      : selected
+        ? selected.uid
+        : atoms[0]?.uid || "";
+  }
+}
+
+async function loadPersons({ quiet = false } = {}) {
+  if (app.personInFlight) return app.person;
+  app.personInFlight = true;
+  const previousKey = personControlKey();
+  try {
+    const snapshot = await fetchLiveSceneSnapshot();
+    acceptPersonSnapshot(snapshot);
+  } catch (error) {
+    app.personError = error;
+    app.personPollAt = Date.now();
+    if (!quiet) {
+      toast(
+        "Live Person controls unavailable",
+        `${errorMessage(error)} Catalogue browsing is still available.`,
+        "error",
+      );
+    }
+  } finally {
+    app.personInFlight = false;
+    renderPersonContext();
+    renderAtomContext();
+    if (app.view === "workspace" && previousKey !== personControlKey()) {
+      renderLibrary();
+    }
+  }
+  return app.person;
+}
+
+function renderPersonContext() {
+  const category = currentWorkspaceCategory();
+  const isPersonCategory = category && category.targetKind === "person";
+  elements.personContext.hidden = !isPersonCategory;
+  if (!isPersonCategory) return;
+
+  const snapshot = app.person || {};
+  const persons = personList(snapshot);
+  const capabilities = personCapabilities(snapshot);
+  const canApplyCategory =
+    !category.requiredCapability ||
+    capabilities.has(category.requiredCapability);
+  const canAddPerson = capabilities.has("person-add");
+  const canSelectPerson = capabilities.has("person-select");
+  const gameRunning = personVamRunning(snapshot);
+  const bridge = snapshot.bridge || {};
+  const bridgeState = String(bridge.state || "").toLowerCase();
+  const bridgeBusy = PERSON_BRIDGE_BUSY_STATES.has(bridgeState);
+
+  elements.personTarget.replaceChildren();
+  if (persons.length) {
+    for (const person of persons) {
+      const suffix = person.selected ? " · selected in VaM" : "";
+      elements.personTarget.append(
+        new Option(`${person.uid}${suffix}`, person.uid),
+      );
+    }
+    elements.personTarget.value = app.selectedPersonUid;
+  } else {
+    const label = snapshot.loading
+      ? "Scene is loading…"
+      : gameRunning
+        ? "No Person atoms found"
+        : "Start VaM to choose a Person";
+    elements.personTarget.append(new Option(label, ""));
+    elements.personTarget.value = "";
+  }
+  elements.personTarget.disabled = persons.length === 0 || Boolean(snapshot.loading);
+  elements.selectPersonButton.disabled =
+    app.personMutationInFlight ||
+    !gameRunning ||
+    !snapshot.available ||
+    Boolean(snapshot.loading) ||
+    bridgeBusy ||
+    !canSelectPerson ||
+    !app.selectedPersonUid;
+  elements.selectPersonButton.title = !canSelectPerson
+    ? "The loaded bridge does not support selecting a Person in VaM"
+    : !app.selectedPersonUid
+      ? "Choose a Person target first"
+      : "";
+  elements.addPersonButton.disabled =
+    app.personMutationInFlight ||
+    !gameRunning ||
+    !snapshot.available ||
+    Boolean(snapshot.loading) ||
+    bridgeBusy ||
+    !canAddPerson;
+  elements.addPersonButton.title = !canAddPerson
+    ? "The loaded bridge does not support adding a Person"
+    : !gameRunning
+      ? "Start VaM before adding a Person"
+      : "";
+
+  const state = elements.personLiveState;
+  state.classList.remove("is-ready", "is-warning", "is-error");
+
+  let title = "Checking the Person bridge…";
+  let detail =
+    `${category.label} browsing remains available while the live connection is checked.`;
+  if (app.personError) {
+    state.classList.add("is-error");
+    title = "Live Person controls unavailable";
+    detail = `${errorMessage(app.personError)} You can still browse this category.`;
+  } else if (!gameRunning) {
+    state.classList.add("is-warning");
+    title = "VaM is closed";
+    detail = `Browse ${category.label.toLowerCase()} now, then launch VaM to load one onto a Person.`;
+  } else if (!snapshot.available) {
+    state.classList.add("is-warning");
+    title = "Waiting for the live Person bridge";
+    detail =
+      "VaM is running, but no fresh Person roster is available yet. Reload or update the bridge if this persists.";
+  } else if (!category.liveAction) {
+    state.classList.add("is-warning");
+    title = "This category is browse-only";
+    detail =
+      "You can enable its package for VaM, but VAM-PIP will not guess a live Person change that the bridge does not expose.";
+  } else if (!canApplyCategory) {
+    state.classList.add("is-warning");
+    title = "Bridge update required";
+    detail =
+      `This bridge does not advertise ${category.requiredCapability || "the required action"} yet. Browsing remains available.`;
+  } else if (snapshot.loading) {
+    state.classList.add("is-warning");
+    title = "VaM is loading the scene";
+    detail = "Apply controls will resume when the scene and its Person atoms are ready.";
+  } else if (!persons.length) {
+    state.classList.add("is-warning");
+    title = "No Person atoms are available";
+    detail = canAddPerson
+      ? "Use Add Person above, then choose the new target."
+      : "Add a Person inside VaM, then refresh this workspace.";
+  } else if (bridgeBusy) {
+    const progressTitles = {
+      queued: "Asset change queued",
+      "deferred-loading": "Waiting for scene loading",
+      rescanning: "Enabling the asset package",
+      applying: `Applying ${category.noun}`,
+    };
+    state.classList.add("is-warning");
+    title = progressTitles[bridgeState] || "Bridge action in progress";
+    detail =
+      String(bridge.message || "").trim() ||
+      "The bridge is processing the requested asset change inside VaM.";
+  } else if (bridgeState === "error") {
+    state.classList.add("is-error");
+    title = "The bridge reports an error";
+    detail =
+      String(bridge.message || "").trim() ||
+      "Choose the preset again, or reload the bridge if the error persists.";
+  } else {
+    state.classList.add("is-ready");
+    title = `Ready for ${app.selectedPersonUid}`;
+    detail =
+      `Choose a ${category.noun} below. Hidden packages will be enabled for three days before VaM loads it.`;
+  }
+
+  elements.personLiveTitle.textContent = title;
+  elements.personLiveDetail.textContent = detail;
+}
+
+function renderAtomContext() {
+  const category = currentWorkspaceCategory();
+  const visible = category && ATOM_TARGET_KINDS.has(category.targetKind);
+  elements.atomContext.hidden = !visible;
+  if (!visible) return;
+
+  const snapshot = app.person || {};
+  const capabilities = personCapabilities(snapshot);
+  const atoms = atomsForCategory(category);
+  const known = new Set(atoms.map((atom) => atom.uid));
+  if (!known.has(app.selectedAtomUid)) {
+    const selected = atoms.find((atom) => Boolean(atom.selected));
+    app.selectedAtomUid = selected?.uid || atoms[0]?.uid || "";
+  }
+
+  elements.atomTarget.replaceChildren();
+  if (atoms.length) {
+    for (const atom of atoms) {
+      const type = atom.type ? ` · ${atom.type}` : "";
+      const selected = atom.selected ? " · selected in VaM" : "";
+      elements.atomTarget.append(
+        new Option(`${atom.uid}${type}${selected}`, atom.uid),
+      );
+    }
+    elements.atomTarget.value = app.selectedAtomUid;
+  } else {
+    const label = snapshot.loading
+      ? "Scene is loading…"
+      : personVamRunning(snapshot)
+        ? "No compatible atoms found"
+        : "Start VaM to inspect atoms";
+    elements.atomTarget.append(new Option(label, ""));
+  }
+  elements.atomTarget.disabled = !atoms.length || Boolean(snapshot.loading);
+
+  const bridgeState = String(snapshot.bridge?.state || "").toLowerCase();
+  const bridgeBusy = PERSON_BRIDGE_BUSY_STATES.has(bridgeState);
+  const canSelect = capabilities.has("atom-select");
+  elements.selectAtomButton.disabled =
+    app.personMutationInFlight ||
+    !personVamRunning(snapshot) ||
+    !snapshot.available ||
+    Boolean(snapshot.loading) ||
+    bridgeBusy ||
+    !canSelect ||
+    !app.selectedAtomUid;
+  elements.selectAtomButton.title = !canSelect
+    ? "The loaded bridge does not support selecting atoms in VaM"
+    : !app.selectedAtomUid
+      ? "Choose a compatible atom first"
+      : "";
+
+  const state = elements.atomLiveState;
+  state.classList.remove("is-ready", "is-warning", "is-error");
+  let title = "Checking the scene bridge…";
+  let detail = "Catalogue browsing remains available while VaM is checked.";
+  if (app.personError) {
+    state.classList.add("is-error");
+    title = "Live atom controls unavailable";
+    detail = errorMessage(app.personError);
+  } else if (!personVamRunning(snapshot)) {
+    state.classList.add("is-warning");
+    title = "VaM is closed";
+    detail = "Start VaM to inspect and select scene atoms.";
+  } else if (!snapshot.available) {
+    state.classList.add("is-warning");
+    title = "Waiting for the live scene bridge";
+    detail = "VaM is running, but its atom roster is not fresh yet.";
+  } else if (snapshot.loading || bridgeBusy) {
+    state.classList.add("is-warning");
+    title = snapshot.loading ? "VaM is loading the scene" : "Bridge action in progress";
+    detail = String(snapshot.bridge?.message || "Atom selection will resume shortly.");
+  } else if (!canSelect) {
+    state.classList.add("is-warning");
+    title = "Bridge update required";
+    detail = "This bridge does not advertise atom-select.";
+  } else if (!atoms.length) {
+    state.classList.add("is-warning");
+    title = "No compatible target atoms";
+    detail = `The current scene has no target matching ${category.label}.`;
+  } else {
+    state.classList.add("is-ready");
+    title = `Ready for ${app.selectedAtomUid}`;
+    detail = category.liveAction
+      ? "Choose an asset below to load it onto this atom."
+      : "Select the atom in VaM while browsing this asset family.";
+  }
+  elements.atomLiveTitle.textContent = title;
+  elements.atomLiveDetail.textContent = detail;
+}
+
+async function selectPersonInVam() {
+  const targetUid = app.selectedPersonUid;
+  if (!targetUid || app.personMutationInFlight) return;
+  app.personMutationInFlight = true;
+  setButtonBusy(elements.selectPersonButton, true, "Selecting…");
+  renderPersonContext();
+  try {
+    const result = await api("/api/vam/person/select", {
+      method: "POST",
+      body: { target_uid: targetUid },
+    });
+    requireBridgeQueue(result, "Person selection");
+    toast(
+      "Person selected in VaM",
+      result.message || `${targetUid} is now the active target.`,
+    );
+    await loadPersons({ quiet: true });
+  } catch (error) {
+    toast("Could not select Person", errorMessage(error), "error");
+  } finally {
+    app.personMutationInFlight = false;
+    setButtonBusy(elements.selectPersonButton, false);
+    renderPersonContext();
+  }
+}
+
+async function selectAtomInVam() {
+  const targetUid = app.selectedAtomUid;
+  if (!targetUid || app.personMutationInFlight) return;
+  app.personMutationInFlight = true;
+  setButtonBusy(elements.selectAtomButton, true, "Selecting…");
+  renderAtomContext();
+  try {
+    const result = await api("/api/vam/atom/select", {
+      method: "POST",
+      body: { target_uid: targetUid },
+    });
+    requireBridgeQueue(result, "Atom selection");
+    toast(
+      "Atom selected in VaM",
+      result.message || `${targetUid} is now the active atom.`,
+    );
+    await loadPersons({ quiet: true });
+  } catch (error) {
+    toast("Could not select atom", errorMessage(error), "error");
+  } finally {
+    app.personMutationInFlight = false;
+    setButtonBusy(elements.selectAtomButton, false);
+    renderAtomContext();
+  }
+}
+
+function suggestedPersonUid() {
+  const used = new Set(personList().map((person) => person.uid.toLowerCase()));
+  if (!used.has("person")) return "Person";
+  let suffix = 2;
+  while (used.has(`person${suffix}`)) suffix += 1;
+  return `Person${suffix}`;
+}
+
+async function addPersonInVam() {
+  if (app.personMutationInFlight) return;
+  const targetUid = await showDialog({
+    eyebrow: "Add Person atom",
+    title: "Choose a unique Person name",
+    message:
+      "VaM will add a new Person atom to the current scene. This is not saved until you save the scene.",
+    confirmLabel: "Add Person",
+    icon: "warning",
+    input: {
+      label: "Person UID",
+      value: suggestedPersonUid(),
+      placeholder: "Person2",
+    },
+  });
+  if (!targetUid) return;
+
+  app.personMutationInFlight = true;
+  setButtonBusy(elements.addPersonButton, true, "Adding…");
+  renderPersonContext();
+  try {
+    const result = await api("/api/vam/person/add", {
+      method: "POST",
+      body: { target_uid: targetUid },
+    });
+    requireBridgeQueue(result, "Add Person");
+    app.selectedPersonUid = String(
+      result.target_uid || result.uid || targetUid,
+    );
+    toast(
+      "Person queued",
+      result.message || `${app.selectedPersonUid} will be added to the scene.`,
+    );
+    await loadPersons({ quiet: true });
+  } catch (error) {
+    toast("Could not add Person", errorMessage(error), "error");
+  } finally {
+    app.personMutationInFlight = false;
+    setButtonBusy(elements.addPersonButton, false);
+    renderPersonContext();
+  }
+}
+
 async function loadStatus() {
   if (operationIsBusy()) {
     await loadActivity({ refreshOnTerminal: false });
@@ -541,9 +1799,22 @@ async function loadLibrary({ append = false } = {}) {
   if (app.query) params.set("q", app.query);
   if (app.packageState) params.set("state", app.packageState);
   if (app.view === "resources" && app.type) params.set("type", app.type);
+  if (app.view === "workspace") {
+    const category = currentWorkspaceCategory();
+    if (category) {
+      if (app.workspaceCategoriesSource === "server") {
+        params.set("category", category.id);
+      } else {
+        for (const resourceType of category.resourceTypes) {
+          params.append("type", resourceType);
+        }
+      }
+    }
+  }
 
   try {
-    const endpoint = app.view === "resources" ? "/api/resources" : "/api/packages";
+    const endpoint =
+      app.view === "packages" ? "/api/packages" : "/api/resources";
     const result = await api(`${endpoint}?${params.toString()}`, {
       signal: controller.signal,
     });
@@ -746,6 +2017,10 @@ function renderLiveState(status = app.status || {}) {
       : busy
         ? "Wait for the package update to finish"
         : "";
+  if (app.view === "workspace") {
+    renderPersonContext();
+    renderAtomContext();
+  }
 }
 
 function renderFacets() {
@@ -803,13 +2078,18 @@ function renderLibrary() {
     const fragment = document.createDocumentFragment();
     for (const item of app.items) {
       fragment.append(
-        app.view === "resources" ? createResourceCard(item) : createPackageCard(item),
+        app.view === "packages" ? createPackageCard(item) : createResourceCard(item),
       );
     }
     elements.cardGrid.append(fragment);
   }
 
-  const noun = app.view === "resources" ? "resource" : "package";
+  const noun =
+    app.view === "workspace"
+      ? currentWorkspaceCategory()?.noun || "asset"
+      : app.view === "resources"
+        ? "resource"
+        : "package";
   const shown = app.items.length;
   elements.resultCount.textContent =
     app.total === shown
@@ -829,7 +2109,11 @@ function showLoadingState() {
   elements.emptyState.hidden = true;
   elements.loadMore.hidden = true;
   elements.resultCount.textContent =
-    app.view === "resources" ? "Loading resources…" : "Loading packages…";
+    app.view === "workspace"
+      ? `Loading ${currentWorkspaceCategory()?.label.toLowerCase() || "assets"}…`
+      : app.view === "resources"
+        ? "Loading resources…"
+        : "Loading packages…";
 }
 
 function showErrorState(error) {
@@ -846,7 +2130,7 @@ function showErrorState(error) {
 
 function renderEmptyLibrary() {
   const noCatalogue =
-    app.view === "resources" &&
+    (app.view === "resources" || app.view === "workspace") &&
     numberOr(app.status && app.status.catalog_resources, 0) === 0 &&
     !hasFilters();
 
@@ -859,8 +2143,12 @@ function renderEmptyLibrary() {
   } else {
     elements.emptyTitle.textContent = "Nothing found";
     elements.emptyMessage.textContent = hasFilters()
-      ? "Try another search, type, or package state."
-      : `No ${app.view} are available yet.`;
+      ? app.view === "workspace"
+        ? "Try another name, creator, tag, or package state."
+        : "Try another search, type, or package state."
+      : app.view === "workspace"
+        ? `No indexed ${currentWorkspaceCategory()?.label.toLowerCase() || "assets"} are available yet.`
+        : `No ${app.view} are available yet.`;
     elements.emptyAction.textContent = hasFilters() ? "Clear filters" : "Refresh";
     elements.emptyAction.dataset.action = hasFilters() ? "clear" : "retry";
   }
@@ -938,6 +2226,25 @@ function createResourceCard(item) {
   body.append(metadata);
 
   const actions = createElement("div", "card-actions");
+  const workspaceCategory =
+    app.view === "workspace" ? currentWorkspaceCategory() : null;
+  if (workspaceCategory && workspaceCategory.liveAction) {
+    const availability = workspaceApplyAvailability(item, workspaceCategory);
+    const applyButton = button(
+      availability.label,
+      active || state === "local" ? "secondary-button" : "primary-button",
+    );
+    applyButton.disabled = !availability.allowed;
+    applyButton.title = availability.reason;
+    applyButton.addEventListener("click", () =>
+      applyWorkspaceResource(item, workspaceCategory, applyButton),
+    );
+    actions.append(applyButton);
+    body.append(actions);
+    card.append(preview, body);
+    return card;
+  }
+
   const leaseButton = button(
     active ? "Keep for 3 days" : "Enable for 3 days",
     active ? "secondary-button" : "primary-button",
@@ -979,6 +2286,162 @@ function createResourceCard(item) {
 
   card.append(preview, body);
   return card;
+}
+
+function workspaceApplyAvailability(item, category = currentWorkspaceCategory()) {
+  const snapshot = app.person || {};
+  const persons = personList(snapshot);
+  const selected = app.selectedPersonUid;
+  const state = String(
+    item.state || (itemIsActive(item) ? "active" : "hidden"),
+  ).toLowerCase();
+  const resourceId = Number(item.id);
+  const gameRunning = personVamRunning(snapshot);
+  const bridgeState = String(
+    (snapshot.bridge && snapshot.bridge.state) || "",
+  ).toLowerCase();
+  const key = `${category?.id || "asset"}:${resourceId}`;
+  let reason = "";
+
+  if (state === "missing") {
+    reason = "The package containing this asset is not installed";
+  } else if (!itemIsValid(item) || !Number.isInteger(resourceId) || resourceId < 1) {
+    reason = "This catalogue entry cannot be resolved safely";
+  } else if (!category || !category.liveAction) {
+    reason = "This category is browse-only with the current manager";
+  } else if (app.personError) {
+    reason = "The live VaM bridge is unavailable";
+  } else if (!gameRunning) {
+    reason = "Start VaM before loading this asset";
+  } else if (!snapshot.available) {
+    reason = "The bridge is not publishing a fresh scene snapshot";
+  } else if (
+    category.requiredCapability &&
+    !personCapabilities(snapshot).has(category.requiredCapability)
+  ) {
+    reason = `Update and reload the bridge to enable ${category.requiredCapability}`;
+  } else if (snapshot.loading) {
+    reason = "Wait for VaM to finish loading the scene";
+  } else if (PERSON_BRIDGE_BUSY_STATES.has(bridgeState)) {
+    reason = "Wait for the current bridge action to finish";
+  } else if (
+    (category.targetKind === "person" &&
+      (!selected || !persons.some((person) => person.uid === selected)))
+  ) {
+    reason = "Choose an available Person target first";
+  } else if (app.applyingWorkspaceResources.has(key)) {
+    reason = "This asset is already being queued";
+  }
+
+  let label = "Load";
+  if (state === "missing") {
+    label = "Package not installed";
+  } else if (category?.operation === "load-scene") {
+    label = app.workspaceApplyMode === "merge" ? "Merge scene" : "Replace scene";
+  } else if (app.workspaceApplyMode === "merge") {
+    label = state === "active" || state === "local" ? "Merge" : "Enable & merge";
+  } else {
+    label = state === "active" || state === "local" ? "Load" : "Enable & load";
+  }
+
+  return {
+    allowed: reason === "",
+    label,
+    reason,
+  };
+}
+
+async function confirmSceneLoad(item, merge) {
+  const title = resourceTitle(item);
+  if (merge) {
+    return showDialog({
+      eyebrow: "Merge scene",
+      title: `Merge “${title}” into the current scene?`,
+      message:
+        "VaM will add the scene’s atoms to what is already loaded. Conflicting UIDs or plugins may still change the current scene.",
+      confirmLabel: "Merge scene",
+      icon: "warning",
+    });
+  }
+  return showDialog({
+    eyebrow: "Replace current scene",
+    title: `Load “${title}”?`,
+    message:
+      "This discards the currently loaded scene in VaM and replaces it. Save any work you want to keep before continuing.",
+    confirmLabel: "Replace scene",
+    icon: "danger",
+  });
+}
+
+async function confirmRiskyAssetLoad(item, category) {
+  const critical = category.risk === "critical";
+  return showDialog({
+    eyebrow: critical ? "Critical live action" : "High-impact live action",
+    title: `Load “${resourceTitle(item)}”?`,
+    message:
+      category.riskReason ||
+      `This ${category.noun} can make broad or executable changes to the selected target.`,
+    confirmLabel: app.workspaceApplyMode === "merge" ? "Merge asset" : "Load asset",
+    icon: critical ? "danger" : "warning",
+  });
+}
+
+async function applyWorkspaceResource(item, category, sourceButton) {
+  const resourceId = Number(item.id);
+  if (!Number.isInteger(resourceId) || resourceId < 1 || !category) return;
+
+  const merge = app.workspaceApplyMode === "merge";
+  let confirmedReplace = false;
+  let confirmedRisk = false;
+  if (category.operation === "load-scene") {
+    const confirmed = await confirmSceneLoad(item, merge);
+    if (!confirmed) return;
+    confirmedReplace = !merge;
+  } else if (["high", "critical"].includes(category.risk)) {
+    confirmedRisk = Boolean(await confirmRiskyAssetLoad(item, category));
+    if (!confirmedRisk) return;
+  }
+
+  const key = `${category.id}:${resourceId}`;
+  app.applyingWorkspaceResources.add(key);
+  setButtonBusy(sourceButton, true, "Queuing…");
+  try {
+    const body = {
+      resource_id: resourceId,
+      merge,
+      days: 3,
+      confirm_critical: confirmedRisk,
+    };
+    if (category.targetKind === "person") {
+      body.target_uid = app.selectedPersonUid;
+    }
+    if (confirmedReplace) body.confirm_replace = true;
+
+    const result = await api("/api/vam/resource/apply", {
+      method: "POST",
+      body,
+    });
+    requireBridgeQueue(result, `${prettyType(category.noun)} load`);
+    const requestId =
+      result.request_id || result.action_id || result.bridge_request || "";
+    const detail =
+      result.message ||
+      `Queued ${category.targetKind === "person" ? `for ${app.selectedPersonUid}` : "for VaM"}. VAM-PIP will enable required packages, rescan when needed, and load the asset${
+        requestId ? ` · request ${String(requestId).slice(0, 8)}` : ""
+      }.`;
+    toast(`${prettyType(category.noun)} queued`, detail);
+    await refreshAll({ force: true });
+  } catch (error) {
+    toast(
+      `Could not load ${resourceTitle(item)}`,
+      errorMessage(error),
+      "error",
+    );
+  } finally {
+    app.applyingWorkspaceResources.delete(key);
+    setButtonBusy(sourceButton, false);
+    if (app.view === "workspace") renderLibrary();
+  }
 }
 
 function createPackageCard(item) {
@@ -1763,7 +3226,12 @@ async function updateAutoReconcile() {
 }
 
 function setView(view) {
-  if (!["resources", "packages", "access"].includes(view) || app.view === view) return;
+  if (
+    !["resources", "workspace", "packages", "access"].includes(view) ||
+    app.view === view
+  ) {
+    return;
+  }
   app.view = view;
 
   for (const tab of elements.viewTabs) {
@@ -1773,20 +3241,43 @@ function setView(view) {
   }
 
   const isAccess = view === "access";
+  const isWorkspace = view === "workspace";
   elements.libraryView.hidden = isAccess;
   elements.accessView.hidden = !isAccess;
+  elements.assetWorkspace.hidden = !isWorkspace;
   if (isAccess) {
     renderAccess();
     return;
   }
 
   elements.typeFilterWrap.hidden = view !== "resources";
-  elements.searchInput.placeholder =
-    view === "resources"
-      ? "Search scenes, looks, clothing, creators…"
-      : "Search package or creator…";
+  updateWorkspaceSearchPlaceholder();
   configureStateFilter();
+  if (isWorkspace) {
+    renderWorkspaceCategoryNavigation();
+    renderWorkspaceCategorySummary();
+    const category = currentWorkspaceCategory();
+    if (
+      category?.liveAction ||
+      category?.targetKind === "person" ||
+      ATOM_TARGET_KINDS.has(category?.targetKind)
+    ) {
+      loadPersons({ quiet: true });
+    }
+  }
   loadLibrary();
+}
+
+function updateWorkspaceSearchPlaceholder() {
+  if (app.view === "workspace") {
+    const category = currentWorkspaceCategory();
+    elements.searchInput.placeholder = `Search ${category?.label.toLowerCase() || "assets"}, creators, tags…`;
+  } else if (app.view === "resources") {
+    elements.searchInput.placeholder =
+      "Search scenes, looks, clothing, creators…";
+  } else {
+    elements.searchInput.placeholder = "Search package or creator…";
+  }
 }
 
 function configureStateFilter() {
@@ -1803,7 +3294,10 @@ function configureStateFilter() {
     ["Hidden", "hidden"],
     ["Invalid", "invalid"],
   ];
-  const options = app.view === "resources" ? resourceOptions : packageOptions;
+  const options =
+    app.view === "resources" || app.view === "workspace"
+      ? resourceOptions
+      : packageOptions;
   const supported = options.some(([, value]) => value === app.packageState);
   if (!supported) app.packageState = "all";
   elements.stateFilter.replaceChildren(
@@ -2154,6 +3648,19 @@ function planResultText(result) {
   if (pending) parts.push(`${formatNumber(pending)} disables deferred`);
   if (result.bridge_request) parts.push("live rescan requested");
   return `${parts.join(" · ")}.`;
+}
+
+function requireBridgeQueue(result, actionLabel) {
+  if (!result || result.bridge_busy !== true) return;
+  const reason =
+    result.bridge_message ||
+    "another bridge action reached VaM before this request";
+  const leaseNote = result.lease
+    ? " Required packages remain enabled by the new lease."
+    : "";
+  throw new Error(
+    `${actionLabel} was not queued because ${reason}.${leaseNote} Retry after the current bridge action finishes.`,
+  );
 }
 
 function errorMessage(error) {

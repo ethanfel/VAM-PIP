@@ -10,28 +10,36 @@ import uuid
 from vampip.runtime import atomic_write_text
 
 
-PROTOCOL_VERSION = 1
+PROTOCOL_VERSION = 2
 BRIDGE_RELATIVE_DIR = Path("Saves") / "PluginData" / "VAMPip" / "Bridge"
+MAX_RESOURCE_REF_LENGTH = 1000
+SCENE_RESOURCE_PREFIX = "Saves/scene/"
+PERSON_PRESET_PREFIXES = {
+    "appearance": "Custom/Atom/Person/Appearance/",
+    "animation": "Custom/Atom/Person/AnimationPresets/",
+    "breastPhysics": "Custom/Atom/Person/BreastPhysics/",
+    "clothing": "Custom/Atom/Person/Clothing/",
+    "general": "Custom/Atom/Person/General/",
+    "glutePhysics": "Custom/Atom/Person/GlutePhysics/",
+    "hair": "Custom/Atom/Person/Hair/",
+    "morphs": "Custom/Atom/Person/Morphs/",
+    "plugins": "Custom/Atom/Person/Plugins/",
+    "pose": "Custom/Atom/Person/Pose/",
+    "skin": "Custom/Atom/Person/Skin/",
+}
 
 
 def bridge_directory(vam_root: Path) -> Path:
     return vam_root.resolve() / BRIDGE_RELATIVE_DIR
 
 
-def request_rescan(
-    vam_root: Path,
-    *,
-    browser_assist: str = "auto",
-) -> str:
-    if browser_assist not in {"auto", "off"}:
-        raise ValueError("browser_assist must be 'auto' or 'off'")
+def _write_request(vam_root: Path, document: dict[str, object]) -> str:
     request_id = uuid.uuid4().hex
     document = {
         "protocol": PROTOCOL_VERSION,
         "requestId": request_id,
-        "command": "rescan",
         "createdAtUtc": datetime.now(timezone.utc).isoformat(),
-        "browserAssist": browser_assist,
+        **document,
     }
     path = bridge_directory(vam_root) / "request.json"
     atomic_write_text(
@@ -41,8 +49,202 @@ def request_rescan(
     return request_id
 
 
-def read_bridge_status(vam_root: Path) -> dict[str, object] | None:
-    path = bridge_directory(vam_root) / "status.json"
+def request_rescan(
+    vam_root: Path,
+    *,
+    browser_assist: str = "auto",
+) -> str:
+    if browser_assist not in {"auto", "off"}:
+        raise ValueError("browser_assist must be 'auto' or 'off'")
+    return _write_request(
+        vam_root,
+        {
+            "command": "rescan",
+            "browserAssist": browser_assist,
+        },
+    )
+
+
+def _validate_target_uid(target_uid: str) -> str:
+    if not isinstance(target_uid, str):
+        raise TypeError("target_uid must be a string")
+    target_uid = target_uid.strip()
+    if not target_uid or len(target_uid) > 200:
+        raise ValueError("target_uid must contain 1 to 200 characters")
+    if any(ord(character) < 32 or ord(character) == 127 for character in target_uid):
+        raise ValueError("target_uid must not contain control characters")
+    return target_uid
+
+
+def _validate_person_preset_resource_ref(
+    preset_kind: str,
+    resource_ref: str,
+) -> None:
+    try:
+        required_prefix = PERSON_PRESET_PREFIXES[preset_kind]
+    except KeyError as error:
+        accepted = ", ".join(PERSON_PRESET_PREFIXES)
+        raise ValueError(f"preset_kind must be one of: {accepted}") from error
+    _validate_allowlisted_resource_ref(
+        resource_ref,
+        required_prefix=required_prefix,
+        extension=".vap",
+        require_preset_basename=True,
+    )
+
+
+def _validate_allowlisted_resource_ref(
+    resource_ref: str,
+    *,
+    required_prefix: str,
+    extension: str,
+    require_preset_basename: bool,
+) -> None:
+    if not resource_ref or len(resource_ref) > MAX_RESOURCE_REF_LENGTH:
+        raise ValueError(
+            f"resource_ref must contain 1 to {MAX_RESOURCE_REF_LENGTH} characters"
+        )
+    if resource_ref != resource_ref.strip():
+        raise ValueError("resource_ref must not have leading or trailing whitespace")
+    if "\\" in resource_ref:
+        raise ValueError("resource_ref must use forward slashes")
+    if any(ord(character) < 32 or ord(character) == 127 for character in resource_ref):
+        raise ValueError("resource_ref must not contain control characters")
+    if resource_ref.startswith("/") or "://" in resource_ref:
+        raise ValueError("resource_ref must not be an absolute path or URI")
+    if not resource_ref.casefold().endswith(extension.casefold()):
+        raise ValueError(f"resource_ref must name a {extension} resource")
+    if (
+        require_preset_basename
+        and not resource_ref.rsplit("/", 1)[-1].casefold().startswith("preset_")
+    ):
+        raise ValueError("resource_ref basename must begin with Preset_")
+    if any(segment in {"", ".", ".."} for segment in resource_ref.split("/")):
+        raise ValueError("resource_ref must not contain empty, '.' or '..' segments")
+
+    package_separator = resource_ref.find(":/")
+    if package_separator < 0:
+        if ":" in resource_ref or not resource_ref.casefold().startswith(
+            required_prefix.casefold()
+        ):
+            raise ValueError(f"local resource_ref must begin with {required_prefix}")
+        return
+
+    package_ref = resource_ref[:package_separator]
+    package_member = resource_ref[package_separator + 2 :]
+    package_parts = package_ref.split(".")
+    if (
+        ":" in package_ref
+        or "/" in package_ref
+        or len(package_parts) < 3
+        or any(not part for part in package_parts)
+        or ":" in package_member
+        or not package_member.casefold().startswith(required_prefix.casefold())
+    ):
+        raise ValueError(
+            "packaged resource_ref must be "
+            f"creator.package.version:/{required_prefix}*{extension}"
+        )
+    if ":/" in package_member:
+        raise ValueError("resource_ref contains more than one package separator")
+
+
+def request_person_preset(
+    vam_root: Path,
+    target_uid: str,
+    preset_kind: str,
+    resource_ref: str,
+    *,
+    rescan: bool = True,
+    merge: bool = False,
+) -> str:
+    target_uid = _validate_target_uid(target_uid)
+    if not isinstance(resource_ref, str):
+        raise TypeError("resource_ref must be a string")
+    _validate_person_preset_resource_ref(preset_kind, resource_ref)
+    if not isinstance(rescan, bool):
+        raise TypeError("rescan must be a bool")
+    if not isinstance(merge, bool):
+        raise TypeError("merge must be a bool")
+
+    return _write_request(
+        vam_root,
+        {
+            "command": "applyPersonPreset",
+            "targetUid": target_uid,
+            "presetKind": preset_kind,
+            "resourceRef": resource_ref,
+            "rescan": rescan,
+            "merge": merge,
+        },
+    )
+
+
+def request_add_person(vam_root: Path, target_uid: str) -> str:
+    return _write_request(
+        vam_root,
+        {
+            "command": "addPerson",
+            "targetUid": _validate_target_uid(target_uid),
+        },
+    )
+
+
+def request_select_person(vam_root: Path, target_uid: str) -> str:
+    return _write_request(
+        vam_root,
+        {
+            "command": "selectPerson",
+            "targetUid": _validate_target_uid(target_uid),
+        },
+    )
+
+
+def request_select_atom(vam_root: Path, target_uid: str) -> str:
+    return _write_request(
+        vam_root,
+        {
+            "command": "selectAtom",
+            "targetUid": _validate_target_uid(target_uid),
+        },
+    )
+
+
+def request_scene_load(
+    vam_root: Path,
+    resource_ref: str,
+    *,
+    rescan: bool = True,
+    merge: bool = False,
+) -> str:
+    if not isinstance(resource_ref, str):
+        raise TypeError("resource_ref must be a string")
+    _validate_allowlisted_resource_ref(
+        resource_ref,
+        required_prefix=SCENE_RESOURCE_PREFIX,
+        extension=".json",
+        require_preset_basename=False,
+    )
+    if not isinstance(rescan, bool):
+        raise TypeError("rescan must be a bool")
+    if not isinstance(merge, bool):
+        raise TypeError("merge must be a bool")
+    return _write_request(
+        vam_root,
+        {
+            "command": "loadScene",
+            "resourceRef": resource_ref,
+            "rescan": rescan,
+            "merge": merge,
+        },
+    )
+
+
+def _read_bridge_document(
+    path: Path,
+    *,
+    accepted_protocols: frozenset[int] = frozenset({PROTOCOL_VERSION}),
+) -> dict[str, object] | None:
     try:
         document = json.loads(path.read_text(encoding="utf-8"))
     except (FileNotFoundError, OSError, UnicodeDecodeError, json.JSONDecodeError):
@@ -55,20 +257,56 @@ def read_bridge_status(vam_root: Path) -> dict[str, object] | None:
             protocol = int(protocol)
         except ValueError:
             return None
-    if protocol != PROTOCOL_VERSION:
+    if isinstance(protocol, bool) or protocol not in accepted_protocols:
         return None
-    document["protocol"] = PROTOCOL_VERSION
+    document["protocol"] = protocol
+    return document
 
-    # VaM 1.22's bundled SimpleJSON can serialize AsBool/AsInt values as
-    # JSON strings. Normalize the protocol-1 fields while still accepting
-    # native JSON scalars from newer runtimes.
-    ok = document.get("ok")
-    if isinstance(ok, str):
-        folded = ok.strip().casefold()
-        if folded == "true":
-            document["ok"] = True
-        elif folded == "false":
-            document["ok"] = False
+
+def _normalize_bool(document: dict[str, object], key: str) -> None:
+    value = document.get(key)
+    if not isinstance(value, str):
+        return
+    folded = value.strip().casefold()
+    if folded == "true":
+        document[key] = True
+    elif folded == "false":
+        document[key] = False
+
+
+def read_scene_status(vam_root: Path) -> dict[str, object] | None:
+    document = _read_bridge_document(bridge_directory(vam_root) / "scene.json")
+    if document is None:
+        return None
+    _normalize_bool(document, "loading")
+    persons = document.get("persons")
+    if isinstance(persons, list):
+        for person in persons:
+            if isinstance(person, dict):
+                _normalize_bool(person, "selected")
+    atoms = document.get("atoms")
+    if isinstance(atoms, list):
+        for atom in atoms:
+            if isinstance(atom, dict):
+                _normalize_bool(atom, "selected")
+    return document
+
+
+def read_bridge_request(vam_root: Path) -> dict[str, object] | None:
+    return _read_bridge_document(bridge_directory(vam_root) / "request.json")
+
+
+def read_bridge_status(vam_root: Path) -> dict[str, object] | None:
+    document = _read_bridge_document(
+        bridge_directory(vam_root) / "status.json",
+        accepted_protocols=frozenset({1, PROTOCOL_VERSION}),
+    )
+    if document is None:
+        return None
+
+    # VaM 1.22's bundled SimpleJSON can serialize AsBool values as JSON
+    # strings. Normalize them while still accepting native JSON scalars.
+    _normalize_bool(document, "ok")
     return document
 
 

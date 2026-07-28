@@ -18,6 +18,7 @@ from vampip.catalog import (
 )
 from vampip.database import connect
 from vampip.inventory import scan
+from vampip.service import ManagerService
 
 
 def write_json(path: Path, document: object) -> None:
@@ -186,6 +187,24 @@ class CatalogTests(unittest.TestCase):
             self.assertTrue(looks["items"][0]["missing"])
             self.assertEqual(looks["items"][0]["missing_reason"], "package")
 
+            combined = search_resources(
+                database,
+                self.vam_root,
+                resource_types=["scene", "PRESET APPEARANCE"],
+            )
+            self.assertEqual(combined["total"], 3)
+            person_only = search_resources(
+                database,
+                self.vam_root,
+                resource_types=["Scene", "Preset Appearance"],
+                atom_types=["person"],
+            )
+            self.assertEqual(person_only["total"], 1)
+            self.assertEqual(
+                person_only["items"][0]["resource_type"],
+                "Preset Appearance",
+            )
+
             local_result = search_resources(database, self.vam_root, query="Local")
             self.assertEqual(local_result["total"], 1)
             self.assertTrue(local_result["items"][0]["hidden"])
@@ -288,6 +307,212 @@ class CatalogTests(unittest.TestCase):
             self.assertEqual(
                 after_database_failure["items"][0]["resource_type"], "Scene"
             )
+
+    def test_refresh_preserves_only_omitted_hidden_package_resources(self) -> None:
+        hidden_resource = {
+            "creatorName": "Creator",
+            "packageName": "HiddenLook",
+            "resourceFullFileName": ("Custom\\Atom\\Person\\Hair\\Preset_Hidden.vap"),
+            "resourceType": "Preset Hair",
+            "presetAtomType": "Person",
+            "varVersions": ["1"],
+        }
+        active_resource = {
+            "creatorName": "Creator",
+            "packageName": "ActiveLook",
+            "resourceFullFileName": ("Custom\\Atom\\Person\\Hair\\Preset_Active.vap"),
+            "resourceType": "Preset Hair",
+            "presetAtomType": "Person",
+            "varVersions": ["1"],
+        }
+        uninstalled_resource = {
+            "creatorName": "Creator",
+            "packageName": "UninstalledLook",
+            "resourceFullFileName": (
+                "Custom\\Atom\\Person\\Hair\\Preset_Uninstalled.vap"
+            ),
+            "resourceType": "Preset Hair",
+            "presetAtomType": "Person",
+            "varVersions": ["1"],
+        }
+        local_resource = {
+            "resourceFullFileName": ("Custom\\Atom\\Person\\Hair\\Preset_Local.vap"),
+            "resourceType": "Preset Hair",
+            "presetAtomType": "Person",
+        }
+        hidden_path = self.addons / "Creator.HiddenLook.1.var"
+        make_var(
+            hidden_path,
+            creator="Creator",
+            package="HiddenLook",
+            members={
+                "Custom/Atom/Person/Hair/Preset_Hidden.vap": b"{}",
+            },
+        )
+        hidden_path.rename(Path(f"{hidden_path}.vampip-disabled"))
+        make_var(
+            self.addons / "Creator.ActiveLook.1.var",
+            creator="Creator",
+            package="ActiveLook",
+            members={
+                "Custom/Atom/Person/Hair/Preset_Active.vap": b"{}",
+            },
+        )
+        self.write_catalogue(
+            [hidden_resource, active_resource, uninstalled_resource],
+            user=[
+                {
+                    "creatorName": "Creator",
+                    "packageName": "HiddenLook",
+                    "resourceFullFileName": hidden_resource["resourceFullFileName"],
+                    "baFavourite": "Active",
+                    "Tags": [
+                        {"tagName": "keeper", "tagCategory": "User"},
+                    ],
+                }
+            ],
+            local=[local_resource],
+        )
+
+        with connect(self.state) as database:
+            scan(self.addons, database)
+            initial = import_browserassist(database, self.vam_root)
+            self.assertEqual(initial.resource_count, 4)
+            hidden_before = search_resources(
+                database,
+                self.vam_root,
+                query="Hidden",
+            )["items"][0]
+            hidden_id = hidden_before["id"]
+
+            self.write_catalogue([], user=[], local=[])
+            refreshed = import_browserassist(database, self.vam_root)
+
+            self.assertEqual(refreshed.resource_count, 1)
+            self.assertEqual(refreshed.packaged_count, 1)
+            self.assertEqual(refreshed.local_count, 0)
+            self.assertEqual(refreshed.preserved_hidden_count, 1)
+            remaining = search_resources(database, self.vam_root)
+            self.assertEqual(remaining["total"], 1)
+            kept = remaining["items"][0]
+            self.assertEqual(kept["id"], hidden_id)
+            self.assertTrue(kept["favorite"])
+            self.assertEqual(
+                kept["tags"],
+                [{"tagName": "keeper", "tagCategory": "User"}],
+            )
+            self.assertEqual(kept["versions"], ["1"])
+            hidden = search_resources(
+                database,
+                self.vam_root,
+                addon_root=self.addons,
+                package_state="hidden",
+            )
+            self.assertEqual(hidden["total"], 1)
+            location = resolve_resource_archive(
+                database,
+                self.vam_root,
+                hidden_id,
+                addon_root=self.addons,
+            )
+            self.assertIsNotNone(location)
+            assert location is not None
+            self.assertFalse(location.enabled)
+            self.assertTrue(str(location.archive_path).endswith(".var.vampip-disabled"))
+            self.assertEqual(
+                [
+                    row["version_text"]
+                    for row in database.execute(
+                        """
+                        SELECT version_text
+                        FROM catalog_resource_versions
+                        WHERE resource_id = ?
+                        """,
+                        (hidden_id,),
+                    )
+                ],
+                ["1"],
+            )
+            self.assertEqual(
+                database.execute(
+                    """
+                    SELECT resource_count
+                    FROM catalog_sources
+                    WHERE root = ? AND source = 'browserassist'
+                    """,
+                    (str(self.vam_root.resolve()),),
+                ).fetchone()[0],
+                1,
+            )
+
+            updated_hidden = dict(hidden_resource)
+            updated_hidden["resourceType"] = "Preset Appearance"
+            updated_hidden["varVersions"] = ["2"]
+            self.write_catalogue([updated_hidden], user=[], local=[])
+            reappeared = import_browserassist(database, self.vam_root)
+            self.assertEqual(reappeared.preserved_hidden_count, 0)
+            updated = search_resources(database, self.vam_root)["items"][0]
+            self.assertEqual(updated["id"], hidden_id)
+            self.assertEqual(updated["resource_type"], "Preset Appearance")
+            self.assertEqual(updated["versions"], ["2"])
+            self.assertEqual(
+                [
+                    row["version_text"]
+                    for row in database.execute(
+                        """
+                        SELECT version_text
+                        FROM catalog_resource_versions
+                        WHERE resource_id = ?
+                        """,
+                        (hidden_id,),
+                    )
+                ],
+                ["2"],
+            )
+
+    def test_manager_import_uses_configured_addon_root_for_hidden_rows(self) -> None:
+        alternate_addons = Path(self.temporary.name) / "AlternateAddons"
+        alternate_addons.mkdir()
+        hidden_path = alternate_addons / "Creator.HiddenLook.1.var"
+        make_var(
+            hidden_path,
+            creator="Creator",
+            package="HiddenLook",
+            members={
+                "Custom/Atom/Person/Hair/Preset_Hidden.vap": b"{}",
+            },
+        )
+        hidden_path.rename(Path(f"{hidden_path}.vampip-disabled"))
+        resource = {
+            "creatorName": "Creator",
+            "packageName": "HiddenLook",
+            "resourceFullFileName": ("Custom\\Atom\\Person\\Hair\\Preset_Hidden.vap"),
+            "resourceType": "Preset Hair",
+            "presetAtomType": "Person",
+            "varVersions": ["1"],
+        }
+        self.write_catalogue([resource])
+        service = ManagerService(
+            alternate_addons,
+            self.state,
+            vam_root=self.vam_root,
+            process_probe=lambda: [],
+        )
+
+        initial = service.import_catalog()
+        self.assertEqual(initial["resource_count"], 1)
+        self.write_catalogue([])
+        refreshed = service.import_catalog()
+        self.assertEqual(refreshed["resource_count"], 1)
+        self.assertEqual(refreshed["preserved_hidden_count"], 1)
+        with connect(self.state) as database:
+            result = search_resources(
+                database,
+                self.vam_root,
+                addon_root=alternate_addons,
+                package_state="hidden",
+            )
+        self.assertEqual(result["total"], 1)
 
     def test_resolver_verifies_the_member_in_an_allowed_version(self) -> None:
         resource_path = "Saves\\scene\\Versioned.json"

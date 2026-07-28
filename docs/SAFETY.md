@@ -22,7 +22,8 @@ Managed mode is designed to:
   conflicts;
 - avoid hiding packages from a live VaM process;
 - constrain the web service to an authenticated loopback interface;
-- give the VaM bridge no authority beyond requesting a package rescan.
+- limit the VaM bridge to package rescans and a small registry of statically
+  allowlisted live operations.
 
 It is not a sandbox, package-signature system, malware scanner, or defense
 against a malicious process already running as the same Linux user.
@@ -141,13 +142,36 @@ server stopped.
 
 ### 10. The bridge cannot manage files
 
-The bridge protocol accepts one operation: `rescan`. It accepts no paths,
-package IDs, delete requests, process commands, or network connections.
+The bridge cannot rename, enable, disable, or delete package/content files and
+accepts no process commands or network connections. Its only writes are its
+own status and scene-snapshot mailbox files. Protocol 2 accepts core package
+rescans and a small registry of bounded live operations: list/select atoms,
+idempotently add/select a Person, apply one of eleven native Person preset
+families, and replace or merge a Scene.
 
 The Linux manager completes archive renames and its inventory update before
-publishing `request.json`. The C# plugin performs the rescan synchronously on
-Unity's main thread, defers during scene loading, coalesces requests, suppresses
-duplicate IDs, and rate-limits work.
+publishing `request.json`. The generic resource HTTP endpoint accepts only a
+numeric catalogue resource ID, typed booleans, and an optional target UID. The
+manager resolves the exact installed archive member or safe loose file;
+clients cannot provide a path, storable ID, or action name. Scene replacement
+requires a strict `confirm_replace: true` value at the service boundary.
+General and Person Plugin presets require a separate strict
+`confirm_critical: true` value.
+
+The Python writer and C# reader both allow Person `.vap` files named
+`Preset_*` only below a static kind-specific `Custom/Atom/Person/.../`
+directory. Scenes must be `.json` files below `Saves/scene/`. They reject
+absolute paths, URIs, traversal, backslashes, control characters, mismatched
+prefixes, and malformed package references. The plugin also requires
+`FileManagerSecure.FileExists`, revalidates live atom types, and invokes only
+fixed preset storables/actions or `SuperController.Load`/`LoadMerge`. It
+contains no arbitrary storable/action surface.
+
+The C# plugin performs rescans synchronously on Unity's main thread, defers
+during scene loading, coalesces compatible rescan requests, serializes all
+mutations, suppresses duplicate IDs, and rate-limits rescans. A recent
+`scene.json` heartbeat tied to the loaded bridge instance is required before
+the web UI enables a live action.
 
 ## Safe behavior by VaM state
 
@@ -157,6 +181,9 @@ duplicate IDs, and rate-limits work.
 | Enable desired packages | Applied | Applied |
 | Hide undesired packages | Applied | Deferred |
 | Release/expire a lease | Reconciled fully | Removal deferred |
+| Apply Person preset | Unavailable; browse only | Enabled closure, rescan, then replace/merge |
+| Load or merge Scene | Unavailable; browse only | Enabled closure, rescan, then confirmed load/merge |
+| Add/select Person or select atom | Unavailable | Allowed through an idempotent/bounded command |
 | Apply managed-mode deactivation | Allowed | Refused |
 | Apply manual switch rollback | Run only while closed | Refused by CLI |
 | Apply one-shot profile activation | Allowed | Refused by CLI |
@@ -352,8 +379,8 @@ can freeze VaM briefly.
 | Partial multi-file switch | Prewritten canonical plan, batched `fsync`ed append-only progress, filesystem identity inspection, preflighted rollback, best-effort automatic reverse rollback | SIGKILL can leave a rename ahead of a progress batch; archive directories are not `fsync`ed, and no transaction spans every rename |
 | SQLite/filesystem split state | Baseline and mode updates are deliberately ordered around switches | No transaction spans SQLite and archive renames; a crash requires checking both |
 | Live package removal | Running VaM gets enable-only plans | A false-negative process probe can make an unsafe disable possible |
-| Bridge abuse | Rescan-only schema, duplicate suppression, loading deferral, five-second rate limit | A same-user process or VaM plugin can still cause periodic rescan stalls |
-| BrowserAssist volatility | Pre-read 64 MiB size check, before/after fingerprint snapshot, schema validation, savepoint | A concurrently growing file is read before rejection and can exceed 64 MiB in memory; catalog can remain stale until imported again |
+| Bridge abuse | Allowlisted commands, server-side catalogue resolution, duplicate/single-flight handling, dual kind/path validation, fixed preset/Scene actions, fresh atom-roster heartbeat, loading deferral, five-second rescan rate limit | A same-user process with token or mailbox access can still request a valid preset or Scene change or periodic rescan; a VaM plugin already has comparable scene authority |
+| BrowserAssist volatility | Pre-read 64 MiB size check, before/after fingerprint snapshot, schema validation, savepoint, preservation of exact installed hidden-package rows | A concurrently growing file is read before rejection and can exceed 64 MiB in memory; metadata for hidden resources remains last-good until BrowserAssist sees them again |
 | Malformed session defaults | Fixed preset path, 16 MiB read bound, strict JSON/slot/reference validation, complete package resolution before activation | The preset expresses availability intent only; VaM remains responsible for executing the selected plugins |
 | Malicious package payload | No archive extraction; targeted bounded thumbnail/reference reads | VaM itself executes plugins; VAM-PIP does not establish package trust |
 | Launch command injection | Script must be executable below VaM root and is passed without a shell | A malicious configured script file still executes with the user's authority |

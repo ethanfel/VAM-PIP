@@ -449,13 +449,21 @@ The importer treats BrowserAssist output as a snapshot:
 3. record device, inode, size, and modification time;
 4. parse and validate every document before database mutation;
 5. re-enumerate and compare all fingerprints;
-6. upsert resources and remove stale rows inside a SQLite savepoint.
+6. upsert resources and reconcile stale rows inside a SQLite savepoint.
 
 Any read, schema, snapshot, or database failure preserves the last good
 generation. Stable logical keys keep resource IDs unchanged across successful
 refreshes. The importer uses `read_bytes()` after the initial size check, so a
 file that grows concurrently can temporarily allocate more than 64 MiB before
 the changed fingerprint is rejected.
+
+BrowserAssist cannot include resources from packages VAM-PIP has hidden. An
+omitted packaged row is therefore preserved only when one of its exact old
+version links still matches a valid hidden archive and no valid enabled copy.
+Its metadata and version links remain the last-good values. Omitted local
+resources and rows from active, uninstalled, or invalid packages are deleted
+normally. The reported generation count is the effective merged count, with
+`preserved_hidden_count` exposing how many offline rows survived.
 
 Packaged resources are joined to BrowserAssist favorites, hidden flags, and
 tags by exact creator, package, and resource path. Local resources use a
@@ -493,13 +501,21 @@ served from an explicit three-file allowlist. Every `/api/` request requires
 the manager token.
 
 Read endpoints expose status, lightweight live activity, packages, resources,
-facets, thumbnails, and the detected default session plugins. `/api/activity`
-does not take the filesystem manager lock, so the UI can report the real VaM
-process state and batched reconciliation/rollback progress while a large
-switch is running. Mutating endpoints cover scans, catalog imports,
-session-default imports, pins, leases, reconciliation, deactivation, settings,
-and VaM launch. The HTTP layer only validates and translates requests; it
-delegates behavior to `ManagerService`.
+facets, thumbnails, the detected default session plugins, the server-owned
+workspace category registry, and a fresh bounded scene/atom snapshot at
+`/api/vam/scene`. `/api/vam/persons` remains a compatibility alias.
+`/api/activity` does not take the filesystem manager lock, so the UI can
+report the real VaM process state and batched reconciliation/rollback progress
+while a large switch is running.
+
+Mutating endpoints cover scans, catalog imports, session-default imports,
+pins, leases, reconciliation, deactivation, settings, VaM launch, atom
+selection, Person add/select, and catalogue-backed resource application at
+`/api/vam/resource/apply`. The generic apply route currently dispatches only
+the eleven allowlisted Person preset types and Scene replace/merge. Other
+workspace categories are browse-only. The older `/api/vam/person/apply`
+remains as a narrower compatibility route. The HTTP layer only validates and
+translates requests; it delegates behavior to `ManagerService`.
 
 The token is generated with `secrets.token_urlsafe(32)` and stored in
 `manager_settings`. The launch URL carries it in a fragment. The UI moves it to
@@ -550,7 +566,7 @@ making replacement atomic for live readers:
 
 ```json
 {
-  "protocol": 1,
+  "protocol": 2,
   "requestId": "2f8fda6cb78145a087980e477b0c5c1e",
   "command": "rescan",
   "createdAtUtc": "2026-07-28T12:00:00+00:00",
@@ -558,20 +574,72 @@ making replacement atomic for live readers:
 }
 ```
 
-Protocol 1 accepts only `command: "rescan"` and `browserAssist: "auto"` or
-`"off"`. Package names and filesystem paths are deliberately absent.
+Protocol 2 retains `command: "rescan"` and `browserAssist: "auto"` or
+`"off"`. Ordered Person preset requests use one of eleven static
+`presetKind` mappings and an explicit replace/merge flag:
+
+```json
+{
+  "protocol": 2,
+  "requestId": "34c305b415ae43d9a317524f104caabe",
+  "command": "applyPersonPreset",
+  "createdAtUtc": "2026-07-28T12:00:00+00:00",
+  "targetUid": "Person",
+  "presetKind": "hair",
+  "resourceRef": "Creator.Hair.1:/Custom/Atom/Person/Hair/Preset_Long.vap",
+  "rescan": true,
+  "merge": false
+}
+```
+
+Scene loading uses the same mailbox:
+
+```json
+{
+  "protocol": 2,
+  "requestId": "c42d236a546c452b96944b53b544a563",
+  "command": "loadScene",
+  "createdAtUtc": "2026-07-28T12:01:00+00:00",
+  "resourceRef": "Creator.Scene.4:/Saves/scene/Demo.json",
+  "rescan": true,
+  "merge": false
+}
+```
+
+The web API accepts only a numeric catalogue resource ID plus typed options
+and, for Person presets, a target UID. `ManagerService` resolves that ID to an
+installed archive member or safe loose file, creates the exact dependency
+lease, enables it, and derives `resourceRef`; the browser cannot provide the
+reference. Non-merge Scene loading additionally requires
+`confirm_replace: true` at the API boundary.
+Critical General and Person Plugin presets require
+`confirm_critical: true`.
+
+Both Python and C# require Person presets to be `.vap` files named `Preset_*`
+below the preset kind's static `Custom/Atom/Person/.../` prefix. Scene
+references must be `.json` files below `Saves/scene/`. Both layers reject
+traversal, absolute/URI/control-character forms, backslashes, malformed
+package identities, and mismatched prefixes. The plugin confirms every file
+through `FileManagerSecure`.
 
 The session plugin:
 
 - polls twice per second from Unity's main thread;
-- treats the file as a latest-desired-state mailbox and coalesces replacements;
+- coalesces only compatible rescan requests;
+- serializes every live mutation and refuses an overwrite while one is pending;
 - ignores the last handled request ID;
 - defers while `SuperController.singleton.isLoading`;
 - rate-limits rescans to one every five seconds;
 - calls `SuperController.singleton.RescanPackages()` directly;
+- maps each Person preset kind to one fixed prefix and one fixed native preset
+  storable, sets its validated `presetBrowsePath`, and invokes only
+  `LoadPreset` or `MergeLoadPreset`;
+- loads Scenes only through `SuperController.Load` or `LoadMerge`;
+- lists/selects atoms and idempotently creates a Person with a caller-chosen
+  UID;
 - never enables, disables, deletes, or launches anything.
 
-Protocol 1 retains the `browserAssist` field for compatibility, but the bridge
+Protocol 2 retains the `browserAssist` field for compatibility, but the bridge
 does not call BrowserAssist internals. VaM prohibits reflection in loose
 plugins, and BrowserAssist exposes no sandbox-safe package-rescan action.
 BrowserAssist must be reloaded when it needs to rebuild its own manifest.
@@ -579,12 +647,16 @@ BrowserAssist must be reloaded when it needs to rebuild its own manifest.
 ### Status
 
 The plugin writes `status.json` with protocol/version, plugin instance ID,
-request ID, last completed ID, state, timestamps, backend, and a diagnostic
-message. Valid states are:
+request ID, last completed ID, state, timestamps, backend, capabilities, and a
+diagnostic message. Valid request states are:
 
-- `ready`;
+- `queued`;
 - `deferred-loading`;
 - `rescanning`;
+- `applying`;
+- `adding`;
+- `selecting`;
+- `loading-scene`;
 - `ok`;
 - `error`.
 
@@ -592,10 +664,17 @@ message. Valid states are:
 
 Status writes are not atomic. The Linux reader therefore treats a missing,
 malformed-JSON, non-object, or wrong-protocol status as temporarily
-unavailable. It does not otherwise schema-validate protocol-1 status fields. A
-completed ID is carried forward and recovered on plugin restart. A request
-that did not reach `ok` is eligible for one attempt in each new plugin session;
-it is not retried repeatedly within one session.
+unavailable. It still reads protocol-1 status for upgrade diagnostics, but
+only protocol 2 can publish live workspace capabilities. A completed ID is carried
+forward and recovered on plugin restart. A request that did not reach `ok` is
+eligible for one attempt in each new plugin session; it is not retried
+repeatedly within one session.
+
+The plugin also rewrites `scene.json` once per second with its instance ID,
+loading state, selected atom UID, bounded all-atom roster, compatibility
+Person roster, and capabilities. The manager requires a recent heartbeat
+whose instance matches `status.json`; stale files from a previous VaM process
+do not enable live controls.
 
 The manager publishes a request but does not block until `ok`; callers that
 need confirmation must poll status and match `requestId` themselves.

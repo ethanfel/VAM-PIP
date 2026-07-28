@@ -21,7 +21,7 @@ leaving managed mode restores that baseline.
 
 ## Current status
 
-Version 0.3.5 is functional but should still be treated as an early release.
+Version 0.4.0 is functional but should still be treated as an early release.
 Package switching is deliberately conservative:
 
 - entering managed mode requires explicit confirmation;
@@ -103,6 +103,13 @@ Selecting a packaged resource creates a lease containing its archive, declared
 text. The lease stores exact resolved package versions, so a later catalogue
 change does not silently alter an active lease.
 
+When BrowserAssist refreshes while managed packages are hidden, its new
+snapshot omits many resources it cannot currently see. VAM-PIP preserves the
+last-good catalogue rows for exact installed hidden package versions, while
+still removing stale local, uninstalled, invalid, and active-package entries.
+This keeps hidden looks and hair searchable without treating every old row as
+permanent.
+
 No dependency scanner can identify packages loaded dynamically by every
 third-party script. Pin known runtime plugins that a collection always needs.
 
@@ -123,6 +130,12 @@ Install the optional session bridge:
 ./vampip manager bridge install
 ```
 
+To replace an older VAM-PIP bridge with protocol 2:
+
+```bash
+./vampip manager bridge install --force
+```
+
 Then, once in VaM:
 
 1. open **Session Plugins**;
@@ -132,10 +145,48 @@ Then, once in VaM:
 The bridge is a loose script, so VAM-PIP detects it in that preset but does not
 create a package pin for it.
 
-The bridge polls a local mailbox, coalesces requests, waits while VaM is
-loading, and invokes VaM's core package rescan. BrowserAssist must be reloaded
-when it needs to rebuild its private package/resource manifest. The bridge
-cannot rename files, run commands, or accept arbitrary paths.
+The bridge polls a local mailbox, coalesces compatible rescan requests,
+serializes live actions, waits while VaM is loading, and invokes VaM's core
+package rescan. BrowserAssist must be reloaded when it needs to rebuild its
+private package/resource manifest. The bridge cannot rename files, run
+commands, accept operating-system paths, or invoke arbitrary VaM storables.
+
+## External workspace
+
+The **Workspace** tab is a capability-driven companion to VaM's asset UI. It
+organizes the complete imported catalogue into Scenes, SubScenes, atom
+presets, Custom Unity Assets, plugins, clothing, and all Person preset
+families. Every category says whether it is:
+
+- browseable from the offline catalogue;
+- loadable through the current bridge;
+- waiting for a typed live-state implementation.
+
+This version can load or merge a Scene, list and select live atoms, add/select
+a Person, and replace or merge all eleven native Person preset families:
+Appearance, Animation, Breast Physics, Clothing, General, Glute Physics, Hair,
+Morphs, Person Plugins, Pose, and Skin. Replacing a Scene requires explicit
+confirmation in both the browser and API. General and Person Plugin presets
+also require a separate critical-action confirmation because they can replace
+broad state or load executable code.
+
+For every live resource action VAM-PIP:
+
+1. resolves the numeric catalogue ID to an exact installed resource;
+2. creates a three-day dependency-closed lease;
+3. enables required packages without hiding anything from the running game;
+4. asks VaM to rescan and performs one statically allowlisted operation.
+
+The browser never submits a resource path, storable name, or action name.
+SubScenes, non-Person atom presets, individual clothing, Custom Unity Assets,
+and raw plugins are already browseable but remain action-disabled until their
+target state and safety options have explicit contracts. In particular, raw
+plugins execute code and the BrowserAssist catalogue mixes entry scripts with
+helper source files.
+
+See [the external workspace map](docs/EXTERNAL-WORKSPACE.md) and the
+[Person-specific capability map](docs/PERSON-WORKSPACE.md) for the exact
+implemented and planned surfaces.
 
 See [bridge/vam/README.md](bridge/vam/README.md) for the protocol and manual
 installation layout.
@@ -168,7 +219,7 @@ The browser uses the same service exposed by `vampip manager`:
 
 # BrowserAssist catalogue
 ./vampip manager catalog import
-./vampip manager resources "my scene" --type Scenes --state hidden
+./vampip manager resources "my scene" --type Scene --state hidden
 
 # Permanent base set
 ./vampip manager pin AcidBubbles.Timeline

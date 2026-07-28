@@ -65,6 +65,7 @@ class CatalogImportResult:
     packaged_count: int
     local_count: int
     unmatched_user_rows: int
+    preserved_hidden_count: int
 
 
 @dataclass(frozen=True)
@@ -482,17 +483,25 @@ def import_browserassist(
     source_path: Path | str | None = None,
     *,
     source: str = BROWSERASSIST_SOURCE,
+    addon_root: Path | str | None = None,
 ) -> CatalogImportResult:
     """Import one stable BrowserAssist snapshot.
 
     Parsing and snapshot validation happen before database mutation. The
     logical upsert and stale-row deletion are then protected by a savepoint.
-    Existing resource IDs survive successful refreshes, while any failure
-    leaves the last-good generation untouched.
+    Existing resource IDs survive successful refreshes. Resources omitted
+    only because every installed copy of their package is hidden retain their
+    last-good metadata and version links. Any failure leaves the previous
+    generation untouched.
     """
 
     _check_schema(connection)
     root = Path(vam_root).expanduser().resolve()
+    packages_root = (
+        Path(addon_root).expanduser().resolve()
+        if addon_root is not None
+        else (root / "AddonPackages").resolve()
+    )
     catalogue_path = (
         Path(source_path).expanduser().resolve()
         if source_path is not None
@@ -506,6 +515,7 @@ def import_browserassist(
 
     imported_utc = datetime.now(timezone.utc).isoformat(timespec="microseconds")
     root_value = str(root)
+    packages_root_value = str(packages_root)
     savepoint = f"catalog_import_{uuid.uuid4().hex}"
     connection.execute(f"SAVEPOINT {savepoint}")
     try:
@@ -555,22 +565,75 @@ def import_browserassist(
                 for record in records
             ],
         )
+        hidden_stale_predicate = """
+            creator != '' AND package_name != ''
+            AND EXISTS (
+                SELECT 1
+                FROM catalog_resource_versions AS rv
+                JOIN package_files AS pf
+                  ON pf.root = ?
+                 AND pf.valid = 1
+                 AND pf.enabled = 0
+                 AND pf.creator = catalog_resources.creator COLLATE NOCASE
+                 AND pf.package_name =
+                     catalog_resources.package_name COLLATE NOCASE
+                 AND pf.version_text = rv.version_text COLLATE NOCASE
+                WHERE rv.resource_id = catalog_resources.id
+            )
+            AND NOT EXISTS (
+                SELECT 1
+                FROM catalog_resource_versions AS rv
+                JOIN package_files AS pf
+                  ON pf.root = ?
+                 AND pf.valid = 1
+                 AND pf.enabled = 1
+                 AND pf.creator = catalog_resources.creator COLLATE NOCASE
+                 AND pf.package_name =
+                     catalog_resources.package_name COLLATE NOCASE
+                 AND pf.version_text = rv.version_text COLLATE NOCASE
+                WHERE rv.resource_id = catalog_resources.id
+            )
+        """
+        preserved_hidden_count = int(
+            connection.execute(
+                f"""
+                SELECT COUNT(*)
+                FROM catalog_resources
+                WHERE root = ? AND source = ? AND imported_utc != ?
+                  AND ({hidden_stale_predicate})
+                """,
+                (
+                    root_value,
+                    source,
+                    imported_utc,
+                    packages_root_value,
+                    packages_root_value,
+                ),
+            ).fetchone()[0]
+        )
         connection.execute(
-            """
+            f"""
             DELETE FROM catalog_resources
             WHERE root = ? AND source = ? AND imported_utc != ?
+              AND NOT ({hidden_stale_predicate})
             """,
-            (root_value, source, imported_utc),
+            (
+                root_value,
+                source,
+                imported_utc,
+                packages_root_value,
+                packages_root_value,
+            ),
         )
         connection.execute(
             """
             DELETE FROM catalog_resource_versions
             WHERE resource_id IN (
                 SELECT id FROM catalog_resources
-                WHERE root = ? AND source = ?
+                WHERE root = ? AND source = ? AND imported_utc = ?
             )
             """,
-            (root_value, source),
+            (root_value, source, imported_utc),
         )
         resource_ids = {
             row["resource_key"]: int(row["id"])
@@ -595,6 +658,24 @@ def import_browserassist(
             """,
             version_links,
         )
+        effective_counts = connection.execute(
+            """
+            SELECT
+                COUNT(*) AS total,
+                SUM(
+                    CASE
+                        WHEN creator = '' AND package_name = '' THEN 1
+                        ELSE 0
+                    END
+                ) AS local_count
+            FROM catalog_resources
+            WHERE root = ? AND source = ?
+            """,
+            (root_value, source),
+        ).fetchone()
+        effective_total = int(effective_counts["total"])
+        effective_local = int(effective_counts["local_count"] or 0)
+        effective_packaged = effective_total - effective_local
         connection.execute(
             """
             INSERT INTO catalog_sources (
@@ -610,7 +691,7 @@ def import_browserassist(
                 source,
                 str(catalogue_path),
                 imported_utc,
-                len(records),
+                effective_total,
             ),
         )
         connection.execute(f"RELEASE SAVEPOINT {savepoint}")
@@ -623,10 +704,11 @@ def import_browserassist(
         source=source,
         source_path=catalogue_path,
         imported_utc=imported_utc,
-        resource_count=len(records),
-        packaged_count=len(packaged),
-        local_count=len(local),
+        resource_count=effective_total,
+        packaged_count=effective_packaged,
+        local_count=effective_local,
         unmatched_user_rows=len(user_rows) - len(matched_user),
+        preserved_hidden_count=preserved_hidden_count,
     )
 
 
@@ -688,7 +770,9 @@ def search_resources(
     *,
     query: str = "",
     resource_type: str | None = None,
+    resource_types: Iterable[str] | None = None,
     atom_type: str | None = None,
+    atom_types: Iterable[str] | None = None,
     creator: str | None = None,
     package_name: str | None = None,
     tag: str | None = None,
@@ -751,9 +835,29 @@ def search_resources(
         else:
             where.append(f"({packaged} AND NOT {installed})")
             parameters.append(str(packages_root))
+    selected_resource_types = {
+        value.strip()
+        for value in ([resource_type] if resource_type is not None else [])
+        + list(resource_types or ())
+        if isinstance(value, str) and value.strip()
+    }
+    selected_atom_types = {
+        value.strip()
+        for value in ([atom_type] if atom_type is not None else [])
+        + list(atom_types or ())
+        if isinstance(value, str) and value.strip()
+    }
+    for column, values in (
+        ("resource_type", selected_resource_types),
+        ("atom_type", selected_atom_types),
+    ):
+        if values:
+            ordered = sorted(values, key=str.casefold)
+            where.append(
+                "(" + " OR ".join(f"{column} = ? COLLATE NOCASE" for _ in ordered) + ")"
+            )
+            parameters.extend(ordered)
     for column, value in (
-        ("resource_type", resource_type),
-        ("atom_type", atom_type),
         ("creator", creator),
         ("package_name", package_name),
     ):

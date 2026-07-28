@@ -6,8 +6,8 @@
     <meta name="color-scheme" content="dark">
     <meta name="theme-color" content="#111316">
     <title>VAM-PIP Manager</title>
-    <link rel="stylesheet" href="/styles.css?v=0.3.5">
-    <script src="/app.js?v=0.3.5" defer></script>
+    <link rel="stylesheet" href="/styles.css?v=0.4.0">
+    <script src="/app.js?v=0.4.0" defer></script>
   </head>
   <body>
     <a class="skip-link" href="#main-content">Skip to library</a>
@@ -179,6 +179,10 @@
             Resources
             <span id="resources-tab-count">—</span>
           </button>
+          <button class="view-tab" type="button" data-view="workspace" aria-selected="false">
+            Workspace
+            <span id="workspace-tab-count">—</span>
+          </button>
           <button class="view-tab" type="button" data-view="packages" aria-selected="false">
             Packages
             <span id="packages-tab-count">—</span>
@@ -191,6 +195,128 @@
 
         <section id="library-view" aria-labelledby="library-title">
           <h2 class="visually-hidden" id="library-title">Library browser</h2>
+
+          <section class="asset-workspace" id="asset-workspace" aria-labelledby="asset-workspace-title" hidden>
+            <div class="asset-workspace-copy">
+              <span class="asset-workspace-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24">
+                  <path d="M4 7.5 12 3l8 4.5v9L12 21l-8-4.5z"></path>
+                  <path d="m4.5 7.8 7.5 4.3 7.5-4.3M12 12.1V21"></path>
+                </svg>
+              </span>
+              <div>
+                <p class="eyebrow">Asset workspace</p>
+                <h2 id="asset-workspace-title">Browse VaM without living in its menus</h2>
+                <p>Explore scenes, atoms, plugins, clothing, and Person presets offline. Live actions appear only when the bridge explicitly supports that asset family.</p>
+              </div>
+            </div>
+
+            <nav class="asset-category-navigation" aria-label="Asset workspace categories">
+              <div class="asset-category-list" id="asset-category-list">
+                <span class="asset-category-loading">Loading categories…</span>
+              </div>
+            </nav>
+
+            <section class="asset-category-panel" aria-labelledby="asset-category-title">
+              <div class="asset-category-copy">
+                <p class="eyebrow" id="asset-category-kicker">Catalogue resources</p>
+                <h3 id="asset-category-title">Scenes</h3>
+                <p id="asset-category-description">Browse complete VaM scenes from the local catalogue.</p>
+                <div class="asset-support-list" id="asset-category-support" aria-label="Category support"></div>
+                <p class="asset-category-note" id="asset-category-note"></p>
+              </div>
+
+              <fieldset class="asset-apply-mode" id="asset-apply-mode">
+                <legend>Load behavior</legend>
+                <label>
+                  <input id="asset-mode-replace" type="radio" name="asset-apply-mode" value="replace" checked>
+                  <span>Replace</span>
+                </label>
+                <label>
+                  <input id="asset-mode-merge" type="radio" name="asset-apply-mode" value="merge">
+                  <span>Merge</span>
+                </label>
+              </fieldset>
+            </section>
+
+            <section class="person-context" id="person-context" aria-labelledby="person-context-title" hidden>
+              <div class="person-context-heading">
+                <div>
+                  <p class="eyebrow">Live target</p>
+                  <h3 id="person-context-title">Target Person</h3>
+                </div>
+                <div class="person-target-controls">
+                  <label class="person-target-field" for="person-target">
+                    <span>Person atom</span>
+                    <select id="person-target" aria-describedby="person-live-detail">
+                      <option value="">Checking VaM…</option>
+                    </select>
+                  </label>
+                  <button
+                    class="secondary-button"
+                    id="select-person-button"
+                    type="button"
+                    disabled
+                    title="The loaded bridge does not support selecting a Person in VaM"
+                  >
+                    Select in VaM
+                  </button>
+                  <button
+                    class="secondary-button"
+                    id="add-person-button"
+                    type="button"
+                    disabled
+                    title="The loaded bridge does not support adding a Person yet"
+                  >
+                    Add Person
+                  </button>
+                </div>
+              </div>
+
+              <div class="person-live-state" id="person-live-state" role="status" aria-live="polite">
+                <span class="status-dot" aria-hidden="true"></span>
+                <div>
+                  <strong id="person-live-title">Checking the Person bridge…</strong>
+                  <p id="person-live-detail">Catalogue browsing remains available while the live connection is checked.</p>
+                </div>
+              </div>
+            </section>
+
+            <section class="person-context atom-context" id="atom-context" aria-labelledby="atom-context-title" hidden>
+              <div class="person-context-heading">
+                <div>
+                  <p class="eyebrow">Live target</p>
+                  <h3 id="atom-context-title">Target atom</h3>
+                </div>
+                <div class="person-target-controls">
+                  <label class="person-target-field" for="atom-target">
+                    <span>Scene atom</span>
+                    <select id="atom-target" aria-describedby="atom-live-detail">
+                      <option value="">Checking VaM…</option>
+                    </select>
+                  </label>
+                  <button
+                    class="secondary-button"
+                    id="select-atom-button"
+                    type="button"
+                    disabled
+                    title="The loaded bridge does not support selecting atoms in VaM"
+                  >
+                    Select in VaM
+                  </button>
+                </div>
+              </div>
+
+              <div class="person-live-state" id="atom-live-state" role="status" aria-live="polite">
+                <span class="status-dot" aria-hidden="true"></span>
+                <div>
+                  <strong id="atom-live-title">Checking the scene bridge…</strong>
+                  <p id="atom-live-detail">Catalogue browsing remains available while the live atom roster is checked.</p>
+                </div>
+              </div>
+            </section>
+          </section>
+
           <div class="filter-bar">
             <label class="search-field">
               <svg viewBox="0 0 24 24" aria-hidden="true">
