@@ -1,0 +1,72 @@
+name: Tests
+
+"on":
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  python:
+    name: Python ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version:
+          - "3.10"
+          - "3.11"
+          - "3.12"
+          - "3.13"
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Run standard-library test suite
+        env:
+          PYTHONPATH: ${{ github.workspace }}/src
+        run: python -m unittest discover -s tests -p "test*.py" -v
+
+  javascript:
+    name: JavaScript syntax
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Check JavaScript when Node.js is available
+        shell: bash
+        run: |
+          if ! command -v node >/dev/null 2>&1; then
+            echo "Node.js is not available; skipping JavaScript syntax checks."
+            exit 0
+          fi
+
+          files=()
+          while IFS= read -r -d '' file; do
+            files+=("$file")
+          done < <(
+            find src -type f \
+              \( -name '*.js' -o -name '*.mjs' -o -name '*.cjs' \) \
+              -print0
+          )
+
+          if (( ${#files[@]} == 0 )); then
+            echo "No JavaScript files found."
+            exit 0
+          fi
+
+          for file in "${files[@]}"; do
+            echo "Checking $file"
+            node --check "$file"
+          done

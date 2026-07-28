@@ -1,0 +1,258 @@
+# VAM-PIP
+
+VAM-PIP is a Linux-first package manager for large Virt-A-Mate libraries. It
+keeps the complete `.var` collection on disk while exposing a much smaller,
+dependency-closed set to VaM.
+
+The main interface is a local web app where you can browse the catalogue built
+by BrowserAssist, pin packages that must always remain available, and enable a
+scene or preset temporarily—three days by default.
+
+VAM-PIP does not delete or repack archives. Managed mode changes visibility
+with same-directory renames:
+
+```text
+Creator.Package.1.var
+Creator.Package.1.var.vampip-disabled
+```
+
+Every switch is journalled, the pre-manager state is saved as a baseline, and
+leaving managed mode restores that baseline.
+
+## Current status
+
+Version 0.2 is functional but should still be treated as an early release.
+Package switching is deliberately conservative:
+
+- entering managed mode requires explicit confirmation;
+- invalid archives are reported and left untouched;
+- packages are never disabled while VaM is running;
+- ambiguous same-ID copies are hashed and conflicting data is refused;
+- a failed multi-file switch rolls back completed renames automatically;
+- every applied switch has a recovery manifest.
+
+A backup of an important VaM installation is still recommended.
+
+## Requirements
+
+- Linux
+- Python 3.10 or newer
+- a VaM installation with an `AddonPackages` directory
+- BrowserAssist for in-game-style resource browsing (optional)
+- Proton only if you want VAM-PIP to invoke a Proton launch script
+
+The manager itself has no third-party Python dependencies.
+
+## Quick start
+
+Run directly from the checkout:
+
+```bash
+./vampip manager configure /path/to/VaM/AddonPackages
+./vampip manager scan
+./vampip manager catalog import
+./vampip-manager
+```
+
+`vampip-manager` opens a browser on a private loopback URL. The URL contains a
+per-install write token in its fragment; keep the terminal running while using
+the interface.
+
+Alternatively, install both command-line entry points:
+
+```bash
+python3 -m pip install -e .
+vampip-manager
+```
+
+The checked-in launchers store their state in this repository's ignored
+`.vampip/` directory. An installed command defaults to
+`${XDG_STATE_HOME:-~/.local/state}/vampip`. Override either form with:
+
+```bash
+export VAMPIP_ADDON_DIR=/path/to/VaM/AddonPackages
+export VAMPIP_STATE_DIR=/path/to/vampip-state
+```
+
+## Recommended first use
+
+1. Scan packages and import the BrowserAssist catalogue.
+2. Pin anything that every session needs, such as core plugins or shared assets.
+3. Review the managed-mode confirmation carefully.
+4. Start managed mode. VAM-PIP records the exact current enabled/disabled state
+   before applying the smaller set.
+5. Find a scene or preset and select **Enable for 3 days**.
+6. Launch VaM, or load the resource in an already-running VaM after the bridge
+   reports a successful rescan.
+
+Selecting a packaged resource creates a lease containing its archive, declared
+`.var` dependencies, and package references found in supported scene/preset
+text. The lease stores exact resolved package versions, so a later catalogue
+change does not silently alter an active lease.
+
+No dependency scanner can identify packages loaded dynamically by every
+third-party script. Pin known runtime plugins that a collection always needs.
+
+## Live changes and the VaM bridge
+
+VAM-PIP can enable packages while VaM is open, but it never hides an archive
+that the process may still be using. Lease expiry and unpin operations therefore
+show as pending disables until VaM exits.
+
+Install the optional session bridge:
+
+```bash
+./vampip manager bridge install
+```
+
+Then, once in VaM:
+
+1. open **Session Plugins**;
+2. add `Custom/Scripts/VAMPip/Bridge/VAMPipBridge.cslist`;
+3. save it in the default session-plugin preset.
+
+The bridge polls a local mailbox, coalesces requests, waits while VaM is
+loading, and invokes BrowserAssist's lightweight package refresh when available.
+VaM's core package rescan is the fallback. It cannot rename files, run commands,
+or accept arbitrary paths.
+
+See [bridge/vam/README.md](bridge/vam/README.md) for the protocol and manual
+installation layout.
+
+## Proton launch integration
+
+The **Launch VaM** button and this command:
+
+```bash
+./vampip manager launch
+```
+
+use `launch-vam-desktop-proton.sh` from the VaM root. When managed mode is
+active, VAM-PIP reconciles the current pin and lease set before starting it.
+The launcher must be executable and must remain inside the VaM directory.
+Output is written to `VaM/logs/vampip-launch.log`.
+
+VAM-PIP intentionally does not guess global Proton, Gamescope, Wayland, or
+resolution options. Keep those settings in the VaM-scoped launch script.
+
+## Manager CLI
+
+The browser uses the same service exposed by `vampip manager`:
+
+```bash
+# State and inventory
+./vampip manager status
+./vampip manager scan
+./vampip manager packages Timeline --state active
+
+# BrowserAssist catalogue
+./vampip manager catalog import
+./vampip manager resources "my scene" --type Scenes --state hidden
+
+# Permanent base set
+./vampip manager pin AcidBubbles.Timeline
+./vampip manager unpin AcidBubbles.Timeline
+
+# Temporary package access
+./vampip manager lease Creator.Scene.4 --days 3
+./vampip manager renew LEASE_ID --days 3
+./vampip manager release LEASE_ID
+
+# Preview first, then apply
+./vampip manager reconcile
+./vampip manager reconcile --apply --activate
+
+# Restore the exact state captured before activation
+./vampip manager deactivate
+./vampip manager deactivate --apply
+```
+
+Mutating CLI commands either require `--apply` or clearly identify themselves
+as immediate pin/lease changes. Run `./vampip manager --help` for the complete
+command tree.
+
+## Audit and maintenance commands
+
+The original conservative package-maintenance CLI remains available alongside
+the manager:
+
+```bash
+./vampip scan
+./vampip stats
+./vampip doctor
+./vampip duplicates --verify
+./vampip prune
+./vampip content-audit --min-mib 1 --verbose
+```
+
+`prune` is a dry run unless `--apply` is supplied, and applied candidates move
+to a timestamped quarantine rather than being deleted. Old versions are
+reported but are not automatically discarded because scenes and plugins can
+pin an exact version.
+
+Profiles are still useful for fixed, named package sets:
+
+```bash
+./vampip profile create my-scene Creator.Scene.4 AcidBubbles.Timeline
+./vampip profile show my-scene --packages
+./vampip profile activate my-scene
+./vampip profile activate my-scene --apply
+```
+
+## Recovery
+
+The safest normal recovery is:
+
+```bash
+./vampip manager deactivate
+./vampip manager deactivate --apply
+```
+
+This restores each package to the enabled state recorded before managed mode.
+It also preserves packages that were already disabled.
+
+Each applied manager switch writes JSON under:
+
+```text
+<state-dir>/manager-runs/
+```
+
+To inspect and reverse one specific switch:
+
+```bash
+./vampip manager rollback /path/to/manager-runs/MANIFEST.json
+./vampip manager rollback /path/to/manager-runs/MANIFEST.json --apply
+```
+
+Do not rename the same managed archives manually while applying or rolling back
+a switch. VAM-PIP refuses to overwrite an existing target.
+
+## Architecture and security
+
+The manager is daemon-optional: the CLI and loopback web server call the same
+service layer and SQLite state. Package inventory scans are incremental, so
+unchanged archives are not reopened. The BrowserAssist import is transactional;
+a failed refresh retains the last usable generation.
+
+The web server binds only to `127.0.0.1`/`localhost`, authenticates API access,
+checks mutation origins and Host headers, and serves no third-party assets.
+
+More detail:
+
+- [Architecture](docs/ARCHITECTURE.md)
+- [Safety and recovery](docs/SAFETY.md)
+- [Contributing](CONTRIBUTING.md)
+
+## Development
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python -m unittest -v
+node --check src/vampip/webui/app.js
+```
+
+The package data configuration includes the web UI and bridge source in wheels
+and editable installs.
+
+## License
+
+MIT

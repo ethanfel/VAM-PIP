@@ -1,0 +1,313 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="dark">
+    <meta name="theme-color" content="#111316">
+    <title>VAM-PIP Manager</title>
+    <link rel="stylesheet" href="/styles.css">
+    <script src="/app.js" defer></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#main-content">Skip to library</a>
+
+    <div class="app-shell">
+      <header class="topbar">
+        <a class="brand" href="#" aria-label="VAM-PIP home">
+          <span class="brand-mark" aria-hidden="true">
+            <svg viewBox="0 0 32 32">
+              <path d="M7 8.5 16 3l9 5.5v15L16 29l-9-5.5z"></path>
+              <path d="m11 12 5 3 5-3M16 15v7"></path>
+            </svg>
+          </span>
+          <span>
+            <strong>VAM<span>/</span>PIP</strong>
+            <small>package manager</small>
+          </span>
+        </a>
+
+        <div class="topbar-actions">
+          <span class="connection-chip" id="connection-chip" role="status">
+            <span class="status-dot"></span>
+            <span id="connection-label">Connecting</span>
+          </span>
+          <button class="icon-button" id="refresh-button" type="button" aria-label="Refresh manager data" title="Refresh">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M20 11a8.1 8.1 0 0 0-14.9-4M4 4v5h5M4 13a8.1 8.1 0 0 0 14.9 4M20 20v-5h-5"></path>
+            </svg>
+          </button>
+        </div>
+      </header>
+
+      <aside class="sidebar" aria-label="Manager status and tools">
+        <section class="manager-card" id="manager-card">
+          <div class="manager-card-heading">
+            <div>
+              <p class="eyebrow">Package set</p>
+              <h2 id="mode-title">Checking…</h2>
+            </div>
+            <span class="mode-indicator" id="mode-indicator" aria-hidden="true"></span>
+          </div>
+          <p class="muted" id="mode-description">Reading the local manager state.</p>
+          <button class="primary-button wide" id="activate-button" type="button" hidden>
+            Start managed mode
+          </button>
+          <button class="secondary-button wide" id="reconcile-button" type="button" hidden>
+            Apply pending changes
+          </button>
+        </section>
+
+        <section class="stat-grid" aria-label="Package statistics">
+          <div class="stat">
+            <span>Active</span>
+            <strong id="active-count">—</strong>
+          </div>
+          <div class="stat">
+            <span>Hidden</span>
+            <strong id="hidden-count">—</strong>
+          </div>
+          <div class="stat">
+            <span>Resources</span>
+            <strong id="resource-count">—</strong>
+          </div>
+          <div class="stat">
+            <span>Leases</span>
+            <strong id="lease-count">—</strong>
+          </div>
+        </section>
+
+        <section class="side-section">
+          <div class="section-title-row">
+            <h3>Game</h3>
+            <span class="mini-status" id="game-status">
+              <span class="status-dot"></span>
+              Checking
+            </span>
+          </div>
+          <p class="side-detail" id="bridge-status">Bridge status unavailable.</p>
+          <button class="primary-button wide launch-vam-button" id="launch-vam-button" type="button">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="m9 7 8 5-8 5z"></path>
+            </svg>
+            <span id="launch-vam-label">Launch VaM</span>
+          </button>
+        </section>
+
+        <section class="side-section">
+          <h3>Library tools</h3>
+          <div class="side-actions">
+            <button class="text-button" id="scan-button" type="button">
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M4 7V4h3M17 4h3v3M20 17v3h-3M7 20H4v-3M8 12h8M12 8v8"></path>
+              </svg>
+              Scan packages
+            </button>
+            <button class="text-button" id="import-button" type="button">
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M12 3v12m0 0 4-4m-4 4-4-4M5 19h14"></path>
+              </svg>
+              Import catalogue
+            </button>
+          </div>
+        </section>
+
+        <section class="side-section">
+          <label class="switch-row" for="auto-reconcile">
+            <span>
+              <strong>Apply on startup</strong>
+              <small>Clean up expired access when VaM is closed</small>
+            </span>
+            <span class="switch">
+              <input id="auto-reconcile" type="checkbox">
+              <span aria-hidden="true"></span>
+            </span>
+          </label>
+        </section>
+
+        <details class="paths" id="path-details">
+          <summary>Storage locations</summary>
+          <dl>
+            <dt>Packages</dt>
+            <dd id="addon-path">—</dd>
+            <dt>Manager state</dt>
+            <dd id="state-path">—</dd>
+          </dl>
+        </details>
+      </aside>
+
+      <main id="main-content" class="main">
+        <section class="page-heading">
+          <div>
+            <p class="eyebrow">Your local collection</p>
+            <h1>Find it. Load it when you need it.</h1>
+            <p>Browse everything while keeping VaM’s active package set lean.</p>
+          </div>
+          <button class="secondary-button" id="mobile-tools-button" type="button" aria-expanded="false">
+            Status &amp; tools
+          </button>
+        </section>
+
+        <section class="notice warning-notice" id="pending-notice" role="status" hidden>
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M12 3 2.8 20h18.4zM12 9v5m0 3v.1"></path>
+          </svg>
+          <div>
+            <strong id="pending-title">Packages are waiting to be hidden</strong>
+            <p id="pending-message"></p>
+          </div>
+          <button class="secondary-button small" id="pending-action" type="button">Apply now</button>
+        </section>
+
+        <nav class="view-tabs" aria-label="Library views">
+          <button class="view-tab active" type="button" data-view="resources" aria-selected="true">
+            Resources
+            <span id="resources-tab-count">—</span>
+          </button>
+          <button class="view-tab" type="button" data-view="packages" aria-selected="false">
+            Packages
+            <span id="packages-tab-count">—</span>
+          </button>
+          <button class="view-tab" type="button" data-view="access" aria-selected="false">
+            Pins &amp; leases
+            <span id="access-tab-count">—</span>
+          </button>
+        </nav>
+
+        <section id="library-view" aria-labelledby="library-title">
+          <h2 class="visually-hidden" id="library-title">Library browser</h2>
+          <div class="filter-bar">
+            <label class="search-field">
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <circle cx="11" cy="11" r="6"></circle>
+                <path d="m16 16 4 4"></path>
+              </svg>
+              <span class="visually-hidden">Search library</span>
+              <input id="search-input" type="search" placeholder="Search scenes, looks, clothing, creators…" autocomplete="off">
+              <kbd aria-hidden="true">/</kbd>
+            </label>
+
+            <label class="select-field" id="type-filter-wrap">
+              <span class="visually-hidden">Resource type</span>
+              <select id="type-filter">
+                <option value="">All types</option>
+              </select>
+            </label>
+
+            <label class="select-field">
+              <span class="visually-hidden">Package state</span>
+              <select id="state-filter">
+                <option value="all">Any state</option>
+                <option value="active">Active</option>
+                <option value="hidden">Available</option>
+              </select>
+            </label>
+          </div>
+
+          <div class="result-summary">
+            <p id="result-count" role="status" aria-live="polite">Loading library…</p>
+            <button class="quiet-button" id="clear-filters" type="button" hidden>Clear filters</button>
+          </div>
+
+          <div id="loading-state" class="card-grid" aria-label="Loading results" aria-busy="true">
+            <div class="skeleton-card"></div>
+            <div class="skeleton-card"></div>
+            <div class="skeleton-card"></div>
+            <div class="skeleton-card"></div>
+            <div class="skeleton-card"></div>
+            <div class="skeleton-card"></div>
+          </div>
+
+          <div id="empty-state" class="empty-state" hidden>
+            <span class="empty-icon" aria-hidden="true">
+              <svg viewBox="0 0 48 48">
+                <path d="M9 14h30v25H9zM15 9h18v5M17 23h14M17 29h9"></path>
+              </svg>
+            </span>
+            <h3 id="empty-title">Nothing found</h3>
+            <p id="empty-message">Try a different search or filter.</p>
+            <button class="secondary-button" id="empty-action" type="button">Clear filters</button>
+          </div>
+
+          <div id="card-grid" class="card-grid" hidden></div>
+          <div class="load-more-row">
+            <button class="secondary-button" id="load-more" type="button" hidden>Load more</button>
+          </div>
+        </section>
+
+        <section id="access-view" hidden aria-labelledby="access-title">
+          <div class="access-heading">
+            <div>
+              <h2 id="access-title">Persistent &amp; temporary access</h2>
+              <p>Pins are always available. Leases expire automatically, but never unload content from a running game.</p>
+            </div>
+            <button class="secondary-button" id="add-pin-button" type="button">Add package pin</button>
+          </div>
+
+          <div class="access-columns">
+            <section class="access-panel" aria-labelledby="pins-title">
+              <div class="panel-heading">
+                <div>
+                  <p class="eyebrow">Always available</p>
+                  <h3 id="pins-title">Pinned packages</h3>
+                </div>
+                <span class="count-badge" id="pins-count">0</span>
+              </div>
+              <div id="pins-list" class="access-list"></div>
+            </section>
+
+            <section class="access-panel" aria-labelledby="leases-title">
+              <div class="panel-heading">
+                <div>
+                  <p class="eyebrow">Temporary access</p>
+                  <h3 id="leases-title">Active leases</h3>
+                </div>
+                <span class="count-badge" id="leases-count">0</span>
+              </div>
+              <div id="leases-list" class="access-list"></div>
+            </section>
+          </div>
+
+          <section class="danger-zone">
+            <div>
+              <h3>Leave managed mode</h3>
+              <p>Restore the package visibility from before VAM-PIP took control.</p>
+            </div>
+            <button class="danger-button" id="deactivate-button" type="button">Restore original set</button>
+          </section>
+        </section>
+      </main>
+    </div>
+
+    <div class="toast-region" id="toast-region" aria-live="polite" aria-atomic="true"></div>
+
+    <dialog class="dialog" id="confirm-dialog" aria-labelledby="confirm-title">
+      <form method="dialog">
+        <button class="dialog-close" id="dialog-close" aria-label="Close dialog" type="button">×</button>
+        <span class="dialog-icon" id="confirm-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24">
+            <path d="M12 3 3 7.5V13c0 5 3.8 7.8 9 9 5.2-1.2 9-4 9-9V7.5zM9 12l2 2 4-4"></path>
+          </svg>
+        </span>
+        <p class="eyebrow" id="confirm-eyebrow">Confirm change</p>
+        <h2 id="confirm-title">Apply package changes?</h2>
+        <p id="confirm-message"></p>
+        <div class="plan-summary" id="plan-summary" hidden></div>
+        <label class="dialog-input" id="dialog-input-wrap" hidden>
+          <span id="dialog-input-label">Package reference</span>
+          <input id="dialog-input" type="text" autocomplete="off">
+        </label>
+        <div class="dialog-actions">
+          <button class="secondary-button" value="cancel" type="submit">Cancel</button>
+          <button class="primary-button" id="confirm-submit" value="confirm" type="submit">Confirm</button>
+        </div>
+      </form>
+    </dialog>
+
+    <template id="empty-access-template">
+      <div class="inline-empty">
+        <p>Nothing here yet.</p>
+      </div>
+    </template>
+  </body>
+</html>
