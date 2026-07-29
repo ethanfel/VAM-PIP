@@ -1035,6 +1035,12 @@ def read_scene_status(vam_root: Path) -> dict[str, object] | None:
                         for measurement in measurements.values():
                             if isinstance(measurement, dict):
                                 _normalize_bool(measurement, "available")
+                                _normalize_bool(measurement, "bilateral")
+                    morphs = body_proportions.get("morphs")
+                    if isinstance(morphs, list):
+                        for morph in morphs[:64]:
+                            if isinstance(morph, dict):
+                                _normalize_bool(morph, "builtIn")
     atoms = document.get("atoms")
     if isinstance(atoms, list):
         for atom in atoms:

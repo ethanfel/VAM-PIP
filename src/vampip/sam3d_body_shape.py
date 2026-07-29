@@ -101,8 +101,199 @@ _BILATERAL_METRICS = frozenset(
 )
 _OPAQUE_TOKEN = re.compile(r"^[0-9a-f]{32}$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_VAM_SIMPLEJSON_NUMBER = re.compile(
+    r"-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?"
+)
 _MAX_CONSENSUS_SIGNATURES = 8
 _SIDECAR_KIND = "vampip-sam3d-body-shape-sidecar"
+_VAM_FLOAT32_RELATIVE_TOLERANCE = 2e-6
+_VAM_FLOAT32_ABSOLUTE_TOLERANCE = 2e-7
+
+
+def _coerce_simplejson_number(value: object) -> object:
+    """Return VaM SimpleJSON numeric strings as finite Python floats."""
+
+    if (
+        not isinstance(value, str)
+        or not 1 <= len(value) <= 64
+        or _VAM_SIMPLEJSON_NUMBER.fullmatch(value) is None
+    ):
+        return value
+    try:
+        number = float(value)
+    except (OverflowError, ValueError):
+        return value
+    return number if math.isfinite(number) else value
+
+
+def _coerce_simplejson_int(value: object) -> object:
+    return BODY_SHAPE_SCHEMA if value == str(BODY_SHAPE_SCHEMA) else value
+
+
+def _vam_float32_matches(actual: float, expected: float) -> bool:
+    return math.isclose(
+        actual,
+        expected,
+        rel_tol=_VAM_FLOAT32_RELATIVE_TOLERANCE,
+        abs_tol=_VAM_FLOAT32_ABSOLUTE_TOLERANCE,
+    )
+
+
+def _vam_finite_float(value: object) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        number = float(value)
+    except OverflowError:
+        return None
+    return number if math.isfinite(number) else None
+
+
+def _canonicalize_vam_float32_relations(
+    document: dict[str, object],
+) -> None:
+    """Repair only redundant values lost to VaM's float32 text precision."""
+
+    normalizer = document.get("normalizer")
+    regions = document.get("regions")
+    measurements = document.get("measurements")
+    if (
+        not isinstance(normalizer, dict)
+        or not isinstance(regions, dict)
+        or not isinstance(measurements, dict)
+    ):
+        return
+    structural_length = _vam_finite_float(normalizer.get("meters"))
+    if structural_length is None or structural_length == 0.0:
+        return
+
+    region_confidences: dict[str, float] = {}
+    for region in BODY_SHAPE_REGIONS:
+        status = regions.get(region)
+        if not isinstance(status, dict):
+            return
+        geometry = _vam_finite_float(status.get("geometryConfidence"))
+        evidence = _vam_finite_float(status.get("evidenceConfidence"))
+        confidence = _vam_finite_float(status.get("confidence"))
+        if geometry is None or evidence is None or confidence is None:
+            return
+        expected = min(geometry, evidence)
+        if not _vam_float32_matches(confidence, expected):
+            raise ValueError(f"body shape {region} confidence is invalid")
+        status["confidence"] = expected
+        region_confidences[region] = expected
+
+    region_for_metric = {
+        metric: region
+        for region, metrics in BODY_SHAPE_REGION_METRICS.items()
+        for metric in metrics
+    }
+    for metric in BODY_SHAPE_METRICS:
+        measurement = measurements.get(metric)
+        if not isinstance(measurement, dict):
+            return
+        meters = _vam_finite_float(measurement.get("meters"))
+        ratio = _vam_finite_float(measurement.get("ratio"))
+        confidence = _vam_finite_float(measurement.get("confidence"))
+        if meters is None or ratio is None or confidence is None:
+            return
+        if metric in _BILATERAL_METRICS:
+            left = _vam_finite_float(measurement.get("leftMeters"))
+            right = _vam_finite_float(measurement.get("rightMeters"))
+            if left is None or right is None:
+                return
+            expected_meters = (left + right) * 0.5
+            if not _vam_float32_matches(meters, expected_meters):
+                raise ValueError(f"body shape {metric} sides are invalid")
+            measurement["meters"] = expected_meters
+            meters = expected_meters
+
+        expected_ratio = meters / structural_length
+        if not _vam_float32_matches(ratio, expected_ratio):
+            raise ValueError(f"body shape {metric} is invalid")
+        measurement["ratio"] = expected_ratio
+
+        expected_confidence = region_confidences[region_for_metric[metric]]
+        if not _vam_float32_matches(confidence, expected_confidence):
+            raise ValueError(f"body shape {metric} is invalid")
+        measurement["confidence"] = expected_confidence
+
+    overall = _vam_finite_float(document.get("overallConfidence"))
+    if overall is None:
+        return
+    expected_overall = sum(region_confidences.values()) / len(region_confidences)
+    if not _vam_float32_matches(overall, expected_overall):
+        raise ValueError("body shape overallConfidence is invalid")
+    document["overallConfidence"] = expected_overall
+
+
+def normalize_vam_body_shape(value: object) -> dict[str, object]:
+    """Canonicalize one body-shape signature emitted by VaM's SimpleJSON.
+
+    VaM 1.22 serializes numbers in its JSON nodes as quoted scalar strings.
+    Only the fixed numeric fields in the body-shape contract are converted;
+    strict schema and range validation still runs before the value is trusted.
+    """
+
+    try:
+        normalized = json.loads(
+            json.dumps(
+                value,
+                ensure_ascii=True,
+                allow_nan=False,
+                separators=(",", ":"),
+            )
+        )
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise ValueError("body shape has an invalid schema") from exc
+    if not isinstance(normalized, dict):
+        raise ValueError("body shape has an invalid schema")
+
+    normalized["schema"] = _coerce_simplejson_int(normalized.get("schema"))
+    normalizer = normalized.get("normalizer")
+    if isinstance(normalizer, dict):
+        normalizer["meters"] = _coerce_simplejson_number(normalizer.get("meters"))
+
+    measurements = normalized.get("measurements")
+    if isinstance(measurements, dict):
+        for metric in BODY_SHAPE_METRICS:
+            measurement = measurements.get(metric)
+            if not isinstance(measurement, dict):
+                continue
+            for key in (
+                "meters",
+                "ratio",
+                "confidence",
+                "leftMeters",
+                "rightMeters",
+            ):
+                if key in measurement:
+                    measurement[key] = _coerce_simplejson_number(measurement.get(key))
+
+    regions = normalized.get("regions")
+    if isinstance(regions, dict):
+        for region in BODY_SHAPE_REGIONS:
+            status = regions.get(region)
+            if not isinstance(status, dict):
+                continue
+            for key in (
+                "geometryConfidence",
+                "evidenceConfidence",
+                "confidence",
+            ):
+                status[key] = _coerce_simplejson_number(status.get(key))
+
+    planes = normalized.get("planes")
+    if isinstance(planes, dict):
+        for key in BODY_SHAPE_PLANES:
+            planes[key] = _coerce_simplejson_number(planes.get(key))
+    normalized["overallConfidence"] = _coerce_simplejson_number(
+        normalized.get("overallConfidence")
+    )
+
+    _canonicalize_vam_float32_relations(normalized)
+    validate_body_shape(normalized)
+    return normalized
 
 
 def _finite_number(value: object, *, label: str) -> float:
@@ -726,6 +917,7 @@ __all__ = [
     "BODY_SHAPE_REGION_METRICS",
     "body_shape_sidecar_revision",
     "consensus_body_shapes",
+    "normalize_vam_body_shape",
     "validate_body_shape",
     "validate_body_shape_sidecar",
 ]

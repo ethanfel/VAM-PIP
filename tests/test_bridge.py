@@ -1021,6 +1021,12 @@ class BridgeProtocolTests(unittest.TestCase):
                                 "blockedBySam3d": "false",
                                 "bodyShapeReady": "true",
                                 "bodyShapePreparing": "false",
+                                "morphs": [
+                                    {
+                                        "name": "Breasts Size",
+                                        "builtIn": "true",
+                                    }
+                                ],
                             },
                         },
                         {"uid": "Person #2", "selected": "false"},
@@ -1066,6 +1072,7 @@ class BridgeProtocolTests(unittest.TestCase):
         self.assertIs(body_proportions["bodyShapeReady"], True)
         self.assertIs(body_proportions["bodyShapePreparing"], False)
         self.assertIs(body_proportions["undoPending"], False)
+        self.assertIs(body_proportions["morphs"][0]["builtIn"], True)
         atoms = scene["atoms"]
         assert isinstance(atoms, list)
         self.assertIs(atoms[0]["selected"], True)
@@ -1561,9 +1568,7 @@ class BridgeSourceTests(unittest.TestCase):
             "private void EnsurePersonBodyShapeBuild(",
             coroutine_start,
         )
-        coroutine_source = catalog_source[
-            coroutine_start:coroutine_end
-        ]
+        coroutine_source = catalog_source[coroutine_start:coroutine_end]
         self.assertIn(
             "BodyShapeBuildMaximumStepsPerFrame",
             coroutine_source,

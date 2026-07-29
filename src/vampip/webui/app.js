@@ -132,6 +132,7 @@ const SAM3D_ERROR_STATES = new Set([
   "interrupted",
 ]);
 const TOKEN_KEY = "vampip-token";
+const INVALID_MANAGER_TOKEN_MESSAGE = "invalid manager token";
 const WORKSPACE_ACTION_STALL_MS = 5 * 60 * 1000;
 const PERSON_BRIDGE_BUSY_STATES = new Set([
   "queued",
@@ -796,6 +797,10 @@ const app = {
   requestController: null,
   searchTimer: null,
   token: "",
+  managerAuthFailed: false,
+  managerAuthFailedToken: "",
+  managerAuthGeneration: 0,
+  managerAuthNoticeShown: false,
   sessionPlugins: null,
   sessionPluginsError: null,
   activityTimer: null,
@@ -940,6 +945,7 @@ async function init() {
     // The full status request below will surface a useful connection error.
   }
   startActivityPolling();
+  if (app.managerAuthFailed) return;
   if (!activityLoaded || !operationIsBusy()) {
     await refreshAll();
     const operation = app.activity && app.activity.operation;
@@ -1264,6 +1270,10 @@ function captureToken() {
   app.token = supplied || stored;
 
   if (supplied) {
+    app.managerAuthGeneration += 1;
+    app.managerAuthFailed = false;
+    app.managerAuthFailedToken = "";
+    app.managerAuthNoticeShown = false;
     try {
       sessionStorage.setItem(TOKEN_KEY, supplied);
     } catch (_error) {
@@ -1820,9 +1830,10 @@ function operationKey(operation) {
 }
 
 function startActivityPolling() {
-  if (app.activityTimer !== null) return;
+  if (app.managerAuthFailed || app.activityTimer !== null) return;
   const tick = async () => {
     app.activityTimer = null;
+    if (app.managerAuthFailed) return;
     try {
       await loadActivity();
     } catch (_error) {
@@ -1832,10 +1843,18 @@ function startActivityPolling() {
     } finally {
       const delay =
         operationIsBusy() || workspaceActionIsActive() ? 650 : 1500;
-      app.activityTimer = window.setTimeout(tick, delay);
+      if (!app.managerAuthFailed) {
+        app.activityTimer = window.setTimeout(tick, delay);
+      }
     }
   };
   app.activityTimer = window.setTimeout(tick, 650);
+}
+
+function stopActivityPolling() {
+  if (app.activityTimer === null) return;
+  window.clearTimeout(app.activityTimer);
+  app.activityTimer = null;
 }
 
 async function loadActivity({ refreshOnTerminal = true } = {}) {
@@ -1974,6 +1993,7 @@ async function fetchWorkspaceCategories() {
 }
 
 async function refreshAll(options = {}) {
+  if (app.managerAuthFailed) return;
   const force = Boolean(options && options.force);
   if (operationIsBusy() && !force) {
     await loadActivity({ refreshOnTerminal: false });
@@ -2079,7 +2099,9 @@ async function refreshAll(options = {}) {
   } catch (error) {
     setConnection("error", "Unavailable");
     showErrorState(error);
-    toast("Could not reach VAM-PIP", errorMessage(error), "error");
+    if (!isManagerAuthFailure(error)) {
+      toast("Could not reach VAM-PIP", errorMessage(error), "error");
+    }
   } finally {
     setButtonBusy(elements.refreshButton, false);
     app.refreshing = false;
@@ -7465,7 +7487,12 @@ function sam3dAuthenticatedUrl(path) {
 }
 
 async function sam3dRawApi(path, file) {
-  if (!app.token) {
+  if (app.managerAuthFailed) {
+    throw managerAuthBlockedError();
+  }
+  const requestToken = app.token;
+  const requestAuthGeneration = app.managerAuthGeneration;
+  if (!requestToken) {
     throw new Error(
       "This page has no write token. Reopen the URL printed by VAM-PIP (it contains #token=…).",
     );
@@ -7473,7 +7500,7 @@ async function sam3dRawApi(path, file) {
   const headers = new Headers({
     Accept: "application/json",
     "Content-Type": sam3dFileContentType(file),
-    "X-VAMPIP-Token": app.token,
+    "X-VAMPIP-Token": requestToken,
   });
   const response = await fetch(path, {
     method: "POST",
@@ -7497,7 +7524,11 @@ async function sam3dRawApi(path, file) {
     error.status = response.status;
     error.payload =
       payload && typeof payload === "object" ? payload : { detail };
-    throw error;
+    throw handleManagerAuthFailure(
+      error,
+      requestToken,
+      requestAuthGeneration,
+    );
   }
   return payload || {};
 }
@@ -8086,7 +8117,8 @@ async function loadSam3dWorkspace({ force = false, quiet = false } = {}) {
   if (
     !quiet &&
     app.sam3dStatusError &&
-    app.sam3dStatusError.status !== 404
+    app.sam3dStatusError.status !== 404 &&
+    !isManagerAuthFailure(app.sam3dStatusError)
   ) {
     toast(
       "SAM 3D worker unavailable",
@@ -8149,7 +8181,13 @@ async function refreshSam3dComparisonJobs(comparisonId) {
 }
 
 function startSam3dPolling() {
-  if (app.sam3dJobPollTimer !== null || app.view !== "sam3d") return;
+  if (
+    app.managerAuthFailed ||
+    app.sam3dJobPollTimer !== null ||
+    app.view !== "sam3d"
+  ) {
+    return;
+  }
   app.sam3dJobPollTimer = window.setTimeout(pollSam3dJob, SAM3D_POLL_MS);
 }
 
@@ -8162,7 +8200,7 @@ function stopSam3dPolling() {
 
 async function pollSam3dJob() {
   app.sam3dJobPollTimer = null;
-  if (app.view !== "sam3d") return;
+  if (app.managerAuthFailed || app.view !== "sam3d") return;
   const jobId = app.sam3dSelectedJobId;
   if (!jobId) return;
   const previousActionState = sam3dVamActionState(
@@ -10914,6 +10952,7 @@ async function loadSam3dBodyProportions(
 
 function startSam3dBodyProportionPolling() {
   if (
+    app.managerAuthFailed ||
     app.sam3dBodyProportionPollTimer !== null ||
     !app.sam3dBodyProportionsPendingAction ||
     app.view !== "sam3d"
@@ -10935,6 +10974,7 @@ function stopSam3dBodyProportionPolling() {
 
 async function pollSam3dBodyProportions() {
   app.sam3dBodyProportionPollTimer = null;
+  if (app.managerAuthFailed) return;
   const action = app.sam3dBodyProportionsPendingAction;
   const jobId = sam3dBodyProportionJob()?.id || "";
   if (!action || !jobId || app.view !== "sam3d") return;
@@ -12900,7 +12940,7 @@ async function loadTimeline({ quiet = false } = {}) {
 }
 
 function startTimelinePolling() {
-  if (app.view !== "timeline") return;
+  if (app.managerAuthFailed || app.view !== "timeline") return;
   scheduleTimelinePoll(50);
 }
 
@@ -12916,7 +12956,7 @@ function stopTimelinePolling() {
 }
 
 function scheduleTimelinePoll(delay = null) {
-  if (app.view !== "timeline") return;
+  if (app.managerAuthFailed || app.view !== "timeline") return;
   if (app.timelinePollTimer !== null) {
     window.clearTimeout(app.timelinePollTimer);
   }
@@ -17113,12 +17153,87 @@ function setConnection(state, text) {
   elements.connectionLabel.textContent = text;
 }
 
+function managerAuthBlockedError() {
+  const error = new Error(INVALID_MANAGER_TOKEN_MESSAGE);
+  error.status = 401;
+  error.payload = {
+    error: INVALID_MANAGER_TOKEN_MESSAGE,
+    status: 401,
+  };
+  error.managerAuthFailure = true;
+  return error;
+}
+
+function isInvalidManagerTokenError(error) {
+  return (
+    Number(error?.status) === 401 &&
+    String(error?.message || "")
+      .trim()
+      .toLowerCase() === INVALID_MANAGER_TOKEN_MESSAGE
+  );
+}
+
+function isManagerAuthFailure(error) {
+  return Boolean(error?.managerAuthFailure);
+}
+
+function clearMatchingStoredManagerToken(requestToken) {
+  try {
+    if (sessionStorage.getItem(TOKEN_KEY) === requestToken) {
+      sessionStorage.removeItem(TOKEN_KEY);
+    }
+  } catch (_error) {
+    // A storage-disabled browser can still recover from a fresh fragment token.
+  }
+}
+
+function stopManagerPollingForAuthFailure() {
+  stopActivityPolling();
+  stopTimelinePolling();
+  stopSam3dPolling();
+  stopSam3dBodyProportionPolling();
+}
+
+function handleManagerAuthFailure(
+  error,
+  requestToken,
+  requestAuthGeneration,
+) {
+  if (!isInvalidManagerTokenError(error)) return error;
+  error.managerAuthFailure = true;
+  const rejectedCurrentToken =
+    requestToken === app.token &&
+    requestAuthGeneration === app.managerAuthGeneration;
+  if (!rejectedCurrentToken) return error;
+
+  clearMatchingStoredManagerToken(requestToken);
+  app.token = "";
+  app.managerAuthFailed = true;
+  app.managerAuthFailedToken = requestToken;
+  stopManagerPollingForAuthFailure();
+  if (!app.managerAuthNoticeShown) {
+    app.managerAuthNoticeShown = true;
+    toast(
+      "VAM-PIP access expired",
+      "The saved browser token no longer matches this manager. Reopen the exact WebUI URL printed by VAM-PIP; its #token=… fragment will reconnect this tab.",
+      "error",
+      { persistent: true },
+    );
+  }
+  return error;
+}
+
 async function api(path, options = {}) {
+  if (app.managerAuthFailed) {
+    throw managerAuthBlockedError();
+  }
+  const requestToken = app.token;
+  const requestAuthGeneration = app.managerAuthGeneration;
   const method = String(options.method || "GET").toUpperCase();
   const headers = new Headers(options.headers || {});
   headers.set("Accept", "application/json");
-  if (app.token) {
-    headers.set("X-VAMPIP-Token", app.token);
+  if (requestToken) {
+    headers.set("X-VAMPIP-Token", requestToken);
   }
 
   const request = {
@@ -17130,7 +17245,7 @@ async function api(path, options = {}) {
   };
 
   if (method !== "GET" && method !== "HEAD") {
-    if (!app.token) {
+    if (!requestToken) {
       throw new Error(
         "This page has no write token. Reopen the URL printed by VAM-PIP (it contains #token=…).",
       );
@@ -17175,7 +17290,11 @@ async function api(path, options = {}) {
         payloadError.code ||
         "",
     ).trim();
-    throw error;
+    throw handleManagerAuthFailure(
+      error,
+      requestToken,
+      requestAuthGeneration,
+    );
   }
   return payload || {};
 }
@@ -17255,6 +17374,14 @@ function dismissToast(item) {
 
 function updateToast(item, title, message, kind = "success") {
   if (!item) return;
+  if (
+    kind === "error" &&
+    String(message || "").trim().toLowerCase() ===
+      INVALID_MANAGER_TOKEN_MESSAGE
+  ) {
+    dismissToast(item);
+    return;
+  }
   item.classList.toggle("is-error", kind === "error");
   item.classList.toggle("is-busy", kind === "busy");
   item.setAttribute("role", kind === "error" ? "alert" : "status");
@@ -17269,6 +17396,13 @@ function updateToast(item, title, message, kind = "success") {
 }
 
 function toast(title, message, kind = "success", options = {}) {
+  if (
+    kind === "error" &&
+    String(message || "").trim().toLowerCase() ===
+      INVALID_MANAGER_TOKEN_MESSAGE
+  ) {
+    return null;
+  }
   const item = createElement("div", "toast");
   const dot = createElement("span", "toast-dot");
   dot.setAttribute("aria-hidden", "true");

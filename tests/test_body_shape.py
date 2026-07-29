@@ -392,6 +392,28 @@ class BodyShapeSolverTests(unittest.TestCase):
             {"breastGirthExcess", "breastProjection"},
         )
 
+        simplejson = json.loads(
+            json.dumps(status),
+            parse_int=str,
+            parse_float=str,
+        )
+        seat = simplejson["bodyShape"]["measurements"]["seatGirth"]
+        seat["ratio"] = str(float(seat["ratio"]) + 5e-7)
+        public = _public_body_proportions(simplejson)
+        assert public is not None
+        self.assertTrue(public["bodyShapeReady"])
+        validate_body_shape(public["bodyShape"])
+        self.assertIsInstance(
+            public["bodyShape"]["measurements"]["bustGirth"]["meters"],
+            float,
+        )
+        rejected_simplejson = json.loads(json.dumps(simplejson))
+        rejected_seat = rejected_simplejson["bodyShape"]["measurements"]["seatGirth"]
+        rejected_seat["ratio"] = str(float(rejected_seat["ratio"]) + 1e-3)
+        rejected_public = _public_body_proportions(rejected_simplejson)
+        assert rejected_public is not None
+        self.assertNotIn("bodyShape", rejected_public)
+
         tampered = _live_body_status()
         tampered["bodyShape"] = dict(tampered["bodyShape"])
         tampered["bodyShape"]["unexpected"] = True

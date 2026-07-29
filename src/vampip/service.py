@@ -117,7 +117,7 @@ from vampip.sam3d_body_shape import (
     BODY_SHAPE_METRICS,
     BODY_SHAPE_REGIONS,
     consensus_body_shapes,
-    validate_body_shape,
+    normalize_vam_body_shape,
 )
 from vampip.sam3d_vam import (
     VR_RENDERER_RESOLUTIONS,
@@ -1301,26 +1301,9 @@ def _public_body_proportions(value: object) -> dict[str, object] | None:
     body_shape: dict[str, object] | None = None
     raw_body_shape = value.get("bodyShape")
     try:
-        validate_body_shape(raw_body_shape)
+        body_shape = normalize_vam_body_shape(raw_body_shape)
     except (TypeError, ValueError):
         pass
-    else:
-        # The strict fixed schema contains only bounded JSON scalar values.
-        # Round-tripping gives the browser an independent document.
-        try:
-            copied = json.loads(
-                json.dumps(
-                    raw_body_shape,
-                    ensure_ascii=True,
-                    allow_nan=False,
-                    separators=(",", ":"),
-                )
-            )
-        except (TypeError, ValueError, json.JSONDecodeError):
-            pass
-        else:
-            if isinstance(copied, dict):
-                body_shape = copied
 
     result: dict[str, object] = {
         "ready": bool(
@@ -2991,8 +2974,7 @@ class ManagerService:
             else:
                 result["apply_blocked_reason"] = (
                     "Apply requires a valid neutral body-shape calibration from "
-                    "VaM"
-                    + (f": {body_shape_reason}" if body_shape_reason else ".")
+                    "VaM" + (f": {body_shape_reason}" if body_shape_reason else ".")
                 )
         elif undo_pending:
             result["canApply"] = False
