@@ -30,8 +30,8 @@ every resource can be applied in the same way.
 | Skin | `Preset Skin` | Replace or merge through `SkinPresets` | Generic preset pipeline |
 | Individual clothing | `Clothing (Female)` and `Clothing (Male)` | Set `geometry`'s exact `clothing:<resource>` boolean to worn or removed | Implemented with catalogue-derived package-qualified resource identity and revisioned live state |
 | Clothing item styles | `Clothing Item Presets` | Load an active item's own preset manager | Conservative same-folder style suggestions are browseable; live apply still requires a reliable exact clothing-item relationship |
-| Worn clothing | Not represented reliably by the offline catalogue | Publish bounded worn and locked resource references from the target Person's `geometry` | Implemented as a safe character-sheet projection and for individual clothing actions |
-| Worn hair | Not represented reliably by the offline catalogue | Publish bounded state from the target Person's `geometry` | Later live-state schema |
+| Worn clothing | Not represented reliably by the offline catalogue | Publish a bounded presentation roster plus private validated worn and locked references from the target Person's `geometry` | Implemented as a complete character-sheet projection; opaque or built-in rows remain read-only |
+| Worn hair | Not represented reliably by the offline catalogue | Publish bounded active layer labels, tags, lock state, and simulation kind from the target Person's `geometry` | Implemented as a read-only Hair Studio roster; typed settings remain later work |
 | Individual morph sliders | Preset files only | Publish UID, label, region, current value, and min/max; set a bounded numeric value | Later revisioned live-control schema |
 | Materials, pose, and physics controls | Preset files only | Publish an allowlisted typed control schema | Later; do not expose arbitrary storables |
 
@@ -52,28 +52,39 @@ reference through the manager and bridge.
 
 The browser asks for the desired state, `Wear` or `Remove`; it does not ask
 VaM to invert whatever state happens to exist at execution time. Each Person
-snapshot includes a clothing revision, gender, bounded worn references,
-bounded locked references, and a truncation marker. Both the manager and
-bridge validate the revision against the same target Person and native
-`geometry`. Wear fails when the item's female/male category is incompatible
-with the current gender. Any state-changing request for a locked item fails.
-When publication is truncated, the browser treats an absent item as unknown
-rather than incorrectly presenting it as not worn.
+snapshot includes a clothing revision, gender, a bounded presentation row for
+each published active item, private validated worn and locked references, and a
+truncation marker. The manager exposes only bounded labels, tags, and lock
+state for entries that cannot be joined to the catalogue. Those entries remain
+visible but non-actionable; their UID, package UID, and runtime path never
+leave the private bridge join.
+
+Both the manager and bridge validate the revision against the same target
+Person and native `geometry`. Wear fails when the item's female/male category
+is incompatible with the current gender. Any state-changing request for a
+locked item fails. When publication is truncated, the browser treats an absent
+item as unknown rather than incorrectly presenting it as not worn.
 
 ## Character-sheet presentation
 
 The browser projects the selected Person's bounded live clothing roster into a
-character sheet. Body regions are organizational trays, not exclusive
-equipment sockets: every region may contain zero, one, or many worn items.
-Items that cannot be classified safely remain visible under **Unsorted**.
-Locked items are labelled and cannot be removed, and unmatched or truncated
-live references are counted explicitly instead of disappearing from the
-display.
+character sheet. Its tops, bras, panties and underwear, dresses and outfits,
+bottoms, stockings and socks, shoes and boots, high heels, and other body
+regions are organizational trays, not exclusive equipment sockets: every
+region may contain zero, one, or many worn items. Items that cannot be
+classified safely remain visible under **Unsorted**. Locked items are labelled
+and cannot be removed. An active item without a validated catalogue identity
+gets a read-only **In-game item** card instead of disappearing, while truncated
+rows are still counted explicitly.
 
-Appearance, outfit, hair, skin, morph, pose, animation, physics, general, and
-Person-plugin presets appear as collection shortcuts around the live
-wardrobe. They are recipes that can change overlapping state, not authoritative
-current slots, so the sheet does not claim that one of them is “equipped.”
+The sheet changes with the selected Person category. Clothing categories show
+the live wardrobe. Hair shows a bounded multi-layer roster and a read-only
+inspector organized as **Style & shape**, **Color & materials**, **Physics &
+simulation**, and **Scalp & fit**. Actual Hair settings stay in VaM until each
+control has a typed, bounded, revisioned protocol. Appearance, skin, morph,
+pose, animation, physics, general, and Person-plugin presets use compact recipe
+views. They can change overlapping state, so the sheet never claims that one
+is the authoritative current preset.
 
 For clothing cards, VAM-PIP may present same-package, same-folder item presets
 whose filenames clearly share the clothing item's basename as **Related
@@ -108,12 +119,14 @@ The useful order is:
 1. completed: broad preset browsing and loading plus Person add/select;
 2. completed: individual clothing wear/remove with exact resource identity,
    revisioned worn state, lock reporting, and gender checks;
-3. next: classify trusted raw plugin entry points and add an explicitly
+3. completed: complete clothing presentation for opaque/built-in items,
+   adaptive Person sheets, and a bounded read-only Hair layer roster;
+4. next: classify trusted raw plugin entry points and add an explicitly
    confirmed code-loading workflow;
-4. add save/export workflows after their overwrite and screenshot semantics
+5. add save/export workflows after their overwrite and screenshot semantics
    are explicit;
-5. later: expose individual morphs and curated material, pose, and physics
-   controls through bounded, revisioned schemas.
+6. later: expose Hair settings, individual morphs, and curated material, pose,
+   and physics controls through bounded, revisioned schemas.
 
 This keeps the first workspace broadly useful without locking the protocol to
 the shape of one example such as Hair.

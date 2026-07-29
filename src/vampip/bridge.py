@@ -694,6 +694,17 @@ def _normalize_bool(document: dict[str, object], key: str) -> None:
         document[key] = False
 
 
+def _normalize_nonnegative_int(document: dict[str, object], key: str) -> None:
+    value = document.get(key)
+    if not isinstance(value, str):
+        return
+    text = value.strip()
+    if text.isdecimal() and len(text) <= 10:
+        parsed = int(text)
+        if parsed <= 2_147_483_647:
+            document[key] = parsed
+
+
 def read_scene_status(vam_root: Path) -> dict[str, object] | None:
     document = _read_bridge_document(bridge_directory(vam_root) / "scene.json")
     if document is None:
@@ -708,6 +719,26 @@ def read_scene_status(vam_root: Path) -> dict[str, object] | None:
                 if isinstance(clothing, dict):
                     _normalize_bool(clothing, "ready")
                     _normalize_bool(clothing, "truncated")
+                    _normalize_nonnegative_int(clothing, "activeCount")
+                    _normalize_nonnegative_int(clothing, "lockedCount")
+                    active_items = clothing.get("activeItems")
+                    if isinstance(active_items, list):
+                        for item in active_items[:256]:
+                            if isinstance(item, dict):
+                                _normalize_bool(item, "locked")
+                hair = person.get("hair")
+                if isinstance(hair, dict):
+                    _normalize_bool(hair, "ready")
+                    _normalize_bool(hair, "truncated")
+                    _normalize_nonnegative_int(hair, "activeCount")
+                    _normalize_nonnegative_int(hair, "lockedCount")
+                    hair_items = hair.get("items")
+                    if isinstance(hair_items, list):
+                        for item in hair_items[:128]:
+                            if not isinstance(item, dict):
+                                continue
+                            _normalize_bool(item, "locked")
+                            _normalize_bool(item, "simulated")
     atoms = document.get("atoms")
     if isinstance(atoms, list):
         for atom in atoms:

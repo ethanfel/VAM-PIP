@@ -156,8 +156,8 @@ class WebSecurityTests(unittest.TestCase):
             "frame-ancestors 'none'", response.getheader("Content-Security-Policy")
         )
         document = response.read().decode("utf-8")
-        self.assertIn("/styles.css?v=0.7.0", document)
-        self.assertIn("/app.js?v=0.7.0", document)
+        self.assertIn("/styles.css?v=0.8.0", document)
+        self.assertIn("/app.js?v=0.8.0", document)
 
     def test_session_plugin_endpoints_report_and_import_defaults(self) -> None:
         preset_path = write_web_session_defaults(self.vam_root)
@@ -452,6 +452,61 @@ class WebSecurityTests(unittest.TestCase):
             f"/api/resources/42/thumbnail?token={self.token}",
         )
         self.server.service.person_equipment.assert_called_once_with("Person 2")
+
+    def test_person_hair_route_authenticates_and_allowlists_query(self) -> None:
+        hair = {
+            "available": True,
+            "target_uid": "Person 2",
+            "revision": "b" * 32,
+            "ready": True,
+            "active_count": 1,
+            "locked_count": 0,
+            "truncated": False,
+            "complete": True,
+            "items": [
+                {
+                    "key": "hair-opaque",
+                    "actionable": False,
+                    "display_name": "Soft Bob",
+                    "tags": ["Sim"],
+                    "locked": False,
+                    "simulated": True,
+                    "state": "in-game",
+                }
+            ],
+        }
+        self.server.service.person_hair = mock.Mock(return_value=hair)
+
+        self.connection.request(
+            "GET",
+            "/api/vam/person/hair?target_uid=Person%202",
+        )
+        response = self.connection.getresponse()
+        self.assertEqual(response.status, 401)
+        response.read()
+        self.server.service.person_hair.assert_not_called()
+
+        headers = {"X-VAMPIP-Token": self.token}
+        self.connection.request(
+            "GET",
+            "/api/vam/person/hair?target_uid=Person%202&resourceRef=secret",
+            headers=headers,
+        )
+        response = self.connection.getresponse()
+        self.assertEqual(response.status, 400)
+        document = self.response_json(response)
+        self.assertIn("unsupported Person hair query field", document["error"])
+        self.server.service.person_hair.assert_not_called()
+
+        self.connection.request(
+            "GET",
+            "/api/vam/person/hair?target_uid=Person%202",
+            headers=headers,
+        )
+        response = self.connection.getresponse()
+        self.assertEqual(response.status, 200)
+        self.assertEqual(self.response_json(response), hair)
+        self.server.service.person_hair.assert_called_once_with("Person 2")
 
     def test_clothing_route_accepts_only_opaque_catalog_state(self) -> None:
         result = {

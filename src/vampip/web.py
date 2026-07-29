@@ -274,6 +274,21 @@ class ManagerRequestHandler(BaseHTTPRequestHandler):
                         )
                 self._json(HTTPStatus.OK, result)
                 return
+            if parsed.path == "/api/vam/person/hair":
+                unexpected_fields = sorted(set(query) - {"target_uid", "token"})
+                if unexpected_fields:
+                    raise ValueError(
+                        "unsupported Person hair query field(s): "
+                        + ", ".join(unexpected_fields)
+                    )
+                target_values = query.get("target_uid", [])
+                if len(target_values) != 1 or not target_values[0]:
+                    raise ValueError("target_uid must be supplied exactly once")
+                self._json(
+                    HTTPStatus.OK,
+                    self.server.service.person_hair(target_values[0]),
+                )
+                return
             if parsed.path in {
                 "/api/workspace/categories",
                 "/api/person/categories",

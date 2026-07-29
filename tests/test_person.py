@@ -13,7 +13,7 @@ from vampip.bridge import read_bridge_request, request_select_atom
 from vampip.database import connect
 from vampip.inventory import scan
 from vampip.manager_state import list_leases
-from vampip.service import LiveActionBusyError, ManagerService
+from vampip.service import LiveActionBusyError, ManagerService, _equipment_slot
 
 
 HAIR_MEMBER = "Custom/Atom/Person/Hair/Example/Preset_Soft Bob.vap"
@@ -240,8 +240,9 @@ class PersonWorkspaceTests(unittest.TestCase):
         gender: str = "Female",
         active_refs: list[str] | None = None,
         locked_refs: list[str] | None = None,
-        active_count: int | None = None,
-        locked_count: int | None = None,
+        active_count: int | str | None = None,
+        locked_count: int | str | None = None,
+        active_items: list[dict[str, object]] | None = None,
         revision: str = "a" * 32,
         truncated: bool = False,
     ) -> dict[str, object]:
@@ -261,6 +262,42 @@ class PersonWorkspaceTests(unittest.TestCase):
                 ),
                 "truncated": truncated,
                 "revision": revision,
+            }
+            if active_items is not None:
+                person["clothing"]["activeItems"] = list(active_items)
+        return roster
+
+    @staticmethod
+    def hair_roster(
+        *,
+        active_count: int | str = 1,
+        locked_count: int | str = 0,
+        revision: str = "b" * 32,
+        truncated: bool = False,
+        items: list[dict[str, object]] | None = None,
+    ) -> dict[str, object]:
+        roster = PersonWorkspaceTests.roster()
+        roster["capabilities"].append("person-hair-roster")
+        hair_items = (
+            [
+                {
+                    "displayName": "Soft Bob",
+                    "tags": ["Sim", "Short"],
+                    "locked": False,
+                    "simulated": True,
+                }
+            ]
+            if items is None
+            else items
+        )
+        for person in roster["persons"]:
+            person["hair"] = {
+                "ready": True,
+                "activeCount": active_count,
+                "lockedCount": locked_count,
+                "truncated": truncated,
+                "revision": revision,
+                "items": list(hair_items),
             }
         return roster
 
@@ -300,20 +337,77 @@ class PersonWorkspaceTests(unittest.TestCase):
         raw_person = self.clothing_roster(
             active_refs=[f"Creator.HairPack.1:/{CLOTHING_MEMBER}"],
             locked_refs=[f"Creator.HairPack.1:/{CLOTHING_MEMBER}"],
+            active_items=[
+                {
+                    "resourceRef": (
+                        f"Creator.HairPack.1:/{CLOTHING_MEMBER}"
+                    ),
+                    "uid": "private-clothing-uid",
+                    "displayName": "Everyday Shirt",
+                    "tags": ["Tops", "/home/private/clothing"],
+                    "locked": True,
+                }
+            ],
         )["persons"][0]
+        raw_person["hair"] = {
+            "ready": True,
+            "activeCount": 1,
+            "lockedCount": 0,
+            "truncated": False,
+            "revision": "b" * 32,
+            "items": [
+                {
+                    "displayName": "Soft Bob",
+                    "tags": [
+                        "Sim",
+                        "Private.Hair.1:/Custom/Hair/Secret.vam",
+                    ],
+                    "locked": False,
+                    "simulated": True,
+                    "resourceRef": "Private.Hair.1:/Custom/Hair/Secret.vam",
+                }
+            ],
+        }
+        raw_person["resourceRef"] = "Private.Person.1:/Custom/Secret.json"
+        raw_person["internalUid"] = "private-person-internal-uid"
         scene = {
             "instanceId": "bridge-instance",
             "updatedAtUtc": datetime.now(timezone.utc).isoformat(),
             "loading": False,
             "selectedUid": "Person",
-            "atoms": [],
+            "atoms": [
+                {
+                    "uid": "Asset",
+                    "type": "CustomUnityAsset",
+                    "selected": False,
+                    "resourceRef": "Private.Asset.1:/Custom/Secret.assetbundle",
+                    "cua": {
+                        "loadDll": False,
+                        "ready": True,
+                        "isAssetLoaded": True,
+                        "choiceToken": "c" * 32,
+                        "choiceCount": 1,
+                        "selectedIndex": 7,
+                        "choices": [{"index": 7, "label": "room.prefab"}],
+                        "choicesTruncated": False,
+                        "internalUid": "private-cua-internal-uid",
+                    },
+                }
+            ],
             "persons": [raw_person],
-            "capabilities": ["person-clothing-item-toggle"],
+            "capabilities": [
+                "person-clothing-item-toggle",
+                "Private.1:/Custom/Capability",
+            ],
         }
         with (
             mock.patch(
                 "vampip.service.read_bridge_status",
-                return_value={"instanceId": "bridge-instance", "state": "ok"},
+                return_value={
+                    "instanceId": "bridge-instance",
+                    "state": "ok",
+                    "resourceRef": "Private.Bridge.1:/Custom/Secret.json",
+                },
             ),
             mock.patch("vampip.service.read_bridge_request", return_value=None),
             mock.patch("vampip.service.read_scene_status", return_value=scene),
@@ -323,7 +417,48 @@ class PersonWorkspaceTests(unittest.TestCase):
         clothing = public["persons"][0]["clothing"]
         self.assertNotIn("activeResourceRefs", clothing)
         self.assertNotIn("lockedResourceRefs", clothing)
+        self.assertEqual(
+            clothing["activeItems"],
+            [
+                {
+                    "displayName": "Everyday Shirt",
+                    "tags": ["Tops"],
+                    "locked": True,
+                }
+            ],
+        )
         self.assertEqual(clothing["revision"], "a" * 32)
+        self.assertEqual(
+            public["persons"][0]["hair"]["items"],
+            [
+                {
+                    "displayName": "Soft Bob",
+                    "tags": ["Sim"],
+                    "locked": False,
+                    "simulated": True,
+                }
+            ],
+        )
+        self.assertEqual(
+            set(public["persons"][0]),
+            {"uid", "selected", "clothing", "hair"},
+        )
+        self.assertEqual(
+            set(public["atoms"][0]),
+            {"uid", "type", "selected", "cua"},
+        )
+        self.assertNotIn("internalUid", public["atoms"][0]["cua"])
+        self.assertEqual(
+            public["capabilities"],
+            ["person-clothing-item-toggle"],
+        )
+        self.assertNotIn("resourceRef", public["bridge"])
+        self.assertNotIn("private-clothing-uid", json.dumps(public))
+        self.assertNotIn("Private.Hair", json.dumps(public))
+        self.assertNotIn("Private.Person", json.dumps(public))
+        self.assertNotIn("Private.Asset", json.dumps(public))
+        self.assertNotIn("Private.Bridge", json.dumps(public))
+        self.assertNotIn("private-cua-internal-uid", json.dumps(public))
 
     def test_person_equipment_is_allowlisted_and_accounts_for_unknown_items(
         self,
@@ -370,9 +505,23 @@ class PersonWorkspaceTests(unittest.TestCase):
         roster = self.clothing_roster(
             active_refs=[identified_ref, unidentified_ref],
             locked_refs=[identified_ref],
-            active_count=3,
-            locked_count=2,
-            truncated=True,
+            active_count="2",
+            locked_count="2",
+            active_items=[
+                {
+                    "resourceRef": identified_ref,
+                    "displayName": "Bridge shirt name",
+                    "tags": ["Bridge tag"],
+                    "locked": True,
+                },
+                {
+                    "resourceRef": unidentified_ref,
+                    "displayName": "Satin Panties",
+                    "tags": ["Panties", "Lingerie"],
+                    "locked": True,
+                    "uid": "must-not-escape",
+                },
+            ],
         )
 
         with mock.patch.object(
@@ -405,20 +554,22 @@ class PersonWorkspaceTests(unittest.TestCase):
         self.assertEqual(result["target_uid"], "Person")
         self.assertEqual(result["revision"], "a" * 32)
         self.assertEqual(result["gender"], "Female")
-        self.assertEqual(result["active_count"], 3)
+        self.assertEqual(result["active_count"], 2)
         self.assertEqual(result["locked_count"], 2)
         self.assertEqual(result["identified_count"], 1)
-        self.assertEqual(result["unidentified_count"], 2)
-        self.assertTrue(result["truncated"])
-        self.assertFalse(result["complete"])
+        self.assertEqual(result["unidentified_count"], 1)
+        self.assertFalse(result["truncated"])
+        self.assertTrue(result["complete"])
         items = result["items"]
         assert isinstance(items, list)
-        self.assertEqual(len(items), 1)
+        self.assertEqual(len(items), 2)
         item = items[0]
         self.assertEqual(
             set(item),
             {
                 "id",
+                "key",
+                "actionable",
                 "display_name",
                 "creator",
                 "package",
@@ -432,16 +583,29 @@ class PersonWorkspaceTests(unittest.TestCase):
             },
         )
         self.assertEqual(item["id"], resource_id)
+        self.assertEqual(item["key"], f"resource-{resource_id}")
+        self.assertTrue(item["actionable"])
         self.assertEqual(item["display_name"], "Silk Shirt")
         self.assertEqual(item["creator"], "Creator")
         self.assertEqual(item["package"], "HairPack")
         self.assertEqual(item["resource_type"], "Clothing (Female)")
         self.assertEqual(item["tags"], ["Casual", "Tops"])
-        self.assertEqual(item["slot"], "upper-body")
+        self.assertEqual(item["slot"], "tops")
         self.assertTrue(item["locked"])
         self.assertEqual(item["package_version"], 1)
         self.assertFalse(item["local"])
         self.assertEqual(item["state"], "active")
+        placeholder = items[1]
+        self.assertIsNone(placeholder["id"])
+        self.assertRegex(placeholder["key"], r"^equipment-[0-9a-f]{24}$")
+        self.assertFalse(placeholder["actionable"])
+        self.assertEqual(placeholder["display_name"], "Satin Panties")
+        self.assertEqual(placeholder["tags"], ["Panties", "Lingerie"])
+        self.assertEqual(placeholder["slot"], "panties-underwear")
+        self.assertTrue(placeholder["locked"])
+        self.assertEqual(placeholder["state"], "in-game")
+        self.assertEqual(placeholder["creator"], "")
+        self.assertEqual(placeholder["package"], "")
         serialized = json.dumps(result)
         for private_value in (
             "activeResourceRefs",
@@ -452,6 +616,7 @@ class PersonWorkspaceTests(unittest.TestCase):
             CLOTHING_MEMBER,
             identified_ref,
             unidentified_ref,
+            "must-not-escape",
         ):
             self.assertNotIn(private_value, serialized)
 
@@ -495,6 +660,149 @@ class PersonWorkspaceTests(unittest.TestCase):
         self.assertIsNone(item["package_version"])
         self.assertTrue(item["local"])
         self.assertEqual(item["state"], "local")
+
+    def test_equipment_slot_taxonomy_uses_exact_tokens_and_specific_heels(self) -> None:
+        cases = {
+            "Sports Bra": "bras",
+            "Lace Panties": "panties-underwear",
+            "Winter Shirt": "tops",
+            "Evening Dress": "full-body",
+            "Denim Shorts": "bottoms",
+            "Sheer Stockings": "stockings-socks",
+            "Platform Boots": "shoes-boots",
+            "Midnight High Heel Pumps": "high-heels",
+            "Silk Gloves": "arms-hands",
+            "Pearl Choker": "neck",
+            "Rose Tattoo FX": "body-fx",
+            "Sun Hat": "head",
+            "Shoemaker Apron": "unsorted",
+        }
+        for display_name, expected in cases.items():
+            with self.subTest(display_name=display_name):
+                self.assertEqual(_equipment_slot(display_name, []), expected)
+
+    def test_person_hair_is_bounded_read_only_and_allowlisted(self) -> None:
+        roster = self.hair_roster(
+            active_count="2",
+            locked_count="1",
+            items=[
+                {
+                    "displayName": "Soft Bob",
+                    "tags": ["Sim", "Short", "Sim"],
+                    "locked": True,
+                    "simulated": True,
+                    "uid": "private-hair-uid",
+                    "resourceRef": (
+                        "Private.Hair.1:/Custom/Hair/Secret.vam"
+                    ),
+                },
+                {
+                    "displayName": "Mesh Bangs",
+                    "tags": ["Bangs"],
+                    "locked": False,
+                    "simulated": False,
+                    "packageUid": "private-package",
+                },
+            ],
+        )
+        with mock.patch.object(
+            self.service,
+            "_scene_snapshot",
+            return_value=roster,
+        ) as snapshot:
+            first = self.service.person_hair("Person")
+            second = self.service.person_hair("Person")
+
+        self.assertEqual(snapshot.call_count, 2)
+        snapshot.assert_called_with(include_clothing_refs=True)
+        self.assertTrue(first["available"])
+        self.assertTrue(first["ready"])
+        self.assertEqual(first["active_count"], 2)
+        self.assertEqual(first["locked_count"], 1)
+        self.assertTrue(first["complete"])
+        self.assertEqual(first["items"], second["items"])
+        items = first["items"]
+        assert isinstance(items, list)
+        self.assertEqual(len(items), 2)
+        self.assertEqual(
+            set(items[0]),
+            {
+                "key",
+                "actionable",
+                "display_name",
+                "tags",
+                "locked",
+                "simulated",
+                "state",
+            },
+        )
+        self.assertRegex(items[0]["key"], r"^hair-[0-9a-f]{24}$")
+        self.assertFalse(items[0]["actionable"])
+        self.assertEqual(items[0]["tags"], ["Sim", "Short"])
+        self.assertTrue(items[0]["locked"])
+        self.assertTrue(items[0]["simulated"])
+        serialized = json.dumps(first)
+        for private_value in (
+            "private-hair-uid",
+            "Private.Hair",
+            "Secret.vam",
+            "private-package",
+            "resourceRef",
+        ):
+            self.assertNotIn(private_value, serialized)
+
+    def test_live_presentation_values_redact_paths_and_resource_refs(self) -> None:
+        private_ref = "Private.Asset.1:/Custom/Clothing/Female/Secret.vam"
+        clothing = self.clothing_roster(
+            active_count=1,
+            active_items=[
+                {
+                    "resourceRef": "",
+                    "displayName": private_ref,
+                    "tags": ["/home/private/file", "Safe tag"],
+                    "locked": False,
+                }
+            ],
+        )
+        with mock.patch.object(
+            self.service,
+            "_scene_snapshot",
+            return_value=clothing,
+        ):
+            equipment = self.service.person_equipment("Person")
+        self.assertEqual(
+            equipment["items"][0]["display_name"],
+            "Unnamed clothing item",
+        )
+        self.assertEqual(equipment["items"][0]["tags"], ["Safe tag"])
+
+        hair = self.hair_roster(
+            items=[
+                {
+                    "displayName": r"C:\private\Hair.vam",
+                    "tags": [private_ref, "Bangs"],
+                    "locked": False,
+                    "simulated": False,
+                }
+            ],
+        )
+        with mock.patch.object(
+            self.service,
+            "_scene_snapshot",
+            return_value=hair,
+        ):
+            hair_result = self.service.person_hair("Person")
+        self.assertEqual(
+            hair_result["items"][0]["display_name"],
+            "Unnamed hair item",
+        )
+        self.assertEqual(hair_result["items"][0]["tags"], ["Bangs"])
+        serialized = json.dumps(
+            {"equipment": equipment, "hair": hair_result}
+        )
+        self.assertNotIn("Private.Asset", serialized)
+        self.assertNotIn(r"C:\\private", serialized)
+        self.assertNotIn("/home/private", serialized)
 
     def test_person_equipment_validates_live_target_and_revision(self) -> None:
         unavailable = self.roster()

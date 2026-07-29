@@ -326,60 +326,95 @@ _PERSON_PRESET_BY_RESOURCE_TYPE = {
 
 _EQUIPMENT_SLOT_KEYWORDS: tuple[tuple[str, frozenset[str]], ...] = (
     (
-        "full-body",
+        "high-heels",
         frozenset(
             {
-                "bodysuit",
-                "catsuit",
-                "dress",
-                "dresses",
-                "gown",
-                "jumpsuit",
-                "outfit",
-                "robe",
-                "romper",
+                "heel",
+                "heels",
+                "highheel",
+                "highheels",
+                "pump",
+                "pumps",
+                "stiletto",
+                "stilettos",
             }
         ),
     ),
     (
-        "underwear",
+        "bras",
+        frozenset({"bra", "bras", "bralette", "bralettes"}),
+    ),
+    (
+        "panties-underwear",
         frozenset(
             {
-                "bra",
-                "bras",
                 "briefs",
+                "knickers",
                 "lingerie",
+                "panty",
                 "panties",
                 "thong",
+                "thongs",
                 "underwear",
             }
         ),
     ),
     (
-        "upper-body",
+        "full-body",
         frozenset(
             {
-                "blouse",
-                "coat",
-                "corset",
-                "hoodie",
-                "jacket",
-                "shirt",
-                "shirts",
-                "sweater",
-                "top",
-                "tops",
-                "vest",
+                "bodysuit",
+                "bodysuits",
+                "catsuit",
+                "catsuits",
+                "dress",
+                "dresses",
+                "gown",
+                "gowns",
+                "jumpsuit",
+                "jumpsuits",
+                "outfit",
+                "outfits",
+                "robe",
+                "robes",
+                "romper",
+                "rompers",
             }
         ),
     ),
     (
-        "lower-body",
+        "tops",
+        frozenset(
+            {
+                "blouse",
+                "blouses",
+                "coat",
+                "coats",
+                "corset",
+                "corsets",
+                "hoodie",
+                "hoodies",
+                "jacket",
+                "jackets",
+                "shirt",
+                "shirts",
+                "sweater",
+                "sweaters",
+                "top",
+                "tops",
+                "vest",
+                "vests",
+            }
+        ),
+    ),
+    (
+        "bottoms",
         frozenset(
             {
                 "bottom",
                 "bottoms",
                 "jeans",
+                "leggings",
                 "pants",
                 "shorts",
                 "skirt",
@@ -389,7 +424,7 @@ _EQUIPMENT_SLOT_KEYWORDS: tuple[tuple[str, frozenset[str]], ...] = (
         ),
     ),
     (
-        "legwear",
+        "stockings-socks",
         frozenset(
             {
                 "garter",
@@ -405,26 +440,25 @@ _EQUIPMENT_SLOT_KEYWORDS: tuple[tuple[str, frozenset[str]], ...] = (
         ),
     ),
     (
-        "footwear",
+        "shoes-boots",
         frozenset(
             {
                 "boot",
                 "boots",
                 "footwear",
-                "heel",
-                "heels",
                 "sandal",
                 "sandals",
                 "shoe",
                 "shoes",
+                "slipper",
+                "slippers",
                 "sneaker",
                 "sneakers",
             }
         ),
     ),
-    ("hands", frozenset({"glove", "gloves", "mittens"})),
     (
-        "headwear",
+        "head",
         frozenset(
             {
                 "cap",
@@ -440,21 +474,76 @@ _EQUIPMENT_SLOT_KEYWORDS: tuple[tuple[str, frozenset[str]], ...] = (
         ),
     ),
     (
+        "neck",
+        frozenset(
+            {
+                "choker",
+                "chokers",
+                "collar",
+                "collars",
+                "necklace",
+                "necklaces",
+                "scarf",
+                "scarves",
+                "tie",
+                "ties",
+            }
+        ),
+    ),
+    (
+        "arms-hands",
+        frozenset(
+            {
+                "armband",
+                "armbands",
+                "bracelet",
+                "bracelets",
+                "glove",
+                "gloves",
+                "mitten",
+                "mittens",
+                "sleeve",
+                "sleeves",
+                "wristband",
+                "wristbands",
+            }
+        ),
+    ),
+    (
+        "body-fx",
+        frozenset(
+            {
+                "bodypaint",
+                "decal",
+                "decals",
+                "effect",
+                "effects",
+                "fx",
+                "makeup",
+                "paint",
+                "tattoo",
+                "tattoos",
+            }
+        ),
+    ),
+    (
         "accessories",
         frozenset(
             {
                 "accessories",
                 "accessory",
                 "belt",
-                "bracelet",
-                "choker",
-                "collar",
+                "belts",
                 "earring",
                 "earrings",
                 "glasses",
                 "jewelry",
-                "necklace",
-                "scarf",
+                "piercing",
+                "piercings",
+                "tail",
+                "tails",
+                "wing",
+                "wings",
             }
         ),
     ),
@@ -472,6 +561,181 @@ def _equipment_text(value: object, *, maximum: int = 500) -> str:
     ):
         return ""
     return text
+
+
+def _bounded_int(
+    value: object,
+    *,
+    minimum: int = 0,
+    maximum: int = 2_147_483_647,
+) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if minimum <= value <= maximum else None
+    if isinstance(value, str):
+        text = value.strip()
+        if re.fullmatch(r"-?(?:0|[1-9][0-9]{0,9})", text):
+            parsed = int(text)
+            if minimum <= parsed <= maximum:
+                return parsed
+    return None
+
+
+def _nonnegative_int(value: object) -> int:
+    parsed = _bounded_int(value)
+    return parsed if parsed is not None else 0
+
+
+def _presentation_text(value: object, *, maximum: int) -> str:
+    text = _equipment_text(value, maximum=maximum)
+    normalized = text.replace("\\", "/")
+    if (
+        not text
+        or re.match(r"^[a-z]:/", normalized, flags=re.IGNORECASE)
+        or normalized.startswith("/")
+        or ":/" in normalized
+        or re.search(
+            r"(?:^|/)(?:custom|addonpackages)(?:/|$)",
+            normalized,
+            flags=re.IGNORECASE,
+        )
+        or re.search(r"\.var(?::|/|$)", normalized, flags=re.IGNORECASE)
+    ):
+        return ""
+    return text
+
+
+def _presentation_tags(value: object, *, maximum: int = 128) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    result: list[str] = []
+    seen: set[str] = set()
+    for raw_tag in value:
+        tag = _presentation_text(raw_tag, maximum=100)
+        identity = tag.casefold()
+        if not tag or identity in seen:
+            continue
+        seen.add(identity)
+        result.append(tag)
+        if len(result) >= maximum:
+            break
+    return result
+
+
+def _revision_scoped_key(revision: str, kind: str, index: int) -> str:
+    digest = hashlib.sha256(
+        f"{revision}\0{kind}\0{index}".encode("utf-8")
+    ).hexdigest()[:24]
+    return f"{kind}-{digest}"
+
+
+def _public_capabilities(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    capabilities: list[str] = []
+    seen: set[str] = set()
+    for raw_capability in value[:128]:
+        capability = _equipment_text(raw_capability, maximum=100)
+        if (
+            not re.fullmatch(r"[a-z0-9-]+", capability)
+            or capability in seen
+        ):
+            continue
+        seen.add(capability)
+        capabilities.append(capability)
+    return capabilities
+
+
+def _public_bridge_status(value: object) -> dict[str, object] | None:
+    if not isinstance(value, dict):
+        return None
+    result: dict[str, object] = {}
+    protocol = _nonnegative_int(value.get("protocol"))
+    if protocol:
+        result["protocol"] = protocol
+    for key, maximum in (
+        ("bridgeVersion", 64),
+        ("instanceId", 128),
+        ("requestId", 128),
+        ("lastCompletedRequestId", 128),
+        ("state", 64),
+        ("updatedAtUtc", 64),
+        ("startedAtUtc", 64),
+        ("finishedAtUtc", 64),
+        ("backend", 64),
+        ("message", 1000),
+    ):
+        text = _equipment_text(value.get(key), maximum=maximum)
+        if text:
+            result[key] = text
+    if isinstance(value.get("ok"), bool):
+        result["ok"] = value["ok"]
+    capabilities = _public_capabilities(value.get("capabilities"))
+    if capabilities:
+        result["capabilities"] = capabilities
+    return result
+
+
+def _public_cua_status(value: object) -> dict[str, object] | None:
+    if not isinstance(value, dict):
+        return None
+    choices: list[dict[str, object]] = []
+    raw_choices = value.get("choices")
+    if isinstance(raw_choices, list):
+        seen_indices: set[int] = set()
+        for raw_choice in raw_choices[:128]:
+            if not isinstance(raw_choice, dict):
+                continue
+            index = _bounded_int(raw_choice.get("index"))
+            label = _equipment_text(raw_choice.get("label"), maximum=256)
+            if index is None or index in seen_indices or not label:
+                continue
+            seen_indices.add(index)
+            choices.append({"index": index, "label": label})
+    selected_index = _bounded_int(
+        value.get("selectedIndex"),
+        minimum=-1,
+    )
+    if selected_index is None:
+        selected_index = -1
+    choice_token = _equipment_text(value.get("choiceToken"), maximum=32)
+    if re.fullmatch(r"[0-9a-fA-F]{32}", choice_token) is None:
+        choice_token = ""
+    load_dll = value.get("loadDll")
+    return {
+        "loadDll": load_dll if isinstance(load_dll, bool) else None,
+        "ready": value.get("ready") is True,
+        "isAssetLoaded": value.get("isAssetLoaded") is True,
+        "choiceToken": choice_token,
+        "choiceCount": _nonnegative_int(value.get("choiceCount")),
+        "selectedIndex": selected_index,
+        "choices": choices,
+        "choicesTruncated": value.get("choicesTruncated") is True,
+    }
+
+
+def _public_scene_atoms(value: object) -> list[dict[str, object]]:
+    if not isinstance(value, list):
+        return []
+    atoms: list[dict[str, object]] = []
+    for raw_atom in value:
+        if not isinstance(raw_atom, dict):
+            continue
+        uid = _equipment_text(raw_atom.get("uid"), maximum=200)
+        atom_type = _equipment_text(raw_atom.get("type"), maximum=200)
+        if not uid or not atom_type:
+            continue
+        atom: dict[str, object] = {
+            "uid": uid,
+            "type": atom_type,
+            "selected": raw_atom.get("selected") is True,
+        }
+        cua = _public_cua_status(raw_atom.get("cua"))
+        if cua is not None and atom_type == "CustomUnityAsset":
+            atom["cua"] = cua
+        atoms.append(atom)
+    return atoms
 
 
 def _equipment_member(value: object) -> str | None:
@@ -876,33 +1140,132 @@ class ManagerService:
             and scene.get("instanceId") == bridge.get("instanceId")
         )
         persons = list(scene.get("persons") or []) if available and scene else []
+        atoms = list(scene.get("atoms") or []) if available and scene else []
+        capabilities = (
+            list(scene.get("capabilities") or []) if available and scene else []
+        )
+        selected_uid = (
+            str(scene.get("selectedUid") or "") if available and scene else ""
+        )
         if not include_clothing_refs:
             public_persons: list[object] = []
             for person in persons:
                 if not isinstance(person, dict):
-                    public_persons.append(person)
                     continue
-                public_person = dict(person)
-                clothing = public_person.get("clothing")
+                uid = _equipment_text(person.get("uid"), maximum=200)
+                if not uid:
+                    continue
+                public_person: dict[str, object] = {
+                    "uid": uid,
+                    "selected": person.get("selected") is True,
+                }
+                clothing = person.get("clothing")
                 if isinstance(clothing, dict):
-                    public_clothing = dict(clothing)
-                    public_clothing.pop("activeResourceRefs", None)
-                    public_clothing.pop("lockedResourceRefs", None)
+                    public_clothing: dict[str, object] = {
+                        "ready": clothing.get("ready") is True,
+                        "gender": (
+                            str(clothing.get("gender") or "")
+                            if str(clothing.get("gender") or "").casefold()
+                            in {"female", "male", "both", "none"}
+                            else "Unknown"
+                        ),
+                        "activeCount": _nonnegative_int(
+                            clothing.get("activeCount")
+                        ),
+                        "lockedCount": _nonnegative_int(
+                            clothing.get("lockedCount")
+                        ),
+                        "truncated": clothing.get("truncated") is True,
+                        "revision": _equipment_text(
+                            clothing.get("revision"),
+                            maximum=32,
+                        ),
+                    }
+                    raw_active_items = clothing.get("activeItems")
+                    if isinstance(raw_active_items, list):
+                        public_active_items: list[dict[str, object]] = []
+                        for raw_item in raw_active_items[:256]:
+                            if not isinstance(raw_item, dict):
+                                continue
+                            display_name = _presentation_text(
+                                raw_item.get("displayName"),
+                                maximum=256,
+                            )
+                            public_active_items.append(
+                                {
+                                    "displayName": (
+                                        display_name
+                                        or "Unnamed clothing item"
+                                    ),
+                                    "tags": _presentation_tags(
+                                        raw_item.get("tags"),
+                                        maximum=32,
+                                    ),
+                                    "locked": raw_item.get("locked") is True,
+                                }
+                            )
+                        public_clothing["activeItems"] = public_active_items
                     public_person["clothing"] = public_clothing
+                else:
+                    public_person.pop("clothing", None)
+                hair = person.get("hair")
+                if isinstance(hair, dict):
+                    public_hair: dict[str, object] = {
+                        "ready": hair.get("ready") is True,
+                        "revision": _equipment_text(
+                            hair.get("revision"),
+                            maximum=32,
+                        ),
+                        "activeCount": _nonnegative_int(
+                            hair.get("activeCount")
+                        ),
+                        "lockedCount": _nonnegative_int(
+                            hair.get("lockedCount")
+                        ),
+                        "truncated": hair.get("truncated") is True,
+                        "items": [],
+                    }
+                    public_hair_items: list[dict[str, object]] = []
+                    raw_hair_items = hair.get("items")
+                    if isinstance(raw_hair_items, list):
+                        for raw_item in raw_hair_items[:128]:
+                            if not isinstance(raw_item, dict):
+                                continue
+                            display_name = _presentation_text(
+                                raw_item.get("displayName"),
+                                maximum=256,
+                            )
+                            public_hair_items.append(
+                                {
+                                    "displayName": (
+                                        display_name or "Unnamed hair item"
+                                    ),
+                                    "tags": _presentation_tags(
+                                        raw_item.get("tags"),
+                                        maximum=32,
+                                    ),
+                                    "locked": raw_item.get("locked") is True,
+                                    "simulated": (
+                                        raw_item.get("simulated") is True
+                                    ),
+                                }
+                            )
+                    public_hair["items"] = public_hair_items
+                    public_person["hair"] = public_hair
                 public_persons.append(public_person)
             persons = public_persons
+            atoms = _public_scene_atoms(atoms)
+            capabilities = _public_capabilities(capabilities)
+            bridge = _public_bridge_status(bridge)
+            selected_uid = _equipment_text(selected_uid, maximum=200)
         return {
             "available": available,
             "vam_running": bool(pids),
             "loading": bool(scene.get("loading")) if available and scene else False,
-            "selected_uid": (
-                str(scene.get("selectedUid") or "") if available and scene else ""
-            ),
-            "atoms": (list(scene.get("atoms") or []) if available and scene else []),
+            "selected_uid": selected_uid,
+            "atoms": atoms,
             "persons": persons,
-            "capabilities": (
-                list(scene.get("capabilities") or []) if available and scene else []
-            ),
+            "capabilities": capabilities,
             "bridge": bridge,
             "updated_at_utc": (
                 scene.get("updatedAtUtc") if available and scene else None
@@ -1331,16 +1694,9 @@ class ManagerService:
             "none": "None",
         }.get(raw_gender, "Unknown")
 
-        def count(value: object) -> int:
-            return (
-                value
-                if isinstance(value, int) and not isinstance(value, bool) and value >= 0
-                else 0
-            )
-
         revision = str(clothing.get("revision") or "")
-        active_count = count(clothing.get("activeCount"))
-        locked_count = count(clothing.get("lockedCount"))
+        active_count = _nonnegative_int(clothing.get("activeCount"))
+        locked_count = _nonnegative_int(clothing.get("lockedCount"))
         truncated = clothing.get("truncated") is True
         result.update(
             {
@@ -1381,8 +1737,59 @@ class ManagerService:
             if isinstance(raw_locked, list)
             else set()
         )
-        active_count = max(active_count, len(active_refs))
-        locked_count = max(locked_count, len(locked_refs))
+
+        active_items: list[dict[str, object]] = []
+        raw_active_items = clothing.get("activeItems")
+        if isinstance(raw_active_items, list):
+            for raw_item in raw_active_items[:256]:
+                if not isinstance(raw_item, dict):
+                    continue
+                resource_ref = raw_item.get("resourceRef")
+                display_name = _presentation_text(
+                    raw_item.get("displayName"),
+                    maximum=256,
+                )
+                active_items.append(
+                    {
+                        "resource_ref": (
+                            resource_ref
+                            if isinstance(resource_ref, str)
+                            and resource_ref
+                            else ""
+                        ),
+                        "display_name": (
+                            display_name or "Unnamed clothing item"
+                        ),
+                        "tags": _presentation_tags(
+                            raw_item.get("tags"),
+                            maximum=32,
+                        ),
+                        "locked": raw_item.get("locked") is True,
+                    }
+                )
+        roster_published = isinstance(raw_active_items, list)
+        if not roster_published:
+            active_items = [
+                {
+                    "resource_ref": resource_ref,
+                    "display_name": "Unnamed clothing item",
+                    "tags": [],
+                    "locked": (
+                        resource_ref.replace("\\", "/").casefold()
+                        in locked_refs
+                    ),
+                }
+                for resource_ref in active_refs
+            ]
+
+        active_count = max(active_count, len(active_items), len(active_refs))
+        roster_locked_count = sum(
+            1 for item in active_items if item.get("locked") is True
+        )
+        locked_count = min(
+            active_count,
+            max(locked_count, roster_locked_count, len(locked_refs)),
+        )
         result["active_count"] = active_count
         result["locked_count"] = locked_count
 
@@ -1462,55 +1869,102 @@ class ManagerService:
                 )
 
         items: list[dict[str, object]] = []
-        for raw_ref in active_refs:
+        for item_index, active_item in enumerate(active_items):
+            raw_ref = str(active_item.get("resource_ref") or "")
             normalized_ref = raw_ref.replace("\\", "/")
             package_ref, separator, raw_member = normalized_ref.partition(":/")
             member = _equipment_member(raw_member if separator else normalized_ref)
-            if member is None:
-                continue
-            resource_type = _equipment_resource_type(member)
-            if resource_type is None:
-                continue
+            resource_type = (
+                _equipment_resource_type(member)
+                if member is not None
+                else None
+            )
 
             row: sqlite3.Row | None = None
             package_version: int | None = None
             local = not bool(separator)
             state = "local"
-            if separator:
+            if resource_type is not None and separator:
                 matches = packaged_rows.get(
                     (package_ref.casefold(), member.casefold()),
                     [],
                 )
                 if matches:
                     row, package_version, state = matches[0]
-            else:
+            elif resource_type is not None and member is not None:
                 matches = local_rows.get(member.casefold(), [])
                 if matches:
                     row = matches[0]
-            if row is None:
+
+            if row is not None and resource_type is not None:
+                display_name, tags = _equipment_metadata(row, package_version)
+                resource_id = int(row["id"])
+                items.append(
+                    {
+                        "id": resource_id,
+                        "key": f"resource-{resource_id}",
+                        "actionable": True,
+                        "display_name": display_name,
+                        "creator": _equipment_text(
+                            row["creator"],
+                            maximum=500,
+                        ),
+                        "package": _equipment_text(
+                            row["package_name"],
+                            maximum=500,
+                        ),
+                        "resource_type": resource_type,
+                        "tags": tags,
+                        "slot": _equipment_slot(display_name, tags),
+                        "locked": active_item.get("locked") is True,
+                        "package_version": package_version,
+                        "local": local,
+                        "state": state,
+                    }
+                )
                 continue
 
-            display_name, tags = _equipment_metadata(row, package_version)
+            display_name = _presentation_text(
+                active_item.get("display_name"),
+                maximum=256,
+            )
+            if not display_name:
+                display_name = "Unnamed clothing item"
+            tags = _presentation_tags(
+                active_item.get("tags"),
+                maximum=32,
+            )
+            fallback_resource_type = resource_type
+            if fallback_resource_type is None:
+                fallback_resource_type = {
+                    "female": "Clothing (Female)",
+                    "male": "Clothing (Male)",
+                }.get(raw_gender, "Clothing")
             items.append(
                 {
-                    "id": int(row["id"]),
-                    "display_name": display_name,
-                    "creator": _equipment_text(row["creator"], maximum=500),
-                    "package": _equipment_text(
-                        row["package_name"],
-                        maximum=500,
+                    "id": None,
+                    "key": _revision_scoped_key(
+                        revision,
+                        "equipment",
+                        item_index,
                     ),
-                    "resource_type": resource_type,
+                    "actionable": False,
+                    "display_name": display_name,
+                    "creator": "",
+                    "package": "",
+                    "resource_type": fallback_resource_type,
                     "tags": tags,
                     "slot": _equipment_slot(display_name, tags),
-                    "locked": normalized_ref.casefold() in locked_refs,
-                    "package_version": package_version,
-                    "local": local,
-                    "state": state,
+                    "locked": active_item.get("locked") is True,
+                    "package_version": None,
+                    "local": False,
+                    "state": "in-game",
                 }
             )
 
-        identified_count = len(items)
+        identified_count = sum(
+            1 for item in items if item.get("actionable") is True
+        )
         unidentified_count = max(active_count - identified_count, 0)
         result.update(
             {
@@ -1518,9 +1972,109 @@ class ManagerService:
                 "unidentified_count": unidentified_count,
                 "complete": (
                     not truncated
-                    and unidentified_count == 0
-                    and identified_count == active_count
+                    and len(items) == active_count
                 ),
+                "items": items,
+            }
+        )
+        return result
+
+    def person_hair(self, target_uid: str) -> dict[str, object]:
+        """Return a bounded, presentation-only view of active Person hair."""
+
+        uid = self._validate_target_uid(target_uid)
+        result: dict[str, object] = {
+            "available": False,
+            "target_uid": uid,
+            "revision": "",
+            "ready": False,
+            "active_count": 0,
+            "locked_count": 0,
+            "truncated": False,
+            "complete": False,
+            "items": [],
+        }
+        scene = self._scene_snapshot(include_clothing_refs=True)
+        if not bool(scene.get("available")):
+            return result
+
+        person = next(
+            (
+                value
+                for value in scene.get("persons", [])
+                if isinstance(value, dict) and str(value.get("uid") or "") == uid
+            ),
+            None,
+        )
+        if person is None:
+            raise ValueError(f"Person atom is no longer available: {uid}")
+
+        result["available"] = True
+        hair = person.get("hair")
+        if not isinstance(hair, dict):
+            return result
+
+        ready = hair.get("ready") is True
+        revision = str(hair.get("revision") or "")
+        active_count = _nonnegative_int(hair.get("activeCount"))
+        locked_count = _nonnegative_int(hair.get("lockedCount"))
+        truncated = hair.get("truncated") is True
+        result.update(
+            {
+                "revision": revision,
+                "ready": ready,
+                "active_count": active_count,
+                "locked_count": locked_count,
+                "truncated": truncated,
+            }
+        )
+        if not ready:
+            return result
+        if re.fullmatch(r"[0-9a-fA-F]{32}", revision) is None:
+            raise ValueError("the selected Person has an invalid live hair revision")
+
+        items: list[dict[str, object]] = []
+        raw_items = hair.get("items")
+        if isinstance(raw_items, list):
+            for item_index, raw_item in enumerate(raw_items[:128]):
+                if not isinstance(raw_item, dict):
+                    continue
+                display_name = _presentation_text(
+                    raw_item.get("displayName"),
+                    maximum=256,
+                )
+                items.append(
+                    {
+                        "key": _revision_scoped_key(
+                            revision,
+                            "hair",
+                            item_index,
+                        ),
+                        "actionable": False,
+                        "display_name": display_name or "Unnamed hair item",
+                        "tags": _presentation_tags(
+                            raw_item.get("tags"),
+                            maximum=32,
+                        ),
+                        "locked": raw_item.get("locked") is True,
+                        "simulated": raw_item.get("simulated") is True,
+                        "state": "in-game",
+                    }
+                )
+
+        active_count = max(active_count, len(items))
+        locked_count = min(
+            active_count,
+            max(
+                locked_count,
+                sum(1 for item in items if item["locked"] is True),
+            ),
+        )
+        result.update(
+            {
+                "active_count": active_count,
+                "locked_count": locked_count,
+                "complete": not truncated and len(items) == active_count,
                 "items": items,
             }
         )
@@ -3196,7 +3750,9 @@ class ManagerService:
                 "running": bool(pids),
                 "pids": pids,
             },
-            "bridge": read_bridge_status(self.vam_root),
+            "bridge": _public_bridge_status(
+                read_bridge_status(self.vam_root)
+            ),
             "initial_scan": (
                 {
                     "found": scan_result.found,

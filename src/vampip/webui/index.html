@@ -6,8 +6,8 @@
     <meta name="color-scheme" content="dark">
     <meta name="theme-color" content="#111316">
     <title>VAM-PIP Manager</title>
-    <link rel="stylesheet" href="/styles.css?v=0.7.0">
-    <script src="/app.js?v=0.7.0" defer></script>
+    <link rel="stylesheet" href="/styles.css?v=0.8.0">
+    <script src="/app.js?v=0.8.0" defer></script>
   </head>
   <body>
     <a class="skip-link" href="#main-content">Skip to library</a>
@@ -303,7 +303,7 @@
                   aria-label="Person customization shortcuts"
                 ></nav>
 
-                <div class="character-sheet-layout">
+                <div class="character-sheet-layout" id="wardrobe-sheet">
                   <div
                     class="equipment-column equipment-column-left"
                     id="equipment-slots-left"
@@ -344,6 +344,79 @@
                   aria-live="polite"
                   hidden
                 ></p>
+
+                <section
+                  class="hair-studio"
+                  id="hair-studio"
+                  aria-labelledby="hair-studio-title"
+                  hidden
+                >
+                  <div class="hair-layer-panel">
+                    <header class="hair-panel-heading">
+                      <div>
+                        <p class="eyebrow">Live roster</p>
+                        <h4 id="hair-studio-title">Active hair layers</h4>
+                      </div>
+                      <span class="hair-read-only-badge">Read only</span>
+                    </header>
+                    <p class="hair-panel-summary" id="hair-studio-summary">
+                      Reading the active hair layers from VaM.
+                    </p>
+                    <div
+                      class="hair-layer-list"
+                      id="hair-layer-list"
+                      aria-live="polite"
+                    ></div>
+                  </div>
+
+                  <aside class="hair-inspector" aria-labelledby="hair-inspector-title">
+                    <header class="hair-panel-heading">
+                      <div>
+                        <p class="eyebrow">Layer details</p>
+                        <h4 id="hair-inspector-title">Hair inspector</h4>
+                      </div>
+                    </header>
+                    <p class="hair-inspector-notice">
+                      VAM-PIP does not invent current values. Typed hair controls are not available yet, so detailed editing stays inside VaM.
+                    </p>
+                    <div class="hair-inspector-groups" id="hair-inspector-groups"></div>
+                  </aside>
+
+                  <p
+                    class="equipment-warning hair-warning"
+                    id="hair-warning"
+                    role="status"
+                    aria-live="polite"
+                    hidden
+                  ></p>
+                </section>
+
+                <section
+                  class="character-recipe"
+                  id="character-recipe"
+                  aria-labelledby="character-recipe-title"
+                  hidden
+                >
+                  <div class="character-recipe-identity">
+                    <span class="character-recipe-monogram" id="character-recipe-monogram" aria-hidden="true">?</span>
+                    <div>
+                      <p class="eyebrow">Selected Person</p>
+                      <h4 id="character-recipe-person">No Person selected</h4>
+                      <p id="character-recipe-gender">Gender unavailable</p>
+                    </div>
+                  </div>
+                  <div class="character-recipe-copy">
+                    <p class="eyebrow">Preset scope</p>
+                    <h4 id="character-recipe-title">Person recipe</h4>
+                    <p id="character-recipe-description">
+                      Choose a card below. The current preset is not inferred or guessed.
+                    </p>
+                    <div class="character-recipe-scopes" id="character-recipe-scopes"></div>
+                  </div>
+                  <p class="character-recipe-note" id="character-recipe-note">
+                    Current preset: not published by VaM.
+                  </p>
+                </section>
               </section>
             </section>
 

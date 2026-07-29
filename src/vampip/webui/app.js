@@ -21,6 +21,13 @@ const ATOM_TARGET_KINDS = new Set([
 ]);
 const PERSON_TARGET_KINDS = new Set(["person", "person-clothing-item"]);
 const CHARACTER_SLOT_VISIBLE_ITEMS = 3;
+const WARDROBE_CATEGORY_IDS = new Set([
+  "preset-clothing",
+  "clothing-items-female",
+  "clothing-items-male",
+  "clothing-item-presets",
+]);
+const HAIR_CATEGORY_IDS = new Set(["preset-hair"]);
 const CHARACTER_SHEET_SLOTS = Object.freeze([
   {
     id: "head",
@@ -28,7 +35,6 @@ const CHARACTER_SHEET_SLOTS = Object.freeze([
     column: "left",
     tags: [
       "head",
-      "hair",
       "hat",
       "hats",
       "cap",
@@ -53,8 +59,8 @@ const CHARACTER_SHEET_SLOTS = Object.freeze([
     tags: ["neck", "collar", "choker", "necklace", "scarf", "tie"],
   },
   {
-    id: "torso",
-    label: "Torso",
+    id: "tops",
+    label: "Tops & outerwear",
     column: "left",
     tags: [
       "torso",
@@ -63,8 +69,6 @@ const CHARACTER_SHEET_SLOTS = Object.freeze([
       "shirt",
       "shirts",
       "blouse",
-      "bra",
-      "bras",
       "coat",
       "hoodie",
       "jacket",
@@ -74,17 +78,24 @@ const CHARACTER_SHEET_SLOTS = Object.freeze([
     ],
   },
   {
+    id: "bras",
+    label: "Bras",
+    column: "left",
+    tags: ["bra", "bras", "bralette", "brassiere"],
+  },
+  {
     id: "arms-hands",
     label: "Arms & hands",
     column: "left",
     tags: ["arm", "arms", "hand", "hands", "glove", "gloves", "mittens"],
   },
   {
-    id: "full-body",
-    label: "Full body",
+    id: "dresses-outfits",
+    label: "Dresses & full outfits",
     column: "left",
     tags: [
       "full body",
+      "full-body",
       "bodysuit",
       "catsuit",
       "costume",
@@ -100,39 +111,49 @@ const CHARACTER_SHEET_SLOTS = Object.freeze([
     ],
   },
   {
-    id: "waist-hips",
-    label: "Waist & hips",
+    id: "panties-underwear",
+    label: "Panties & underwear",
     column: "right",
     tags: [
+      "briefs",
+      "lingerie",
+      "panty",
+      "panties",
+      "thong",
+      "thongs",
+      "underwear",
+      "knickers",
+    ],
+  },
+  {
+    id: "bottoms",
+    label: "Bottoms",
+    column: "right",
+    tags: [
+      "bottom",
+      "bottoms",
       "hip",
       "hips",
       "waist",
       "skirt",
       "skirts",
       "belt",
-      "briefs",
-      "lingerie",
-      "panties",
-      "thong",
-      "underwear",
-      "bottom",
-      "bottoms",
-    ],
-  },
-  {
-    id: "legs",
-    label: "Legs",
-    column: "right",
-    tags: [
       "leg",
       "legs",
       "pants",
-      "stocking",
-      "stockings",
       "shorts",
-      "leggings",
       "jeans",
       "trousers",
+    ],
+  },
+  {
+    id: "stockings-socks",
+    label: "Stockings & socks",
+    column: "right",
+    tags: [
+      "stocking",
+      "stockings",
+      "leggings",
       "garter",
       "garters",
       "hosiery",
@@ -143,16 +164,31 @@ const CHARACTER_SHEET_SLOTS = Object.freeze([
     ],
   },
   {
-    id: "feet",
-    label: "Feet",
+    id: "high-heels",
+    label: "High heels",
+    column: "right",
+    tags: [
+      "heel",
+      "heels",
+      "high heel",
+      "high heels",
+      "high-heel",
+      "high-heels",
+      "pump",
+      "pumps",
+      "stiletto",
+      "stilettos",
+    ],
+  },
+  {
+    id: "shoes-boots",
+    label: "Shoes & boots",
     column: "right",
     tags: [
       "feet",
       "footwear",
       "shoe",
       "shoes",
-      "heel",
-      "heels",
       "boot",
       "boots",
       "sandal",
@@ -191,27 +227,81 @@ const CHARACTER_SHEET_SLOTS = Object.freeze([
   },
 ]);
 const CHARACTER_SLOT_CLASSIFICATION_ORDER = Object.freeze([
-  "full-body",
+  "dresses-outfits",
+  "high-heels",
+  "bras",
+  "panties-underwear",
+  "stockings-socks",
   "head",
   "neck",
   "arms-hands",
-  "feet",
-  "legs",
-  "waist-hips",
-  "torso",
+  "shoes-boots",
+  "bottoms",
+  "tops",
   "accessories",
   "body-fx",
 ]);
 const CHARACTER_SLOT_ALIASES = Object.freeze({
-  "full-body": "full-body",
-  "upper-body": "torso",
-  underwear: "waist-hips",
-  "lower-body": "legs",
-  legwear: "legs",
-  footwear: "feet",
+  "full-body": "dresses-outfits",
+  "dresses-and-full-outfits": "dresses-outfits",
+  outfit: "dresses-outfits",
+  outfits: "dresses-outfits",
+  dress: "dresses-outfits",
+  "upper-body": "tops",
+  "tops-and-outerwear": "tops",
+  torso: "tops",
+  top: "tops",
+  bra: "bras",
+  underwear: "panties-underwear",
+  "panties-and-underwear": "panties-underwear",
+  panties: "panties-underwear",
+  lingerie: "panties-underwear",
+  "lower-body": "bottoms",
+  legs: "bottoms",
+  legwear: "stockings-socks",
+  "stockings-and-socks": "stockings-socks",
+  hosiery: "stockings-socks",
+  footwear: "shoes-boots",
+  "shoes-and-boots": "shoes-boots",
+  shoes: "shoes-boots",
+  boots: "shoes-boots",
+  heels: "high-heels",
+  "high-heel": "high-heels",
+  "high-heels": "high-heels",
   hands: "arms-hands",
+  "arms-and-hands": "arms-hands",
   headwear: "head",
   accessories: "accessories",
+  "body-fx": "body-fx",
+});
+const HAIR_INSPECTOR_GROUPS = Object.freeze([
+  {
+    title: "Style & shape",
+    detail: "Style, length, width, curls, segments, and density",
+  },
+  {
+    title: "Color & materials",
+    detail: "Root, tip, specular, and material appearance",
+  },
+  {
+    title: "Physics & simulation",
+    detail: "Simulation, collisions, gravity, and spring behavior",
+  },
+  {
+    title: "Scalp & fit",
+    detail: "Scalp geometry, offsets, fit, and cap visibility",
+  },
+]);
+const CHARACTER_RECIPE_SCOPES = Object.freeze({
+  "preset-appearance": ["Morphs", "Skin", "Hair", "Clothing", "Scale"],
+  "preset-skin": ["Textures", "Materials", "Tone"],
+  "preset-morphs": ["Body", "Face", "Expressions"],
+  "preset-pose": ["Controllers", "Pose"],
+  "preset-animation": ["Motion", "Timing"],
+  "preset-breast-physics": ["Breast physics"],
+  "preset-glute-physics": ["Glute physics"],
+  "preset-general": ["Appearance", "Physics", "Optional pose"],
+  "preset-plugins": ["Person plugins"],
 });
 const CHARACTER_SHORTCUT_GROUPS = Object.freeze([
   {
@@ -597,6 +687,14 @@ const app = {
   personEquipmentRequestGeneration: 0,
   personEquipmentRequestController: null,
   equipmentExpandedSlots: new Set(),
+  personHair: null,
+  personHairError: null,
+  personHairLoading: false,
+  personHairKey: "",
+  personHairAttemptedKey: "",
+  personHairRequestedKey: "",
+  personHairRequestGeneration: 0,
+  personHairRequestController: null,
   clothingMutationInFlight: false,
   selectedAtomUid: "",
   atomTargetMode: "existing",
@@ -697,10 +795,24 @@ function cacheElements() {
     "character-identity-name",
     "character-identity-gender",
     "character-identity-counts",
+    "wardrobe-sheet",
     "equipment-slots-left",
     "equipment-slots-right",
     "equipment-slots-extra",
     "equipment-warning",
+    "hair-studio",
+    "hair-studio-summary",
+    "hair-layer-list",
+    "hair-inspector-groups",
+    "hair-warning",
+    "character-recipe",
+    "character-recipe-monogram",
+    "character-recipe-person",
+    "character-recipe-gender",
+    "character-recipe-title",
+    "character-recipe-description",
+    "character-recipe-scopes",
+    "character-recipe-note",
     "atom-context",
     "atom-target",
     "atom-target-mode",
@@ -819,6 +931,7 @@ function bindEvents() {
     app.selectedPersonUid = elements.personTarget.value;
     app.equipmentExpandedSlots.clear();
     syncPersonEquipment({ quiet: true });
+    syncPersonHair({ quiet: true, retry: true });
     renderPersonContext();
     if (app.view === "workspace") {
       if (isIndividualClothingCategory()) {
@@ -1219,6 +1332,10 @@ async function refreshAll(options = {}) {
       quiet: true,
       retry: Boolean(options.retryEquipment),
     });
+    await syncPersonHair({
+      quiet: true,
+      retry: Boolean(options.retryEquipment),
+    });
 
     if (app.view !== "access") {
       await loadLibrary({ preserveCount: true });
@@ -1508,6 +1625,13 @@ function categoryUsesPersonContext(category = currentWorkspaceCategory()) {
   return Boolean(category && PERSON_TARGET_KINDS.has(category.targetKind));
 }
 
+function characterSheetMode(category = currentWorkspaceCategory()) {
+  if (!categoryUsesPersonContext(category)) return "hidden";
+  if (HAIR_CATEGORY_IDS.has(category.id)) return "hair";
+  if (WARDROBE_CATEGORY_IDS.has(category.id)) return "wardrobe";
+  return "recipe";
+}
+
 function workspaceFacetCounts() {
   const counts = new Map();
   for (const facet of normalizeFacetTypes(app.facets)) {
@@ -1711,6 +1835,10 @@ function setWorkspaceCategory(categoryId) {
     ATOM_TARGET_KINDS.has(category.targetKind)
   ) {
     loadPersons({ quiet: true });
+    if (categoryUsesPersonContext(category)) {
+      syncPersonEquipment({ quiet: true });
+      syncPersonHair({ quiet: true });
+    }
   }
   loadLibrary();
 }
@@ -1944,6 +2072,11 @@ function personControlKey() {
       numberOr(person.clothing?.activeCount, 0),
       numberOr(person.clothing?.lockedCount, 0),
       Boolean(person.clothing?.truncated),
+      Boolean(person.hair?.ready),
+      person.hair?.revision || "",
+      numberOr(person.hair?.activeCount, 0),
+      numberOr(person.hair?.lockedCount, 0),
+      Boolean(person.hair?.truncated),
     ]),
     atoms: atomList(snapshot).map((atom) => [
       atom.uid,
@@ -2021,6 +2154,13 @@ function selectedPersonClothing(snapshot = app.person || {}) {
     : null;
 }
 
+function selectedPersonHair(snapshot = app.person || {}) {
+  const person = selectedPersonSnapshot(snapshot);
+  return person?.hair && typeof person.hair === "object"
+    ? person.hair
+    : null;
+}
+
 function personEquipmentIdentity(snapshot = app.person || {}) {
   const targetUid = String(app.selectedPersonUid || "").trim();
   const clothing = selectedPersonClothing(snapshot);
@@ -2072,6 +2212,29 @@ function clearPersonEquipment() {
   renderCharacterSheet();
 }
 
+function safePresentationLabel(value, fallback) {
+  const label = String(value || "")
+    .replace(/[\u0000-\u001f\u007f]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 120);
+  if (
+    !label ||
+    /^[a-z]:[\\/]/i.test(label) ||
+    /^[/\\]/.test(label) ||
+    /(?:^|[\\/])(?:Custom|AddonPackages)(?:[\\/]|$)/i.test(label) ||
+    /\.var(?::|[\\/]|$)/i.test(label)
+  ) {
+    return fallback;
+  }
+  return label;
+}
+
+function safeOpaqueKey(value, fallback) {
+  const key = String(value || "").trim();
+  return /^[a-z0-9_-]{1,128}$/i.test(key) ? key : fallback;
+}
+
 function normalizePersonEquipment(payload, targetUid, revision) {
   const document =
     payload && typeof payload === "object" && !Array.isArray(payload)
@@ -2084,20 +2247,50 @@ function normalizePersonEquipment(payload, targetUid, revision) {
       continue;
     }
     const resourceId = integerValue(rawItem.id ?? rawItem.resource_id);
-    if (resourceId === null || resourceId < 1) continue;
-    const normalizedItem = {
-      ...rawItem,
-      id: resourceId,
-      worn: true,
-      clothing_locked: booleanValue(
-        rawItem.clothing_locked ?? rawItem.locked,
-        false,
-      ),
-      clothing_compatible: true,
-      clothing_revision: String(
-        rawItem.clothing_revision || document.revision || revision,
-      ).toLowerCase(),
-    };
+    const identified = resourceId !== null && resourceId > 0;
+    const actionable =
+      identified && booleanValue(rawItem.actionable, true);
+    const presentationIndex = items.length + 1;
+    const normalizedItem = identified
+      ? {
+          ...rawItem,
+          id: resourceId,
+          actionable,
+          worn: true,
+          clothing_locked: booleanValue(
+            rawItem.clothing_locked ?? rawItem.locked,
+            false,
+          ),
+          clothing_compatible: true,
+          clothing_revision: String(
+            rawItem.clothing_revision || document.revision || revision,
+          ).toLowerCase(),
+        }
+      : {
+          id: null,
+          actionable: false,
+          presentation_key: safeOpaqueKey(
+            rawItem.key ?? rawItem.presentation_key,
+            `item-${presentationIndex}`,
+          ),
+          display_name: safePresentationLabel(
+            rawItem.display_name ?? rawItem.name,
+            `In-game clothing ${presentationIndex}`,
+          ),
+          tags: normalizeTags(rawItem.tags).slice(0, 16),
+          equipment_slot: String(
+            rawItem.equipment_slot ?? rawItem.slot ?? "",
+          ).slice(0, 64),
+          worn: true,
+          clothing_locked: booleanValue(
+            rawItem.clothing_locked ?? rawItem.locked,
+            false,
+          ),
+          clothing_compatible: true,
+          clothing_revision: String(
+            document.revision || revision,
+          ).toLowerCase(),
+        };
     const itemKey = equipmentItemKey(normalizedItem);
     if (!itemKey || seen.has(itemKey)) continue;
     seen.add(itemKey);
@@ -2115,11 +2308,14 @@ function normalizePersonEquipment(payload, targetUid, revision) {
       items.filter((item) => item.clothing_locked).length,
     ),
   );
+  const identifiedItems = items.filter(
+    (item) => integerValue(item.id) !== null,
+  ).length;
   const identifiedCount = Math.max(
-    items.length,
+    identifiedItems,
     numberOr(
       document.identified_count ?? document.identifiedCount,
-      items.length,
+      identifiedItems,
     ),
   );
   const unidentifiedCount = Math.max(
@@ -2149,7 +2345,7 @@ function normalizePersonEquipment(payload, targetUid, revision) {
 async function syncPersonEquipment({ quiet = true, retry = false } = {}) {
   if (
     app.view !== "workspace" ||
-    !categoryUsesPersonContext(currentWorkspaceCategory())
+    characterSheetMode() !== "wardrobe"
   ) {
     return app.personEquipment;
   }
@@ -2259,6 +2455,210 @@ async function syncPersonEquipment({ quiet = true, retry = false } = {}) {
   }
 }
 
+function personHairIdentity() {
+  const targetUid = String(app.selectedPersonUid || "").trim();
+  const hair = selectedPersonHair();
+  const revision = String(hair?.revision || "").trim().toLowerCase();
+  if (
+    !targetUid ||
+    hair?.ready !== true ||
+    !/^[0-9a-f]{32}$/.test(revision)
+  ) {
+    return null;
+  }
+  return {
+    targetUid,
+    revision,
+    key: `${targetUid}\u0000${revision}`,
+  };
+}
+
+function personHairRequestIsCurrent(generation, targetUid, revision) {
+  const identity = personHairIdentity();
+  return Boolean(
+    generation === app.personHairRequestGeneration &&
+      identity &&
+      identity.targetUid === targetUid &&
+      identity.revision === revision,
+  );
+}
+
+function cancelPersonHairRequest() {
+  if (app.personHairRequestController) {
+    app.personHairRequestController.abort();
+    app.personHairRequestController = null;
+  }
+  app.personHairRequestGeneration += 1;
+  app.personHairLoading = false;
+  app.personHairRequestedKey = "";
+}
+
+function clearPersonHair() {
+  cancelPersonHairRequest();
+  app.personHair = null;
+  app.personHairError = null;
+  app.personHairKey = "";
+  app.personHairAttemptedKey = "";
+  renderCharacterSheet();
+}
+
+function normalizePersonHair(payload, targetUid) {
+  const document =
+    payload && typeof payload === "object" && !Array.isArray(payload)
+      ? payload
+      : {};
+  const items = [];
+  const seen = new Set();
+  for (const rawItem of asArray(document.items)) {
+    if (!rawItem || typeof rawItem !== "object" || Array.isArray(rawItem)) {
+      continue;
+    }
+    const index = items.length + 1;
+    const key = safeOpaqueKey(rawItem.key, `layer-${index}`);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const tags = normalizeTags(rawItem.tags)
+      .map((tag) => safePresentationLabel(tag, ""))
+      .filter(Boolean)
+      .slice(0, 8);
+    items.push({
+      key,
+      displayName: safePresentationLabel(
+        rawItem.display_name,
+        `Hair layer ${index}`,
+      ),
+      tags,
+      locked: booleanValue(rawItem.locked, false),
+      simulated: booleanValue(rawItem.simulated, false),
+    });
+  }
+  return {
+    available: booleanValue(document.available, false),
+    targetUid,
+    revision: String(document.revision || "").trim().toLowerCase().slice(0, 128),
+    ready: booleanValue(document.ready, false),
+    activeCount: Math.max(
+      0,
+      numberOr(document.active_count ?? document.activeCount, items.length),
+    ),
+    simCount: Math.max(
+      0,
+      numberOr(
+        document.sim_count ?? document.simCount,
+        items.filter((item) => item.simulated).length,
+      ),
+    ),
+    lockedCount: Math.max(
+      0,
+      numberOr(
+        document.locked_count ?? document.lockedCount,
+        items.filter((item) => item.locked).length,
+      ),
+    ),
+    truncated: booleanValue(document.truncated, false),
+    items,
+  };
+}
+
+async function syncPersonHair({ quiet = true, retry = false } = {}) {
+  if (app.view !== "workspace" || characterSheetMode() !== "hair") {
+    return app.personHair;
+  }
+
+  const identity = personHairIdentity();
+  if (!identity) {
+    if (
+      app.personHair ||
+      app.personHairError ||
+      app.personHairLoading ||
+      app.personHairAttemptedKey
+    ) {
+      clearPersonHair();
+    } else {
+      renderCharacterSheet();
+    }
+    return null;
+  }
+  if (
+    app.personHairAttemptedKey &&
+    app.personHairAttemptedKey !== identity.key
+  ) {
+    app.personHairAttemptedKey = "";
+  }
+  if (!retry && app.personHairAttemptedKey === identity.key) {
+    return app.personHair;
+  }
+  if (
+    app.personHairLoading &&
+    app.personHairRequestedKey === identity.key
+  ) {
+    return null;
+  }
+
+  if (app.personHairRequestController) {
+    app.personHairRequestController.abort();
+  }
+  const controller = new AbortController();
+  const generation = app.personHairRequestGeneration + 1;
+  app.personHairRequestGeneration = generation;
+  app.personHairRequestController = controller;
+  app.personHairRequestedKey = identity.key;
+  app.personHairLoading = true;
+  app.personHairError = null;
+  if (app.personHairKey !== identity.key) {
+    app.personHair = null;
+    app.personHairKey = "";
+  }
+  renderCharacterSheet();
+
+  try {
+    const params = new URLSearchParams({ target_uid: identity.targetUid });
+    const result = await api(`/api/vam/person/hair?${params.toString()}`, {
+      signal: controller.signal,
+    });
+    const responseTarget = String(result.target_uid || "").trim();
+    const responseRevision = String(result.revision || "").trim().toLowerCase();
+    if (
+      !personHairRequestIsCurrent(
+        generation,
+        identity.targetUid,
+        identity.revision,
+      ) ||
+      responseTarget !== identity.targetUid ||
+      responseRevision !== identity.revision
+    ) {
+      return null;
+    }
+    app.personHair = normalizePersonHair(result, identity.targetUid);
+    app.personHairKey = identity.key;
+    app.personHairError = null;
+    return app.personHair;
+  } catch (error) {
+    if (
+      error?.name !== "AbortError" &&
+      personHairRequestIsCurrent(
+        generation,
+        identity.targetUid,
+        identity.revision,
+      )
+    ) {
+      app.personHairError = error;
+      if (!quiet) {
+        toast("Could not load Hair Studio", errorMessage(error), "error");
+      }
+    }
+    return null;
+  } finally {
+    if (generation === app.personHairRequestGeneration) {
+      app.personHairAttemptedKey = identity.key;
+      app.personHairLoading = false;
+      app.personHairRequestedKey = "";
+      app.personHairRequestController = null;
+      renderCharacterSheet();
+    }
+  }
+}
+
 function characterGender() {
   const equipment = app.personEquipment;
   const clothing = selectedPersonClothing();
@@ -2344,7 +2744,14 @@ function explicitEquipmentSlot(item) {
     item.slot,
     ...asArray(item.slots),
   ]
-    .map((value) => String(value || "").trim().toLowerCase())
+    .map((value) =>
+      String(value || "")
+        .trim()
+        .toLowerCase()
+        .replace(/&/g, " and ")
+        .replace(/[\s_]+/g, "-")
+        .replace(/-+/g, "-"),
+    )
     .filter(Boolean);
   for (const candidate of candidates) {
     if (CHARACTER_SLOT_ALIASES[candidate]) {
@@ -2358,6 +2765,8 @@ function explicitEquipmentSlot(item) {
 }
 
 function equipmentSlotForItem(item) {
+  const explicitSlot = explicitEquipmentSlot(item);
+  if (explicitSlot) return explicitSlot;
   const searchable = [
     ...normalizeTags(item.clothing?.tags || item.tags || item.tags_json),
     resourceTitle(item),
@@ -2380,7 +2789,7 @@ function equipmentSlotForItem(item) {
       return slot.id;
     }
   }
-  return explicitEquipmentSlot(item) || "unsorted";
+  return "unsorted";
 }
 
 function resourceThumbnailUrl(resourceId) {
@@ -2552,7 +2961,11 @@ function equipmentPackageVersion(item) {
 
 function equipmentItemKey(item) {
   const resourceId = integerValue(item?.id ?? item?.resource_id);
-  if (resourceId === null || resourceId < 1) return "";
+  if (resourceId === null || resourceId < 1) {
+    if (item?.actionable !== false) return "";
+    const presentationKey = safeOpaqueKey(item.presentation_key, "");
+    return presentationKey ? `presentation:${presentationKey}` : "";
+  }
   if (booleanValue(item?.local, false)) {
     return `resource:${resourceId}:local`;
   }
@@ -2563,22 +2976,29 @@ function equipmentItemKey(item) {
 }
 
 function createEquippedItem(item) {
+  const resourceId = integerValue(item.id ?? item.resource_id);
+  const actionable =
+    item.actionable !== false && resourceId !== null && resourceId > 0;
   const row = createElement(
     "article",
-    `equipped-item${item.clothing_locked ? " is-locked" : ""}`,
+    `equipped-item${item.clothing_locked ? " is-locked" : ""}${
+      actionable ? "" : " is-presentation-only"
+    }`,
   );
   const visual = createElement("span", "equipped-item-visual");
   const fallback = createElement("span", "equipped-item-fallback");
   fallback.textContent = initials(resourceTitle(item));
   fallback.setAttribute("aria-hidden", "true");
   visual.append(fallback);
-  const image = document.createElement("img");
-  image.alt = "";
-  image.loading = "lazy";
-  image.decoding = "async";
-  image.addEventListener("error", () => image.remove());
-  image.src = item.thumbnail_url || resourceThumbnailUrl(item.id);
-  visual.append(image);
+  if (actionable) {
+    const image = document.createElement("img");
+    image.alt = "";
+    image.loading = "lazy";
+    image.decoding = "async";
+    image.addEventListener("error", () => image.remove());
+    image.src = item.thumbnail_url || resourceThumbnailUrl(resourceId);
+    visual.append(image);
+  }
 
   const packageVersion = equipmentPackageVersion(item);
   const local = booleanValue(item.local, false);
@@ -2589,14 +3009,31 @@ function createEquippedItem(item) {
   name.textContent = resourceTitle(item);
   name.title = name.textContent;
   const details = createElement("span");
-  const detailParts = [
-    String(item.creator || creatorFromRoot(packageRoot(item)) || "Unknown creator"),
-  ];
-  const packageName = String(item.package || item.package_name || "").trim();
+  const detailParts = actionable
+    ? [
+        String(
+          item.creator ||
+            creatorFromRoot(packageRoot(item)) ||
+            "Unknown creator",
+        ),
+      ]
+    : ["In-game item", item.clothing_locked ? "Locked in VaM" : "Managed in VaM"];
+  const packageName = actionable
+    ? String(item.package || item.package_name || "").trim()
+    : "";
   if (packageName) detailParts.push(packageName);
-  if (versionLabel) detailParts.push(versionLabel.trim());
+  if (actionable && versionLabel) detailParts.push(versionLabel.trim());
   details.textContent = detailParts.join(" · ");
   copy.append(name, details);
+
+  if (!actionable) {
+    const inGame = createElement("span", "equipment-in-game-badge");
+    inGame.textContent = "In-game item";
+    inGame.title =
+      "This live item is not safely matched to the catalogue; manage it inside VaM";
+    row.append(visual, copy, inGame);
+    return row;
+  }
 
   const category = clothingCategoryForItem(item);
   const availability = clothingActionAvailability(item, category);
@@ -2645,7 +3082,7 @@ function createEquipmentSlot(slot, items, { loading = false } = {}) {
     body.append(loadingMessage);
   } else if (!items.length) {
     const empty = createElement("span", "equipment-slot-empty");
-    empty.textContent = "No identified items";
+    empty.textContent = "No active items";
     body.append(empty);
   } else {
     const expanded = app.equipmentExpandedSlots.has(slot.id);
@@ -2668,12 +3105,7 @@ function createEquipmentSlot(slot, items, { loading = false } = {}) {
   return section;
 }
 
-function renderCharacterSheet() {
-  const category = currentWorkspaceCategory();
-  const visible = categoryUsesPersonContext(category);
-  elements.characterSheet.hidden = !visible;
-  if (!visible) return;
-
+function renderWardrobeCharacterSheet(category) {
   const identity = personEquipmentIdentity();
   const equipment =
     identity &&
@@ -2724,6 +3156,8 @@ function renderCharacterSheet() {
     mutating: app.clothingMutationInFlight,
     items: items.map((item) => [
       item.id,
+      item.presentation_key || "",
+      item.actionable !== false,
       resourceTitle(item),
       item.creator || "",
       Boolean(item.clothing_locked),
@@ -2732,14 +3166,16 @@ function renderCharacterSheet() {
       equipmentSlotForItem(item),
     ]),
   });
-  renderCharacterShortcuts();
   if (elements.characterSheet.dataset.renderKey === renderKey) return;
   elements.characterSheet.dataset.renderKey = renderKey;
   elements.characterSheet.setAttribute("aria-busy", String(loading));
+  elements.wardrobeSheet.hidden = false;
+  elements.hairStudio.hidden = true;
+  elements.characterRecipe.hidden = true;
 
   elements.characterSheetTitle.textContent = "Character loadout";
   elements.characterSheetSummary.textContent =
-    "Live clothing is organized into regions; every region can contain multiple items.";
+    "Live clothing is organized into explicit multi-item sections, including underwear, stockings, shoes, and heels.";
   elements.characterIdentityName.textContent =
     app.selectedPersonUid || "No Person selected";
   elements.characterIdentityGender.textContent =
@@ -2777,7 +3213,8 @@ function renderCharacterSheet() {
     0,
     numberOr(
       equipment?.unidentifiedCount,
-      activeCount - items.length,
+      items.filter((item) => item.actionable === false).length +
+        Math.max(0, activeCount - items.length),
     ),
   );
   if (unidentifiedCount) {
@@ -2785,7 +3222,7 @@ function renderCharacterSheet() {
       `${formatNumber(unidentifiedCount)} active ${plural(
         "item",
         unidentifiedCount,
-      )} could not be matched to the local catalogue.`,
+      )} could not be matched to the local catalogue. They remain visible as read-only in-game items.`,
     );
   }
   if (booleanValue(equipment?.truncated ?? clothing?.truncated, false)) {
@@ -2795,6 +3232,253 @@ function renderCharacterSheet() {
   }
   elements.equipmentWarning.hidden = warnings.length === 0;
   elements.equipmentWarning.textContent = warnings.join(" ");
+}
+
+function createHairLayerCard(item, index) {
+  const card = createElement("article", "hair-layer-card");
+  const visual = createElement("span", "hair-layer-visual");
+  visual.textContent = String(index + 1);
+  visual.setAttribute("aria-hidden", "true");
+  const copy = createElement("div", "hair-layer-copy");
+  const name = createElement("strong");
+  name.textContent = item.displayName;
+  name.title = item.displayName;
+  const tags = createElement("div", "hair-layer-tags");
+  if (item.tags.length) {
+    for (const tag of item.tags) {
+      const tagElement = createElement("span");
+      tagElement.textContent = tag;
+      tags.append(tagElement);
+    }
+  } else {
+    const noTags = createElement("span", "hair-layer-no-tags");
+    noTags.textContent = "No public tags";
+    tags.append(noTags);
+  }
+  copy.append(name, tags);
+  const status = badge(
+    `${item.simulated ? "Simulated" : "Mesh / legacy"}${
+      item.locked ? " · Locked" : ""
+    }`,
+    `hair-simulation-state${item.simulated ? " is-simulated" : ""}`,
+  );
+  card.append(visual, copy, status);
+  return card;
+}
+
+function renderHairInspectorGroups() {
+  elements.hairInspectorGroups.replaceChildren();
+  for (const definition of HAIR_INSPECTOR_GROUPS) {
+    const group = createElement("section", "hair-inspector-group");
+    const copy = createElement("div");
+    const title = createElement("strong");
+    title.textContent = definition.title;
+    const detail = createElement("p");
+    detail.textContent = definition.detail;
+    copy.append(title, detail);
+    const state = createElement("span", "hair-detail-state");
+    state.textContent = "Details in VaM";
+    group.append(copy, state);
+    elements.hairInspectorGroups.append(group);
+  }
+}
+
+function renderHairStudio(category) {
+  const identity = personHairIdentity();
+  const hair =
+    identity && app.personHairKey === identity.key ? app.personHair : null;
+  const loading = Boolean(
+    identity && app.personHairLoading && !hair,
+  );
+  const items = hair?.items || [];
+  const activeCount = Math.max(0, numberOr(hair?.activeCount, items.length));
+  const simCount = Math.max(
+    0,
+    numberOr(
+      hair?.simCount,
+      items.filter((item) => item.simulated).length,
+    ),
+  );
+  const lockedCount = Math.max(
+    0,
+    numberOr(
+      hair?.lockedCount,
+      items.filter((item) => item.locked).length,
+    ),
+  );
+  const renderKey = JSON.stringify({
+    mode: "hair",
+    category: category?.id || "",
+    target: app.selectedPersonUid,
+    loading,
+    error: app.personHairError ? errorMessage(app.personHairError) : "",
+    available: Boolean(hair?.available),
+    ready: Boolean(hair?.ready),
+    revision: hair?.revision || "",
+    activeCount,
+    simCount,
+    lockedCount,
+    truncated: Boolean(hair?.truncated),
+    items: items.map((item) => [
+      item.key,
+      item.displayName,
+      item.tags,
+      item.locked,
+      item.simulated,
+    ]),
+  });
+  if (elements.characterSheet.dataset.renderKey === renderKey) return;
+  elements.characterSheet.dataset.renderKey = renderKey;
+  elements.characterSheet.setAttribute("aria-busy", String(loading));
+  elements.wardrobeSheet.hidden = true;
+  elements.equipmentWarning.hidden = true;
+  elements.hairStudio.hidden = false;
+  elements.characterRecipe.hidden = true;
+
+  elements.characterSheetTitle.textContent = "Hair Studio";
+  elements.characterSheetSummary.textContent =
+    "Inspect every active hair layer. Presets remain in the library below; typed setting controls will arrive separately.";
+  if (loading) {
+    elements.hairStudioSummary.textContent =
+      "Reading active hair layers from VaM…";
+  } else if (hair?.available && hair.ready) {
+    elements.hairStudioSummary.textContent =
+      `${formatNumber(activeCount)} active ${plural(
+        "layer",
+        activeCount,
+      )} · ${formatNumber(simCount)} simulated · ${formatNumber(
+        lockedCount,
+      )} locked`;
+  } else {
+    elements.hairStudioSummary.textContent =
+      "Live hair details are not available for this Person yet.";
+  }
+
+  elements.hairLayerList.replaceChildren();
+  if (loading) {
+    const state = createElement("p", "hair-layer-empty");
+    state.textContent = "Reading live hair layers…";
+    elements.hairLayerList.append(state);
+  } else if (app.personHairError) {
+    const state = createElement("p", "hair-layer-empty");
+    state.textContent =
+      "The live roster could not be read. Hair presets are still browseable below.";
+    elements.hairLayerList.append(state);
+  } else if (!hair?.available || !hair.ready) {
+    const state = createElement("p", "hair-layer-empty");
+    state.textContent =
+      "The bridge has not published a typed hair roster. VAM-PIP will not guess the current preset.";
+    elements.hairLayerList.append(state);
+  } else if (!items.length) {
+    const state = createElement("p", "hair-layer-empty");
+    state.textContent = "No active hair layers were reported for this Person.";
+    elements.hairLayerList.append(state);
+  } else {
+    items.forEach((item, index) =>
+      elements.hairLayerList.append(createHairLayerCard(item, index)),
+    );
+  }
+  renderHairInspectorGroups();
+
+  const warnings = [];
+  if (app.personHairError) {
+    warnings.push(`Hair roster unavailable: ${errorMessage(app.personHairError)}`);
+  } else if (hair && !hair.available) {
+    warnings.push(
+      "The loaded bridge does not expose live hair details. The library below remains available.",
+    );
+  } else if (hair?.available && !hair.ready) {
+    warnings.push(
+      "VaM has not finished publishing this Person’s hair roster.",
+    );
+  }
+  if (activeCount > items.length) {
+    const missingCount = activeCount - items.length;
+    warnings.push(
+      `${formatNumber(missingCount)} active ${plural(
+        "layer",
+        missingCount,
+      )} could not be described safely.`,
+    );
+  }
+  if (hair?.truncated) {
+    warnings.push("The bridge truncated the active hair roster.");
+  }
+  elements.hairWarning.hidden = warnings.length === 0;
+  elements.hairWarning.textContent = warnings.join(" ");
+}
+
+function renderCharacterRecipe(category) {
+  const clothing = selectedPersonClothing();
+  const gender = String(clothing?.gender || "Unknown");
+  const scopes =
+    CHARACTER_RECIPE_SCOPES[category?.id] || [category?.label || "Person"];
+  const appearanceCategory = [
+    "preset-appearance",
+    "preset-skin",
+    "preset-morphs",
+  ].includes(category?.id);
+  const title = appearanceCategory
+    ? "Appearance recipe"
+    : `${category?.label || "Person"} recipe`;
+  const renderKey = JSON.stringify({
+    mode: "recipe",
+    category: category?.id || "",
+    target: app.selectedPersonUid,
+    gender,
+    scopes,
+    liveAction: Boolean(category?.liveAction),
+  });
+  if (elements.characterSheet.dataset.renderKey === renderKey) return;
+  elements.characterSheet.dataset.renderKey = renderKey;
+  elements.characterSheet.setAttribute("aria-busy", "false");
+  elements.wardrobeSheet.hidden = true;
+  elements.equipmentWarning.hidden = true;
+  elements.hairStudio.hidden = true;
+  elements.hairWarning.hidden = true;
+  elements.characterRecipe.hidden = false;
+
+  elements.characterSheetTitle.textContent = title;
+  elements.characterSheetSummary.textContent =
+    "A compact, category-specific view of what the selected preset can change—never a guessed current preset.";
+  elements.characterRecipeMonogram.textContent = app.selectedPersonUid
+    ? initials(app.selectedPersonUid)
+    : "?";
+  elements.characterRecipePerson.textContent =
+    app.selectedPersonUid || "No Person selected";
+  elements.characterRecipeGender.textContent =
+    gender && gender !== "None" ? gender : "Gender unavailable";
+  elements.characterRecipeTitle.textContent = `${category?.label || "Person"} scope`;
+  elements.characterRecipeDescription.textContent =
+    category?.description ||
+    "Choose a card below to use this Person resource family.";
+  elements.characterRecipeScopes.replaceChildren();
+  for (const scope of scopes) {
+    elements.characterRecipeScopes.append(
+      badge(scope, "character-recipe-scope"),
+    );
+  }
+  elements.characterRecipeNote.textContent = category?.liveAction
+    ? `Current ${category.noun || "preset"}: not published by VaM. Choose a card below to apply one to the selected Person.`
+    : `Current ${category?.noun || "state"}: not published by VaM. This category remains browse-only.`;
+}
+
+function renderCharacterSheet() {
+  const category = currentWorkspaceCategory();
+  const mode = characterSheetMode(category);
+  const visible = mode !== "hidden";
+  elements.characterSheet.hidden = !visible;
+  if (!visible) return;
+
+  elements.characterSheet.dataset.mode = mode;
+  renderCharacterShortcuts();
+  if (mode === "wardrobe") {
+    renderWardrobeCharacterSheet(category);
+  } else if (mode === "hair") {
+    renderHairStudio(category);
+  } else {
+    renderCharacterRecipe(category);
+  }
 }
 
 async function removeEquippedItem(itemKeyValue, sourceButton) {
@@ -2810,6 +3494,17 @@ async function removeEquippedItem(itemKeyValue, sourceButton) {
       "error",
     );
     await syncPersonEquipment({ quiet: true, retry: true });
+    return;
+  }
+  if (
+    item.actionable === false ||
+    integerValue(item.id ?? item.resource_id) === null
+  ) {
+    toast(
+      "Managed inside VaM",
+      "This in-game item is not safely matched to the catalogue, so VAM-PIP will not guess a removal action.",
+      "error",
+    );
     return;
   }
   const category = clothingCategoryForItem(item);
@@ -2864,6 +3559,7 @@ async function loadPersons({ quiet = false } = {}) {
     app.personInFlight = false;
     if (responseAccepted) {
       await syncPersonEquipment({ quiet: true });
+      await syncPersonHair({ quiet: true });
       renderLiveState(app.status || {});
       renderPersonContext();
       renderAtomContext();

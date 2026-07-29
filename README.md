@@ -21,7 +21,7 @@ leaving managed mode restores that baseline.
 
 ## Current status
 
-Version 0.7.0 is functional but should still be treated as an early release.
+Version 0.8.0 is functional but should still be treated as an early release.
 Package switching is deliberately conservative:
 
 - entering managed mode requires explicit confirmation;
@@ -189,10 +189,19 @@ Person, and replace or merge all eleven native Person preset families:
 Appearance, Animation, Breast Physics, Clothing, General, Glute Physics, Hair,
 Morphs, Person Plugins, Pose, and Skin. It can also wear or remove individual
 female and male clothing items on a selected Person. The Person workspace
-presents that live wardrobe as a character sheet with multi-item body regions:
-the regions organize the display but never impose one-item equipment slots.
-Preset families remain browseable recipes, because VaM does not publish a
-reliable single “currently equipped preset” for them.
+presents that live wardrobe as a character sheet with explicit multi-item
+sections for tops, bras, panties and underwear, full outfits, bottoms,
+stockings, shoes, high heels, accessories, and other regions. The sections
+organize the display but never impose one-item equipment slots. Clothing that
+VaM reports without a safe catalogue identity remains visible as a read-only
+in-game item instead of disappearing.
+
+The Hair category swaps the wardrobe for a read-only Hair Studio showing every
+bounded active layer and whether it uses VaM hair simulation. It groups the
+future Hair controls into style, material, simulation, and scalp areas without
+inventing current values. Other preset families use compact recipe views,
+because VaM does not publish a reliable single “currently equipped preset” for
+them.
 
 Replacing a Scene requires explicit confirmation in both the browser and API.
 General and Person Plugin presets, non-Person atom presets, SubScenes, and raw
@@ -228,11 +237,13 @@ browser submits only a numeric catalogue ID, target Person UID, `Wear` or
 `Remove`, the revision it observed, and an optional lease duration. The
 manager resolves the catalogue ID to the exact installed, package-qualified
 `.vam` resource reference; a BrowserAssist clothing UID is display metadata,
-not action identity. VaM
-publishes bounded worn and locked references plus the Person's current gender.
-The manager and bridge reject stale revisions, incompatible wear requests,
-and locked changes. If bounded publication is truncated, the workspace treats
-an unpublished item's state as unknown and disables its action.
+not action identity. VaM publishes a bounded presentation roster, validated
+worn and locked references, and the Person's current gender. Only validated
+references become actionable catalogue cards; opaque or built-in items never
+gain a guessed removal action. The manager and bridge reject stale revisions,
+incompatible wear requests, and locked changes. If bounded publication is
+truncated, the workspace treats an unpublished item's state as unknown and
+disables its action.
 
 Clothing cards can also show a bounded **Related styles** strip when
 BrowserAssist indexed same-package, same-folder `Clothing Item Presets` whose

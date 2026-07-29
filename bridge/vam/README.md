@@ -315,7 +315,7 @@ The bridge writes `status.json`:
 ```json
 {
   "protocol": 2,
-  "bridgeVersion": "0.6.1",
+  "bridgeVersion": "0.8.0",
   "instanceId": "id-created-when-the-plugin-started",
   "requestId": "a-new-unique-id",
   "lastCompletedRequestId": "a-new-unique-id",
@@ -349,6 +349,7 @@ The bridge writes `status.json`:
     "person-preset-pose",
     "person-preset-skin",
     "person-clothing-item-toggle",
+    "person-hair-roster",
     "person-add",
     "person-select"
   ]
@@ -377,7 +378,7 @@ The bridge refreshes `scene.json` once per second:
 ```json
 {
   "protocol": 2,
-  "bridgeVersion": "0.6.1",
+  "bridgeVersion": "0.8.0",
   "instanceId": "id-created-when-the-plugin-started",
   "updatedAtUtc": "2026-07-28T12:00:02.0000000Z",
   "loading": false,
@@ -415,10 +416,45 @@ The bridge refreshes `scene.json` once per second:
           "creator.clothes.3:/Custom/Clothing/Female/Dress.vam"
         ],
         "lockedResourceRefs": [],
-        "activeCount": 1,
+        "activeItems": [
+          {
+            "displayName": "Dress",
+            "tags": ["Dresses"],
+            "locked": false,
+            "resourceRef": "creator.clothes.3:/Custom/Clothing/Female/Dress.vam"
+          },
+          {
+            "displayName": "Built-in shoes",
+            "tags": ["Shoes"],
+            "locked": false,
+            "resourceRef": ""
+          }
+        ],
+        "activeCount": 2,
         "lockedCount": 0,
         "truncated": false,
         "revision": "0123456789abcdef0123456789abcdef"
+      },
+      "hair": {
+        "ready": true,
+        "activeCount": 2,
+        "lockedCount": 0,
+        "truncated": false,
+        "revision": "fedcba9876543210fedcba9876543210",
+        "items": [
+          {
+            "displayName": "Long Hair",
+            "tags": ["Long"],
+            "locked": false,
+            "simulated": true
+          },
+          {
+            "displayName": "Side Bangs",
+            "tags": ["Bangs"],
+            "locked": false,
+            "simulated": false
+          }
+        ]
       }
     },
     {"uid": "Person#2", "selected": false}
@@ -446,6 +482,7 @@ The bridge refreshes `scene.json` once per second:
     "person-preset-pose",
     "person-preset-skin",
     "person-clothing-item-toggle",
+    "person-hair-roster",
     "person-add",
     "person-select"
   ]
@@ -458,15 +495,25 @@ the matching `person-preset-<kind>` capability before exposing a specific
 preset action; an older bridge that advertises only the generic marker does
 not establish support for every preset kind.
 
-Clothing publication is bounded to 256 exact resource references per Person
-and 1,024 across the roster. `activeCount`, `lockedCount`, and `truncated`
-make omissions visible. The external manager strips the raw active and locked
-reference arrays from its public scene API after using them to annotate
-catalogue rows. If `truncated` is true, an unpublished reference is unknown,
-not evidence that the item is removed, so the browser disables that action.
-The revision is bound to the exact Person and `geometry` instances and their
-semantic clothing, lock, and gender state. A stale write fails before VaM
-changes the clothing boolean.
+Clothing publication is bounded to 256 presentation entries per Person and
+1,024 across the roster. Every published active item has a sanitized display
+name, at most 32 sanitized tags, and its lock state. Its private
+`resourceRef` is empty for built-in or otherwise opaque entries. `activeCount`,
+`lockedCount`, and `truncated` make omissions visible. The external manager
+strips every raw reference from its public scene API after joining validated
+references to catalogue rows. Opaque rows remain visible but non-actionable.
+If `truncated` is true, an unpublished item is unknown, not evidence that it
+was removed.
+
+The clothing revision is bound to the exact Person and `geometry` instances
+and their semantic clothing, lock, and gender state. A stale write fails before
+VaM changes the clothing boolean.
+
+Hair publication is read-only and bounded to 128 active layers per Person and
+512 across the roster. It exposes only sanitized labels and tags, lock state,
+and whether each layer has a `HairSimControl`; it publishes no runtime path,
+package UID, internal UID, or writable storable. Its separate revision rotates
+when the active layer roster changes.
 
 ## Safety contract
 

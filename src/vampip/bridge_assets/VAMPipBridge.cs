@@ -17,7 +17,7 @@ namespace VAMPip
     public class VAMPipBridge : MVRScript
     {
         private const int ProtocolVersion = 2;
-        private const string BridgeVersion = "0.6.1";
+        private const string BridgeVersion = "0.8.0";
 
         private const string PluginDataRoot = "Saves\\PluginData";
         private const string DataRoot = "Saves\\PluginData\\VAMPip";
@@ -32,6 +32,11 @@ namespace VAMPip
         private const int MaximumCuaChoiceLabelLength = 256;
         private const int MaximumClothingRefsPerPerson = 256;
         private const int MaximumClothingRefsGlobally = 1024;
+        private const int MaximumHairItemsPerPerson = 128;
+        private const int MaximumHairItemsGlobally = 512;
+        private const int MaximumRosterDisplayNameLength = 256;
+        private const int MaximumRosterTagLength = 100;
+        private const int MaximumRosterTagsPerItem = 32;
         private const float PollIntervalSeconds = 0.5f;
         private const float ScenePublishIntervalSeconds = 1.0f;
         private const float MinimumRescanIntervalSeconds = 5.0f;
@@ -171,10 +176,32 @@ namespace VAMPip
             public string Uid;
             public string InternalUid;
             public string PackageUid;
+            public string DisplayName;
+            public string[] Tags;
             public bool Locked;
         }
 
+        private sealed class ActiveHairEntry
+        {
+            public DAZHairGroup Item;
+            public string Uid;
+            public string InternalUid;
+            public string PackageUid;
+            public string DisplayName;
+            public string[] Tags;
+            public bool Locked;
+            public bool Simulated;
+        }
+
         private sealed class PersonClothingSnapshot
+        {
+            public Atom Atom;
+            public DAZCharacterSelector Geometry;
+            public string GenerationKey;
+            public string Revision;
+        }
+
+        private sealed class PersonHairSnapshot
         {
             public Atom Atom;
             public DAZCharacterSelector Geometry;
@@ -202,6 +229,9 @@ namespace VAMPip
         private readonly Dictionary<string, PersonClothingSnapshot>
             _personClothingSnapshots =
                 new Dictionary<string, PersonClothingSnapshot>();
+        private readonly Dictionary<string, PersonHairSnapshot>
+            _personHairSnapshots =
+                new Dictionary<string, PersonHairSnapshot>();
 
         public override void Init()
         {
@@ -3248,6 +3278,73 @@ namespace VAMPip
                 StringComparison.Ordinal);
         }
 
+        private static string SanitizeRosterText(
+            string value,
+            int maximumLength)
+        {
+            if (value == null)
+            {
+                return "";
+            }
+            char[] characters = value.ToCharArray();
+            int index;
+            for (index = 0; index < characters.Length; index++)
+            {
+                if (characters[index] < ' ' || characters[index] == '\u007f')
+                {
+                    characters[index] = ' ';
+                }
+            }
+            string result = new string(characters).Trim();
+            if (result.Length > maximumLength)
+            {
+                result = result.Substring(0, maximumLength);
+            }
+            return result;
+        }
+
+        private static string[] SanitizeRosterTags(string[] values)
+        {
+            List<string> result = new List<string>();
+            HashSet<string> seen =
+                new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            if (values == null)
+            {
+                return result.ToArray();
+            }
+            int index;
+            for (index = 0;
+                 index < values.Length &&
+                 result.Count < MaximumRosterTagsPerItem;
+                 index++)
+            {
+                string tag = SanitizeRosterText(
+                    values[index],
+                    MaximumRosterTagLength);
+                if (tag.Length == 0 || !seen.Add(tag))
+                {
+                    continue;
+                }
+                result.Add(tag);
+            }
+            return result.ToArray();
+        }
+
+        private static JSONArray BuildRosterTags(string[] tags)
+        {
+            JSONArray result = new JSONArray();
+            if (tags == null)
+            {
+                return result;
+            }
+            int index;
+            for (index = 0; index < tags.Length; index++)
+            {
+                result.Add(tags[index]);
+            }
+            return result;
+        }
+
         private static List<ActiveClothingEntry> GetActiveClothingEntries(
             Atom atom,
             DAZCharacterSelector geometry)
@@ -3268,7 +3365,7 @@ namespace VAMPip
             for (index = 0; index < items.Length; index++)
             {
                 DAZClothingItem item = items[index];
-                if (item == null)
+                if (item == null || !item.active)
                 {
                     continue;
                 }
@@ -3312,6 +3409,14 @@ namespace VAMPip
                 entry.Uid = item.uid ?? "";
                 entry.InternalUid = item.internalUid ?? "";
                 entry.PackageUid = item.packageUid ?? "";
+                entry.DisplayName = SanitizeRosterText(
+                    item.displayName,
+                    MaximumRosterDisplayNameLength);
+                if (entry.DisplayName.Length == 0)
+                {
+                    entry.DisplayName = "Unnamed clothing item";
+                }
+                entry.Tags = SanitizeRosterTags(item.tagsArray);
                 entry.Locked = item.locked;
                 result.Add(entry);
             }
@@ -3361,6 +3466,20 @@ namespace VAMPip
                     HashCuaText(
                         ref first,
                         ref second,
+                        entry.DisplayName);
+                    int tagIndex;
+                    for (tagIndex = 0;
+                         tagIndex < entry.Tags.Length;
+                         tagIndex++)
+                    {
+                        HashCuaText(
+                            ref first,
+                            ref second,
+                            entry.Tags[tagIndex]);
+                    }
+                    HashCuaText(
+                        ref first,
+                        ref second,
                         entry.Locked ? "locked" : "unlocked");
                 }
             }
@@ -3381,8 +3500,10 @@ namespace VAMPip
                 geometry == null ? "None" : geometry.gender.ToString();
             JSONArray activeRefs = new JSONArray();
             JSONArray lockedRefs = new JSONArray();
+            JSONArray activeItems = new JSONArray();
             clothing["activeResourceRefs"] = activeRefs;
             clothing["lockedResourceRefs"] = lockedRefs;
+            clothing["activeItems"] = activeItems;
             clothing["activeCount"].AsInt = 0;
             clothing["lockedCount"].AsInt = 0;
             clothing["truncated"].AsBool = false;
@@ -3420,7 +3541,7 @@ namespace VAMPip
 
             HashSet<string> published =
                 new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            int resourceCount = 0;
+            int publishedItemCount = 0;
             int lockedCount = 0;
             int entryIndex;
             for (entryIndex = 0;
@@ -3432,31 +3553,236 @@ namespace VAMPip
                 {
                     lockedCount++;
                 }
-                if (entry.ResourceRef.Length == 0 ||
-                    published.Contains(entry.ResourceRef))
-                {
-                    continue;
-                }
-                resourceCount++;
-                if (published.Count >= MaximumClothingRefsPerPerson ||
+                if (
+                    publishedItemCount >= MaximumClothingRefsPerPerson ||
                     globalResourceBudget <= 0)
                 {
                     continue;
                 }
-                published.Add(entry.ResourceRef);
+                JSONClass activeItem = new JSONClass();
+                activeItem["displayName"] = entry.DisplayName;
+                activeItem["tags"] = BuildRosterTags(entry.Tags);
+                activeItem["locked"].AsBool = entry.Locked;
+                activeItem["resourceRef"] = entry.ResourceRef;
+                activeItems.Add(activeItem);
+                publishedItemCount++;
+                globalResourceBudget--;
+                if (entry.ResourceRef.Length == 0 ||
+                    !published.Add(entry.ResourceRef))
+                {
+                    continue;
+                }
                 activeRefs.Add(entry.ResourceRef);
                 if (entry.Locked)
                 {
                     lockedRefs.Add(entry.ResourceRef);
                 }
-                globalResourceBudget--;
             }
             clothing["activeCount"].AsInt = entries.Count;
             clothing["lockedCount"].AsInt = lockedCount;
             clothing["truncated"].AsBool =
-                resourceCount > published.Count;
+                entries.Count > publishedItemCount;
             clothing["revision"] = snapshot.Revision;
             return clothing;
+        }
+
+        private static int CompareActiveHairEntries(
+            ActiveHairEntry left,
+            ActiveHairEntry right)
+        {
+            int displayOrder = string.Compare(
+                left == null ? "" : left.DisplayName,
+                right == null ? "" : right.DisplayName,
+                StringComparison.OrdinalIgnoreCase);
+            if (displayOrder != 0)
+            {
+                return displayOrder;
+            }
+            int packageOrder = string.Compare(
+                left == null ? "" : left.PackageUid,
+                right == null ? "" : right.PackageUid,
+                StringComparison.Ordinal);
+            if (packageOrder != 0)
+            {
+                return packageOrder;
+            }
+            return string.Compare(
+                left == null ? "" : left.InternalUid,
+                right == null ? "" : right.InternalUid,
+                StringComparison.Ordinal);
+        }
+
+        private static List<ActiveHairEntry> GetActiveHairEntries(
+            Atom atom,
+            DAZCharacterSelector geometry)
+        {
+            List<ActiveHairEntry> result = new List<ActiveHairEntry>();
+            if (atom == null || geometry == null || atom.type != "Person")
+            {
+                return result;
+            }
+            DAZHairGroup[] items =
+                atom.GetComponentsInChildren<DAZHairGroup>();
+            if (items == null)
+            {
+                return result;
+            }
+            int index;
+            for (index = 0; index < items.Length; index++)
+            {
+                DAZHairGroup item = items[index];
+                if (item == null || !item.active)
+                {
+                    continue;
+                }
+                ActiveHairEntry entry = new ActiveHairEntry();
+                entry.Item = item;
+                entry.Uid = item.uid ?? "";
+                entry.InternalUid = item.internalUid ?? "";
+                entry.PackageUid = item.packageUid ?? "";
+                entry.DisplayName = SanitizeRosterText(
+                    item.displayName,
+                    MaximumRosterDisplayNameLength);
+                if (entry.DisplayName.Length == 0)
+                {
+                    entry.DisplayName = "Unnamed hair item";
+                }
+                entry.Tags = SanitizeRosterTags(item.tagsArray);
+                entry.Locked = item.locked;
+                entry.Simulated =
+                    item.GetComponentInChildren<HairSimControl>() != null;
+                result.Add(entry);
+            }
+            result.Sort(CompareActiveHairEntries);
+            return result;
+        }
+
+        private static string BuildPersonHairGenerationKey(
+            DAZCharacterSelector geometry,
+            List<ActiveHairEntry> entries)
+        {
+            ulong first = 1469598103934665603UL;
+            ulong second = 7809847782465536322UL;
+            HashCuaText(
+                ref first,
+                ref second,
+                geometry == null ? "" : geometry.gender.ToString());
+            HashCuaText(
+                ref first,
+                ref second,
+                entries == null ? "-1" : entries.Count.ToString());
+            if (entries != null)
+            {
+                int index;
+                for (index = 0; index < entries.Count; index++)
+                {
+                    ActiveHairEntry entry = entries[index];
+                    HashCuaText(ref first, ref second, entry.Uid);
+                    HashCuaText(ref first, ref second, entry.InternalUid);
+                    HashCuaText(ref first, ref second, entry.PackageUid);
+                    HashCuaText(ref first, ref second, entry.DisplayName);
+                    int tagIndex;
+                    for (tagIndex = 0;
+                         tagIndex < entry.Tags.Length;
+                         tagIndex++)
+                    {
+                        HashCuaText(
+                            ref first,
+                            ref second,
+                            entry.Tags[tagIndex]);
+                    }
+                    HashCuaText(
+                        ref first,
+                        ref second,
+                        entry.Locked ? "locked" : "unlocked");
+                    HashCuaText(
+                        ref first,
+                        ref second,
+                        entry.Simulated ? "simulated" : "mesh");
+                }
+            }
+            return first.ToString("x16") + second.ToString("x16");
+        }
+
+        private JSONClass BuildPersonHairStatus(
+            Atom atom,
+            ref int globalItemBudget)
+        {
+            JSONClass hair = new JSONClass();
+            DAZCharacterSelector geometry =
+                atom == null
+                ? null
+                : atom.GetStorableByID("geometry") as DAZCharacterSelector;
+            hair["ready"].AsBool = geometry != null;
+            hair["activeCount"].AsInt = 0;
+            hair["lockedCount"].AsInt = 0;
+            hair["truncated"].AsBool = false;
+            hair["revision"] = "";
+            JSONArray publishedItems = new JSONArray();
+            hair["items"] = publishedItems;
+            if (geometry == null)
+            {
+                _personHairSnapshots.Remove(atom.uid);
+                return hair;
+            }
+
+            List<ActiveHairEntry> entries =
+                GetActiveHairEntries(atom, geometry);
+            string generationKey =
+                BuildPersonHairGenerationKey(geometry, entries);
+            PersonHairSnapshot snapshot = null;
+            bool reuse =
+                _personHairSnapshots.TryGetValue(
+                    atom.uid,
+                    out snapshot) &&
+                object.ReferenceEquals(snapshot.Atom, atom) &&
+                object.ReferenceEquals(snapshot.Geometry, geometry) &&
+                string.Equals(
+                    snapshot.GenerationKey,
+                    generationKey,
+                    StringComparison.Ordinal);
+            if (!reuse)
+            {
+                snapshot = new PersonHairSnapshot();
+                snapshot.Revision = Guid.NewGuid().ToString("N");
+            }
+            snapshot.Atom = atom;
+            snapshot.Geometry = geometry;
+            snapshot.GenerationKey = generationKey;
+            _personHairSnapshots[atom.uid] = snapshot;
+
+            int lockedCount = 0;
+            int publishedCount = 0;
+            int entryIndex;
+            for (entryIndex = 0;
+                 entryIndex < entries.Count;
+                 entryIndex++)
+            {
+                ActiveHairEntry entry = entries[entryIndex];
+                if (entry.Locked)
+                {
+                    lockedCount++;
+                }
+                if (
+                    publishedCount >= MaximumHairItemsPerPerson ||
+                    globalItemBudget <= 0)
+                {
+                    continue;
+                }
+                JSONClass publishedItem = new JSONClass();
+                publishedItem["displayName"] = entry.DisplayName;
+                publishedItem["tags"] = BuildRosterTags(entry.Tags);
+                publishedItem["locked"].AsBool = entry.Locked;
+                publishedItem["simulated"].AsBool = entry.Simulated;
+                publishedItems.Add(publishedItem);
+                publishedCount++;
+                globalItemBudget--;
+            }
+            hair["activeCount"].AsInt = entries.Count;
+            hair["lockedCount"].AsInt = lockedCount;
+            hair["truncated"].AsBool = entries.Count > publishedCount;
+            hair["revision"] = snapshot.Revision;
+            return hair;
         }
 
         private JSONClass BuildCuaStatus(
@@ -3582,6 +3908,7 @@ namespace VAMPip
             capabilities.Add("person-preset-pose");
             capabilities.Add("person-preset-skin");
             capabilities.Add("person-clothing-item-toggle");
+            capabilities.Add("person-hair-roster");
             capabilities.Add("person-add");
             capabilities.Add("person-select");
             return capabilities;
@@ -3617,6 +3944,8 @@ namespace VAMPip
                 int globalCuaChoiceBudget = MaximumCuaChoicesGlobally;
                 int globalClothingResourceBudget =
                     MaximumClothingRefsGlobally;
+                int globalHairItemBudget =
+                    MaximumHairItemsGlobally;
                 HashSet<string> liveCuaUids = new HashSet<string>();
                 HashSet<string> livePersonUids = new HashSet<string>();
                 if (controller != null)
@@ -3656,6 +3985,10 @@ namespace VAMPip
                             BuildPersonClothingStatus(
                                 atom,
                                 ref globalClothingResourceBudget);
+                        person["hair"] =
+                            BuildPersonHairStatus(
+                                atom,
+                                ref globalHairItemBudget);
                         persons.Add(person);
                     }
                 }
@@ -3692,6 +4025,23 @@ namespace VAMPip
                      removedOffset++)
                 {
                     _personClothingSnapshots.Remove(
+                        removedPersonUids[removedOffset]);
+                }
+                removedPersonUids.Clear();
+                foreach (
+                    KeyValuePair<string, PersonHairSnapshot> entry
+                    in _personHairSnapshots)
+                {
+                    if (!livePersonUids.Contains(entry.Key))
+                    {
+                        removedPersonUids.Add(entry.Key);
+                    }
+                }
+                for (removedOffset = 0;
+                     removedOffset < removedPersonUids.Count;
+                     removedOffset++)
+                {
+                    _personHairSnapshots.Remove(
                         removedPersonUids[removedOffset]);
                 }
                 scene["atoms"] = atoms;

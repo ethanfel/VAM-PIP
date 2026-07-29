@@ -603,10 +603,17 @@ class WorkspaceWebUITests(unittest.TestCase):
             "character-identity-name",
             "character-identity-gender",
             "character-identity-counts",
+            "wardrobe-sheet",
             "equipment-slots-left",
             "equipment-slots-right",
             "equipment-slots-extra",
             "equipment-warning",
+            "hair-studio",
+            "hair-layer-list",
+            "hair-inspector-groups",
+            "hair-warning",
+            "character-recipe",
+            "character-recipe-scopes",
         ):
             with self.subTest(element_id=element_id):
                 self.assertIn(f'id="{element_id}"', self.html)
@@ -638,9 +645,20 @@ class WorkspaceWebUITests(unittest.TestCase):
             with self.subTest(category_id=category_id):
                 self.assertIn(f'["{category_id}",', self.javascript)
 
-        render_start = self.javascript.index("function renderCharacterSheet()")
+        dispatch_start = self.javascript.index("function renderCharacterSheet()")
+        dispatch_end = self.javascript.index(
+            "async function removeEquippedItem(", dispatch_start
+        )
+        dispatch = self.javascript[dispatch_start:dispatch_end]
+        self.assertIn('mode === "wardrobe"', dispatch)
+        self.assertIn('mode === "hair"', dispatch)
+        self.assertIn("renderCharacterRecipe(category)", dispatch)
+
+        render_start = self.javascript.index(
+            "function renderWardrobeCharacterSheet("
+        )
         render_end = self.javascript.index(
-            "async function removeEquippedItem(", render_start
+            "function createHairLayerCard(", render_start
         )
         render = self.javascript[render_start:render_end]
         self.assertIn(
@@ -657,7 +675,9 @@ class WorkspaceWebUITests(unittest.TestCase):
         slot = self.javascript[slot_start:slot_end]
         self.assertIn("resourceTitle(item)", slot)
         self.assertIn("normalizeTags(", slot)
-        self.assertIn('return explicitEquipmentSlot(item) || "unsorted"', slot)
+        self.assertIn("const explicitSlot = explicitEquipmentSlot(item)", slot)
+        self.assertIn("if (explicitSlot) return explicitSlot", slot)
+        self.assertIn('return "unsorted"', slot)
 
     def test_character_sheet_equipment_fetch_is_revision_keyed_and_stale_safe(
         self,
@@ -701,6 +721,189 @@ class WorkspaceWebUITests(unittest.TestCase):
         identity = self.javascript[identity_start:identity_end]
         self.assertIn("clothing?.ready !== true", identity)
         self.assertIn("`${targetUid}\\u0000${revision}`", identity)
+
+    def test_character_sheet_uses_category_specific_modes(self) -> None:
+        for category_id in (
+            "preset-clothing",
+            "clothing-items-female",
+            "clothing-items-male",
+            "clothing-item-presets",
+        ):
+            with self.subTest(category_id=category_id):
+                self.assertIn(f'"{category_id}"', self.javascript)
+        self.assertIn(
+            'const HAIR_CATEGORY_IDS = new Set(["preset-hair"])',
+            self.javascript,
+        )
+        start = self.javascript.index("function characterSheetMode(")
+        end = self.javascript.index("function workspaceFacetCounts(", start)
+        mode = self.javascript[start:end]
+        self.assertIn('return "hair"', mode)
+        self.assertIn('return "wardrobe"', mode)
+        self.assertIn('return "recipe"', mode)
+
+        dispatch_start = self.javascript.index("function renderCharacterSheet()")
+        dispatch_end = self.javascript.index(
+            "async function removeEquippedItem(", dispatch_start
+        )
+        dispatch = self.javascript[dispatch_start:dispatch_end]
+        self.assertIn("renderWardrobeCharacterSheet(category)", dispatch)
+        self.assertIn("renderHairStudio(category)", dispatch)
+        self.assertIn("renderCharacterRecipe(category)", dispatch)
+
+    def test_wardrobe_taxonomy_is_explicit_multi_item_and_exact(self) -> None:
+        for label in (
+            "Tops & outerwear",
+            "Bras",
+            "Panties & underwear",
+            "Bottoms",
+            "Stockings & socks",
+            "Dresses & full outfits",
+            "Shoes & boots",
+            "High heels",
+            "Head & face",
+            "Neck",
+            "Arms & hands",
+            "Accessories",
+            "Body FX",
+            "Unsorted",
+        ):
+            with self.subTest(label=label):
+                self.assertIn(f'label: "{label}"', self.javascript)
+
+        slot_start = self.javascript.index("function equipmentSlotForItem(")
+        slot_end = self.javascript.index("function resourceThumbnailUrl(", slot_start)
+        slot = self.javascript[slot_start:slot_end]
+        self.assertLess(
+            slot.index("if (explicitSlot) return explicitSlot"),
+            slot.index("const searchable ="),
+        )
+        self.assertIn("slot.tags.some((tag) => terms.has(tag))", slot)
+        self.assertNotIn(".includes(tag)", slot)
+        self.assertLess(
+            self.javascript.index('"high-heels",', self.javascript.index(
+                "const CHARACTER_SLOT_CLASSIFICATION_ORDER"
+            )),
+            self.javascript.index('"shoes-boots",', self.javascript.index(
+                "const CHARACTER_SLOT_CLASSIFICATION_ORDER"
+            )),
+        )
+
+    def test_unresolved_equipment_stays_visible_but_never_actionable(self) -> None:
+        normalize_start = self.javascript.index("function normalizePersonEquipment(")
+        normalize_end = self.javascript.index(
+            "async function syncPersonEquipment(", normalize_start
+        )
+        normalize = self.javascript[normalize_start:normalize_end]
+        self.assertIn("id: null", normalize)
+        self.assertIn("actionable: false", normalize)
+        self.assertIn("presentation_key: safeOpaqueKey(", normalize)
+        self.assertIn("safePresentationLabel(", normalize)
+
+        row_start = self.javascript.index("function createEquippedItem(")
+        row_end = self.javascript.index("function createEquipmentSlot(", row_start)
+        row = self.javascript[row_start:row_end]
+        self.assertIn("item.actionable !== false", row)
+        self.assertIn('createElement("span", "equipment-in-game-badge")', row)
+        self.assertIn('inGame.textContent = "In-game item"', row)
+        self.assertLess(row.index("if (!actionable)"), row.index(
+            "const category = clothingCategoryForItem(item)"
+        ))
+        self.assertLess(row.index("return row;"), row.index(
+            "const category = clothingCategoryForItem(item)"
+        ))
+
+        remove_start = self.javascript.index("async function removeEquippedItem(")
+        remove_end = self.javascript.index("async function loadPersons(", remove_start)
+        removal = self.javascript[remove_start:remove_end]
+        self.assertIn("item.actionable === false", removal)
+        self.assertIn("VAM-PIP will not guess a removal action", removal)
+        self.assertIn(".equipment-in-game-badge", self.styles)
+        self.assertIn(".equipped-item.is-presentation-only", self.styles)
+
+    def test_hair_studio_reads_layers_without_faking_settings(self) -> None:
+        for element_id in (
+            "hair-studio",
+            "hair-studio-summary",
+            "hair-layer-list",
+            "hair-inspector-groups",
+            "hair-warning",
+        ):
+            with self.subTest(element_id=element_id):
+                self.assertIn(f'id="{element_id}"', self.html)
+        for group in (
+            "Style & shape",
+            "Color & materials",
+            "Physics & simulation",
+            "Scalp & fit",
+        ):
+            with self.subTest(group=group):
+                self.assertIn(f'title: "{group}"', self.javascript)
+
+        sync_start = self.javascript.index("async function syncPersonHair(")
+        sync_end = self.javascript.index("function characterGender()", sync_start)
+        sync = self.javascript[sync_start:sync_end]
+        self.assertIn(
+            "api(`/api/vam/person/hair?${params.toString()}`",
+            sync,
+        )
+        self.assertIn("new AbortController()", sync)
+        self.assertIn("personHairRequestIsCurrent(", sync)
+        self.assertIn("responseTarget !== identity.targetUid", sync)
+        self.assertIn("responseRevision !== identity.revision", sync)
+
+        identity_start = self.javascript.index("function personHairIdentity()")
+        identity_end = self.javascript.index(
+            "function personHairRequestIsCurrent(", identity_start
+        )
+        identity = self.javascript[identity_start:identity_end]
+        self.assertIn("const hair = selectedPersonHair()", identity)
+        self.assertIn("hair?.ready !== true", identity)
+        self.assertIn("`${targetUid}\\u0000${revision}`", identity)
+
+        current_start = identity_end
+        current_end = self.javascript.index(
+            "function cancelPersonHairRequest(", current_start
+        )
+        current = self.javascript[current_start:current_end]
+        self.assertIn("identity.revision === revision", current)
+        self.assertNotIn("characterSheetMode()", current)
+
+        render_start = self.javascript.index("function renderHairStudio(")
+        render_end = self.javascript.index("function renderCharacterRecipe(", render_start)
+        render = self.javascript[render_start:render_end]
+        self.assertIn("hair?.items || []", render)
+        self.assertIn("createHairLayerCard(item, index)", render)
+        self.assertIn("item.locked", render)
+        self.assertIn("lockedCount", render)
+        self.assertIn("VAM-PIP will not guess the current preset", render)
+        self.assertNotIn("type = \"range\"", render)
+        self.assertNotIn("createElement(\"input\"", render)
+
+        hair_html_start = self.html.index('class="hair-studio"')
+        hair_html_end = self.html.index('class="character-recipe"', hair_html_start)
+        hair_html = self.html[hair_html_start:hair_html_end]
+        self.assertIn("Typed hair controls are not available yet", hair_html)
+        self.assertNotIn('type="range"', hair_html)
+
+    def test_other_person_categories_use_a_compact_recipe_view(self) -> None:
+        for element_id in (
+            "character-recipe",
+            "character-recipe-person",
+            "character-recipe-title",
+            "character-recipe-description",
+            "character-recipe-scopes",
+            "character-recipe-note",
+        ):
+            with self.subTest(element_id=element_id):
+                self.assertIn(f'id="{element_id}"', self.html)
+        start = self.javascript.index("function renderCharacterRecipe(")
+        end = self.javascript.index("function renderCharacterSheet()", start)
+        recipe = self.javascript[start:end]
+        self.assertIn('"Appearance recipe"', recipe)
+        self.assertIn("CHARACTER_RECIPE_SCOPES", recipe)
+        self.assertIn("not published by VaM", recipe)
+        self.assertIn("never a guessed current preset", recipe)
 
     def test_equipment_removal_keeps_exact_version_and_serializes_mutations(
         self,
@@ -838,6 +1041,10 @@ class WorkspaceWebUITests(unittest.TestCase):
             ".equipment-slot",
             ".equipped-item",
             ".equipment-warning",
+            ".hair-studio",
+            ".hair-layer-card",
+            ".hair-inspector-group",
+            ".character-recipe",
         ):
             with self.subTest(selector=selector):
                 self.assertIn(selector, self.styles)
@@ -850,8 +1057,8 @@ class WorkspaceWebUITests(unittest.TestCase):
         self.assertIn('aria-hidden="true"', self.html)
 
     def test_static_assets_use_the_current_cache_version(self) -> None:
-        self.assertIn("/styles.css?v=0.7.0", self.html)
-        self.assertIn("/app.js?v=0.7.0", self.html)
+        self.assertIn("/styles.css?v=0.8.0", self.html)
+        self.assertIn("/app.js?v=0.8.0", self.html)
 
 
 if __name__ == "__main__":

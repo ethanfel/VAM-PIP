@@ -730,13 +730,37 @@ class BridgeProtocolTests(unittest.TestCase):
                             "clothing": {
                                 "ready": "true",
                                 "revision": "2" * 32,
+                                "activeCount": "1",
+                                "lockedCount": "1",
                                 "activeResourceRefs": [
                                     (
                                         "Author.Dress.1:/Custom/Clothing/"
                                         "Female/Author/Dress/Dress.vam"
                                     )
                                 ],
+                                "activeItems": [
+                                    {
+                                        "displayName": "Dress",
+                                        "tags": ["Dresses"],
+                                        "locked": "true",
+                                    }
+                                ],
                                 "truncated": "false",
+                            },
+                            "hair": {
+                                "ready": "true",
+                                "revision": "3" * 32,
+                                "activeCount": "1",
+                                "lockedCount": "0",
+                                "truncated": "false",
+                                "items": [
+                                    {
+                                        "displayName": "Soft Bob",
+                                        "tags": ["Sim"],
+                                        "locked": "false",
+                                        "simulated": "true",
+                                    }
+                                ],
                             },
                         },
                         {"uid": "Person #2", "selected": "false"},
@@ -767,7 +791,17 @@ class BridgeProtocolTests(unittest.TestCase):
         clothing = persons[0]["clothing"]
         self.assertIs(clothing["ready"], True)
         self.assertIs(clothing["truncated"], False)
+        self.assertEqual(clothing["activeCount"], 1)
+        self.assertEqual(clothing["lockedCount"], 1)
+        self.assertIs(clothing["activeItems"][0]["locked"], True)
         self.assertEqual(clothing["revision"], "2" * 32)
+        hair = persons[0]["hair"]
+        self.assertIs(hair["ready"], True)
+        self.assertIs(hair["truncated"], False)
+        self.assertEqual(hair["activeCount"], 1)
+        self.assertEqual(hair["lockedCount"], 0)
+        self.assertIs(hair["items"][0]["locked"], False)
+        self.assertIs(hair["items"][0]["simulated"], True)
         atoms = scene["atoms"]
         assert isinstance(atoms, list)
         self.assertIs(atoms[0]["selected"], True)
@@ -845,7 +879,7 @@ class BridgeSourceTests(unittest.TestCase):
             repository / "src" / "vampip" / "bridge_assets" / "VAMPipBridge.cs"
         ).read_text(encoding="utf-8")
         self.assertIn("ProtocolVersion = 2", source)
-        self.assertIn('BridgeVersion = "0.6.1"', source)
+        self.assertIn('BridgeVersion = "0.8.0"', source)
         self.assertIn("IgnoreCompletedLegacyRequest();", source)
         self.assertIn(
             "Ignored completed protocol-",
@@ -949,6 +983,67 @@ class BridgeSourceTests(unittest.TestCase):
         self.assertIn("Never collapse an atom or resource", source)
         self.assertNotIn("System.Reflection", source)
         self.assertNotIn(".GetType(", source)
+
+    def test_bridge_source_has_bounded_clothing_and_hair_rosters(self) -> None:
+        repository = Path(__file__).resolve().parents[1]
+        source = (
+            repository / "src" / "vampip" / "bridge_assets" / "VAMPipBridge.cs"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("MaximumClothingRefsPerPerson = 256", source)
+        self.assertIn("MaximumClothingRefsGlobally = 1024", source)
+        self.assertIn("MaximumHairItemsPerPerson = 128", source)
+        self.assertIn("MaximumHairItemsGlobally = 512", source)
+        self.assertIn("MaximumRosterDisplayNameLength = 256", source)
+        self.assertIn("MaximumRosterTagsPerItem = 32", source)
+        self.assertIn("SanitizeRosterText", source)
+        self.assertIn("SanitizeRosterTags", source)
+        self.assertIn("item.displayName", source)
+        self.assertIn("item.tagsArray", source)
+        self.assertIn("clothing[\"activeItems\"]", source)
+        self.assertIn(
+            "atom.GetComponentsInChildren<DAZHairGroup>()",
+            source,
+        )
+        self.assertNotIn("DAZHairGroup[] items = geometry.hairItems", source)
+        self.assertIn("!item.active", source)
+        self.assertIn(
+            "item.GetComponentInChildren<HairSimControl>() != null",
+            source,
+        )
+        self.assertIn('"person-hair-roster"', source)
+
+        clothing_key_start = source.index(
+            "private static string BuildPersonClothingGenerationKey"
+        )
+        clothing_key_end = source.index(
+            "private JSONClass BuildPersonClothingStatus",
+            clothing_key_start,
+        )
+        clothing_key = source[clothing_key_start:clothing_key_end]
+        self.assertIn("entry.DisplayName", clothing_key)
+        self.assertIn("entry.Tags[tagIndex]", clothing_key)
+
+        hair_status_start = source.index(
+            "private JSONClass BuildPersonHairStatus"
+        )
+        hair_status_end = source.index(
+            "private JSONClass BuildCuaStatus",
+            hair_status_start,
+        )
+        hair_status = source[hair_status_start:hair_status_end]
+        self.assertIn('publishedItem["displayName"]', hair_status)
+        self.assertIn('publishedItem["tags"]', hair_status)
+        self.assertIn('publishedItem["locked"]', hair_status)
+        self.assertIn('publishedItem["simulated"]', hair_status)
+        for private_identity in (
+            "resourceRef",
+            "ResourceRef",
+            "PackageUid",
+            "InternalUid",
+            ".Uid",
+        ):
+            self.assertNotIn(private_identity, hair_status)
 
     def test_bridge_source_has_bounded_tokenized_cua_surface(self) -> None:
         repository = Path(__file__).resolve().parents[1]
