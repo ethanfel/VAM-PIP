@@ -4257,8 +4257,50 @@ body.resource-detail-open {
   font-weight: 600;
 }
 
+.sam3d-model-runner {
+  display: grid;
+  grid-template-columns: minmax(210px, 0.42fr) minmax(0, 1fr);
+  gap: 15px;
+  align-items: center;
+  padding: 16px 18px;
+}
+
+.sam3d-model-field {
+  display: grid;
+  min-width: 0;
+  gap: 6px;
+  color: var(--text-soft);
+  font-size: 10px;
+  font-weight: 750;
+}
+
+.sam3d-model-field select {
+  width: 100%;
+  min-width: 0;
+  height: 41px;
+  padding: 0 10px;
+  color: var(--text);
+  background: var(--surface-soft);
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  outline: none;
+  font-size: 12px;
+}
+
+.sam3d-model-field select:focus {
+  border-color: rgba(134, 230, 176, 0.5);
+}
+
+.sam3d-model-runner > p {
+  margin: 17px 0 0;
+  color: var(--text-faint);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
 .sam3d-job-progress {
   padding: 17px 18px 19px;
+  border-top: 1px solid var(--border-soft);
 }
 
 .sam3d-progress-copy {
@@ -4338,6 +4380,171 @@ body.resource-detail-open {
 
 .sam3d-body-field {
   width: min(210px, 42vw);
+}
+
+.sam3d-result-tools {
+  display: flex;
+  flex: 0 1 auto;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.sam3d-model-pill {
+  display: inline-flex;
+  min-height: 27px;
+  align-items: center;
+  padding: 0 9px;
+  color: var(--text-soft);
+  background: var(--surface-soft);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.025em;
+  white-space: nowrap;
+}
+
+.sam3d-model-pill.is-dinov3 {
+  color: var(--blue);
+  background: var(--blue-wash);
+  border-color: rgba(128, 191, 255, 0.25);
+}
+
+.sam3d-model-pill.is-vith {
+  color: var(--accent);
+  background: var(--accent-wash);
+  border-color: rgba(134, 230, 176, 0.24);
+}
+
+.sam3d-comparison {
+  margin: 16px 18px 0;
+  padding: 13px;
+  background: var(--surface-raised);
+  border: 1px solid var(--border);
+  border-radius: 13px;
+}
+
+.sam3d-comparison[hidden] {
+  display: none;
+}
+
+.sam3d-comparison > header {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 1px 1px 11px;
+}
+
+.sam3d-comparison > header div {
+  min-width: 0;
+}
+
+.sam3d-comparison > header strong,
+.sam3d-comparison > header span {
+  display: block;
+}
+
+.sam3d-comparison > header strong {
+  color: var(--text);
+  font-size: 12px;
+}
+
+.sam3d-comparison > header span {
+  margin-top: 3px;
+  color: var(--text-faint);
+  font-size: 9px;
+}
+
+.sam3d-comparison-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.sam3d-comparison-card {
+  min-width: 0;
+  overflow: hidden;
+  background: var(--surface);
+  border: 1px solid var(--border-soft);
+  border-radius: 10px;
+}
+
+.sam3d-comparison-card.active {
+  border-color: rgba(128, 191, 255, 0.38);
+  box-shadow: inset 0 0 0 1px rgba(128, 191, 255, 0.08);
+}
+
+.sam3d-comparison-card-heading,
+.sam3d-comparison-card-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 9px;
+  padding: 8px 9px;
+}
+
+.sam3d-comparison-state {
+  overflow: hidden;
+  color: var(--text-faint);
+  font-size: 9px;
+  text-overflow: ellipsis;
+  text-transform: capitalize;
+  white-space: nowrap;
+}
+
+.sam3d-comparison-state.is-running {
+  color: var(--blue);
+}
+
+.sam3d-comparison-state.is-complete {
+  color: var(--accent);
+}
+
+.sam3d-comparison-state.is-error {
+  color: var(--danger);
+}
+
+.sam3d-comparison-media {
+  display: grid;
+  min-height: 150px;
+  max-height: 260px;
+  overflow: hidden;
+  place-items: center;
+  color: var(--text-faint);
+  background: #090b0d;
+  border-top: 1px solid var(--border-soft);
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.sam3d-comparison-media img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  max-height: 260px;
+  object-fit: contain;
+}
+
+.sam3d-comparison-empty {
+  max-width: 280px;
+  padding: 18px;
+  font-size: 10px;
+  line-height: 1.45;
+  text-align: center;
+}
+
+.sam3d-comparison-card-footer > span {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-faint);
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sam3d-comparison-card-footer .secondary-button {
+  flex: 0 0 auto;
 }
 
 .sam3d-preview {
@@ -4678,8 +4885,13 @@ body.resource-detail-open {
   }
 
   .sam3d-source-editor,
-  .sam3d-target-grid {
+  .sam3d-target-grid,
+  .sam3d-model-runner {
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  .sam3d-model-runner > p {
+    margin-top: 0;
   }
 
   .sam3d-canvas-wrap {
@@ -4699,8 +4911,27 @@ body.resource-detail-open {
   }
 
   .sam3d-panel-heading > .primary-button,
-  .sam3d-body-field {
+  .sam3d-body-field,
+  .sam3d-result-tools {
     width: 100%;
+  }
+
+  .sam3d-result-tools {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .sam3d-comparison {
+    margin: 12px 12px 0;
+  }
+
+  .sam3d-comparison > header {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .sam3d-comparison-grid {
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .sam3d-drop-zone {

@@ -20,6 +20,13 @@ const SAM3D_MAX_UPLOAD_BYTES = 32 * 1024 * 1024;
 const SAM3D_MAX_HISTORY = 50;
 const SAM3D_MAX_CAPTURES = 50;
 const SAM3D_DEFAULT_CAMERA_UID = "VAMPip SAM3D Camera";
+const SAM3D_COMPARE_MODEL_ID = "compare";
+const SAM3D_DINOV3_MODEL_ID = "dinov3_vith16plus";
+const SAM3D_VITH_MODEL_ID = "vit_hmr_512_384";
+const SAM3D_MODEL_ORDER = Object.freeze([
+  SAM3D_DINOV3_MODEL_ID,
+  SAM3D_VITH_MODEL_ID,
+]);
 const SAM3D_RENDERER_RESOLUTIONS = Object.freeze({
   "36:9": Object.freeze(["1600x400", "3200x800", "6400x1600"]),
   "32:9": Object.freeze([
@@ -858,6 +865,7 @@ const app = {
   sam3dSourceWidth: 0,
   sam3dSourceHeight: 0,
   sam3dSourceJobId: "",
+  sam3dModelChoice: SAM3D_DINOV3_MODEL_ID,
   sam3dBbox: { x: 0, y: 0, width: 100, height: 100 },
   sam3dBboxDrag: null,
   sam3dPreviewKind: "source",
@@ -965,6 +973,8 @@ function cacheElements() {
     "sam3d-bbox-width",
     "sam3d-bbox-height",
     "sam3d-reset-bbox",
+    "sam3d-model-select",
+    "sam3d-model-note",
     "sam3d-run-button",
     "sam3d-job-progress",
     "sam3d-job-stage",
@@ -973,7 +983,10 @@ function cacheElements() {
     "sam3d-job-progress-bar",
     "sam3d-job-retry",
     "sam3d-result-panel",
+    "sam3d-result-model",
     "sam3d-body-select",
+    "sam3d-comparison",
+    "sam3d-comparison-grid",
     "sam3d-preview-source",
     "sam3d-preview-overlay",
     "sam3d-preview-result",
@@ -1315,10 +1328,20 @@ function bindEvents() {
     finishSam3dBboxDrag,
   );
   elements.sam3dRunButton.addEventListener("click", createSam3dJob);
+  elements.sam3dModelSelect.addEventListener("change", () => {
+    app.sam3dModelChoice = elements.sam3dModelSelect.value;
+    renderSam3dRuntime();
+  });
   elements.sam3dJobRetry.addEventListener("click", retrySam3dJob);
   elements.sam3dHistoryList.addEventListener("click", (event) => {
     const jobButton = event.target.closest("[data-sam3d-job-id]");
     if (jobButton) selectSam3dJob(jobButton.dataset.sam3dJobId);
+  });
+  elements.sam3dComparisonGrid.addEventListener("click", (event) => {
+    const jobButton = event.target.closest("[data-sam3d-compare-job-id]");
+    if (jobButton) {
+      selectSam3dJob(jobButton.dataset.sam3dCompareJobId);
+    }
   });
   elements.sam3dBodySelect.addEventListener("change", () =>
     selectSam3dBody(elements.sam3dBodySelect.value),
@@ -7136,7 +7159,13 @@ const Sam3dClient = Object.freeze({
     return api(this.paths.job(jobId), { signal });
   },
 
-  create(file, bbox, verticalFov = null) {
+  create(
+    file,
+    bbox,
+    verticalFov = null,
+    modelId = "",
+    comparisonId = "",
+  ) {
     const query = new URLSearchParams();
     if (bbox) {
       query.set("bbox", bbox.map((value) => Math.round(value)).join(","));
@@ -7144,6 +7173,8 @@ const Sam3dClient = Object.freeze({
     if (verticalFov !== null) {
       query.set("vertical_fov", String(verticalFov));
     }
+    if (modelId) query.set("model_id", modelId);
+    if (comparisonId) query.set("comparison_id", comparisonId);
     return sam3dRawApi(`${this.paths.jobs}?${query}`, file);
   },
 
@@ -7247,10 +7278,97 @@ function sam3dCapabilitySet(status = app.sam3dStatus) {
   );
 }
 
-function sam3dStatusReady(status = app.sam3dStatus) {
+function normalizeSam3dModel(raw) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const id = String(raw.id || raw.model_id || "")
+    .trim()
+    .toLowerCase();
+  if (!/^[a-z0-9][a-z0-9_.+-]{0,63}$/.test(id)) return null;
+  const errors = asArray(raw.errors)
+    .map((value) => String(value || "").trim())
+    .filter(Boolean);
+  return {
+    id,
+    name: String(raw.model || raw.name || id).trim() || id,
+    backbone: String(raw.backbone || "").trim(),
+    configured: raw.configured !== false && errors.length === 0,
+    default: raw.default === true,
+    errors,
+  };
+}
+
+function sam3dWorkerModels(status = app.sam3dStatus) {
+  const worker =
+    status?.worker && typeof status.worker === "object" ? status.worker : {};
+  const models = asArray(worker.models)
+    .map(normalizeSam3dModel)
+    .filter(Boolean);
+  if (models.length) return models;
+
+  const backbone = String(worker.backbone || "").trim().toLowerCase();
+  const id = backbone.startsWith("dinov3_")
+    ? SAM3D_DINOV3_MODEL_ID
+    : backbone.startsWith("vit_hmr")
+      ? SAM3D_VITH_MODEL_ID
+      : "default";
+  const legacyName = String(
+    worker.model || status?.model || "SAM 3D Body",
+  ).trim();
+  if (!legacyName && !sam3dStatusReady(status, { ignoreModels: true })) {
+    return [];
+  }
+  return [
+    {
+      id,
+      name: legacyName || "SAM 3D Body",
+      backbone,
+      configured: sam3dStatusReady(status, { ignoreModels: true }),
+      default: true,
+      errors: asArray(worker.errors),
+    },
+  ];
+}
+
+function sam3dModelById(modelId, status = app.sam3dStatus) {
+  return (
+    sam3dWorkerModels(status).find((model) => model.id === modelId) || null
+  );
+}
+
+function sam3dSelectedModelIds() {
+  if (app.sam3dModelChoice === SAM3D_COMPARE_MODEL_ID) {
+    return SAM3D_MODEL_ORDER.filter(
+      (modelId) => sam3dModelById(modelId)?.configured,
+    );
+  }
+  const selected = sam3dModelById(app.sam3dModelChoice);
+  return selected?.configured ? [selected.id] : [];
+}
+
+function newSam3dComparisonId() {
+  const bytes = new Uint8Array(16);
+  if (!window.crypto?.getRandomValues) {
+    throw new Error("This browser cannot create a secure comparison identifier.");
+  }
+  window.crypto.getRandomValues(bytes);
+  return Array.from(bytes, (value) => value.toString(16).padStart(2, "0")).join(
+    "",
+  );
+}
+
+function sam3dStatusReady(
+  status = app.sam3dStatus,
+  { ignoreModels = false } = {},
+) {
   if (!status || typeof status !== "object") return false;
   const worker =
     status.worker && typeof status.worker === "object" ? status.worker : {};
+  if (!ignoreModels && Array.isArray(worker.models)) {
+    return worker.models
+      .map(normalizeSam3dModel)
+      .filter(Boolean)
+      .some((model) => model.configured);
+  }
   if (status.ready !== undefined) return Boolean(status.ready);
   if (worker.ready !== undefined) return Boolean(worker.ready);
   if (status.available !== undefined) return Boolean(status.available);
@@ -7363,6 +7481,31 @@ function normalizeSam3dJob(raw) {
     (result.camera && typeof result.camera === "object" && result.camera) ||
     (raw.camera && typeof raw.camera === "object" && raw.camera) ||
     {};
+  const rawModel =
+    raw.model && typeof raw.model === "object" && !Array.isArray(raw.model)
+      ? raw.model
+      : {};
+  const modelId = String(
+    rawModel.id || raw.model_id || result.model_id || "",
+  )
+    .trim()
+    .toLowerCase();
+  const modelName = String(
+    rawModel.name ||
+      rawModel.model ||
+      raw.model_name ||
+      result.model_name ||
+      (modelId === SAM3D_DINOV3_MODEL_ID
+        ? "SAM 3D Body DINOv3-H+"
+        : modelId === SAM3D_VITH_MODEL_ID
+          ? "SAM 3D Body ViT-H"
+          : "Model not recorded"),
+  ).trim();
+  const comparisonId = String(
+    raw.comparison_id || raw.comparisonId || result.comparison_id || "",
+  )
+    .trim()
+    .toLowerCase();
   let bodies = asArray(
     result.bodies ||
       raw.bodies ||
@@ -7466,6 +7609,16 @@ function normalizeSam3dJob(raw) {
     revision,
     bodies,
     selectedBodyIndex,
+    model: {
+      id: /^[a-z0-9][a-z0-9_.+-]{0,63}$/.test(modelId) ? modelId : "",
+      name: modelName || "Model not recorded",
+      backbone: String(
+        rawModel.backbone || raw.model_backbone || result.model_backbone || "",
+      ).trim(),
+    },
+    comparisonId: SAM3D_JOB_ID_PATTERN.test(comparisonId)
+      ? comparisonId
+      : "",
     sourceName: String(
       source.name ||
         source.filename ||
@@ -7686,6 +7839,27 @@ async function loadSam3dJob(jobId, { quiet = false } = {}) {
   }
 }
 
+async function refreshSam3dComparisonJobs(comparisonId) {
+  if (!SAM3D_JOB_ID_PATTERN.test(String(comparisonId || ""))) return;
+  const siblingIds = app.sam3dJobs
+    .filter(
+      (job) =>
+        job.comparisonId === comparisonId &&
+        job.id !== app.sam3dSelectedJobId,
+    )
+    .map((job) => job.id);
+  if (!siblingIds.length) return;
+  const results = await Promise.allSettled(
+    siblingIds.map((jobId) => Sam3dClient.job(jobId)),
+  );
+  for (const result of results) {
+    if (result.status !== "fulfilled") continue;
+    const job = normalizeSam3dJob(result.value.job || result.value);
+    if (job) mergeSam3dJob(job);
+  }
+  renderSam3dWorkspace();
+}
+
 function startSam3dPolling() {
   if (app.sam3dJobPollTimer !== null || app.view !== "sam3d") return;
   app.sam3dJobPollTimer = window.setTimeout(pollSam3dJob, SAM3D_POLL_MS);
@@ -7707,6 +7881,7 @@ async function pollSam3dJob() {
     app.sam3dSelectedJob,
   );
   const job = await loadSam3dJob(jobId, { quiet: true });
+  await refreshSam3dComparisonJobs(job?.comparisonId || "");
   const actionState = sam3dVamActionState(job);
   if (
     ["queued", "running"].includes(previousActionState) &&
@@ -7729,7 +7904,12 @@ async function pollSam3dJob() {
       );
     }
   }
-  if (job && sam3dJobNeedsPolling(job)) {
+  const monitoredJobs = job?.comparisonId
+    ? app.sam3dJobs.filter(
+        (candidate) => candidate.comparisonId === job.comparisonId,
+      )
+    : [job].filter(Boolean);
+  if (monitoredJobs.some(sam3dJobNeedsPolling)) {
     app.sam3dJobPollTimer = window.setTimeout(
       pollSam3dJob,
       SAM3D_POLL_MS,
@@ -7747,6 +7927,92 @@ function renderSam3dWorkspace() {
   renderSam3dApplyState();
 }
 
+function sam3dModelDisplayName(value) {
+  const model =
+    value?.model && typeof value.model === "object" ? value.model : value;
+  const name = String(model?.name || model?.model || "Model not recorded").trim();
+  return name.replace(/^SAM 3D Body\s+/i, "") || "Model not recorded";
+}
+
+function renderSam3dModelOptions(models) {
+  const byId = new Map(models.map((model) => [model.id, model]));
+  for (const option of Array.from(elements.sam3dModelSelect.options)) {
+    if (option.dataset.sam3dDynamicModel === "true") option.remove();
+  }
+  for (const modelId of SAM3D_MODEL_ORDER) {
+    const option = Array.from(elements.sam3dModelSelect.options).find(
+      (candidate) => candidate.value === modelId,
+    );
+    if (!option) continue;
+    const model = byId.get(modelId);
+    const fallbackName =
+      modelId === SAM3D_DINOV3_MODEL_ID ? "DINOv3-H+" : "ViT-H";
+    const name = model ? sam3dModelDisplayName(model) : fallbackName;
+    option.disabled = !model?.configured;
+    option.textContent =
+      `${name}${modelId === SAM3D_DINOV3_MODEL_ID ? " · recommended" : ""}` +
+      `${model?.configured ? "" : " · unavailable"}`;
+  }
+
+  const comparisonOption = Array.from(
+    elements.sam3dModelSelect.options,
+  ).find((candidate) => candidate.value === SAM3D_COMPARE_MODEL_ID);
+  for (const model of byId.values()) {
+    if (SAM3D_MODEL_ORDER.includes(model.id)) continue;
+    const option = new Option(
+      `${sam3dModelDisplayName(model)}` +
+        `${model.default ? " · default" : ""}` +
+        `${model.configured ? "" : " · unavailable"}`,
+      model.id,
+    );
+    option.disabled = !model.configured;
+    option.dataset.sam3dDynamicModel = "true";
+    elements.sam3dModelSelect.insertBefore(
+      option,
+      comparisonOption || null,
+    );
+  }
+  const comparisonReady = SAM3D_MODEL_ORDER.every(
+    (modelId) => byId.get(modelId)?.configured,
+  );
+  if (comparisonOption) {
+    comparisonOption.disabled = !comparisonReady;
+    comparisonOption.textContent = comparisonReady
+      ? "Compare both · DINOv3-H+ + ViT-H"
+      : "Compare both · requires both models";
+  }
+
+  const selectedOption = Array.from(
+    elements.sam3dModelSelect.options,
+  ).find((candidate) => candidate.value === app.sam3dModelChoice);
+  if (!selectedOption || selectedOption.disabled) {
+    const fallback =
+      models.find((model) => model.default && model.configured) ||
+      models.find((model) => model.configured);
+    app.sam3dModelChoice = fallback?.id || "";
+  }
+  elements.sam3dModelSelect.value = app.sam3dModelChoice;
+  elements.sam3dModelSelect.disabled =
+    app.sam3dMutationInFlight || !models.some((model) => model.configured);
+
+  if (app.sam3dModelChoice === SAM3D_COMPARE_MODEL_ID) {
+    elements.sam3dModelNote.textContent =
+      "Runs DINOv3-H+ and ViT-H from the same source, box, and FOV. Jobs are queued one at a time and grouped for comparison.";
+  } else {
+    const selected = byId.get(app.sam3dModelChoice);
+    const backbone = selected?.backbone ? ` · ${selected.backbone}` : "";
+    elements.sam3dModelNote.textContent = selected
+      ? `${sam3dModelDisplayName(selected)} selected${backbone}. The job keeps this model identity in history.`
+      : "No configured SAM 3D model is available.";
+  }
+  if (!app.sam3dMutationInFlight) {
+    elements.sam3dRunButton.textContent =
+      app.sam3dModelChoice === SAM3D_COMPARE_MODEL_ID
+        ? "Run both models"
+        : "Run SAM 3D Body";
+  }
+}
+
 function renderSam3dRuntime() {
   const status = app.sam3dStatus;
   const error = app.sam3dStatusError;
@@ -7756,6 +8022,8 @@ function renderSam3dRuntime() {
     status?.worker && typeof status.worker === "object"
       ? status.worker
       : {};
+  const models = sam3dWorkerModels(status);
+  renderSam3dModelOptions(models);
 
   elements.sam3dRuntimeBadge.classList.toggle("is-ready", ready);
   elements.sam3dRuntimeBadge.classList.toggle("is-error", Boolean(error));
@@ -7782,8 +8050,9 @@ function renderSam3dRuntime() {
       : errorMessage(error);
     elements.sam3dTabState.textContent = "Offline";
   } else if (ready) {
-    const model = String(
-      worker.model || status?.model || "SAM 3D Body",
+    const model = String(worker.model || status?.model || "SAM 3D Body");
+    const configuredModels = models.filter(
+      (candidate) => candidate.configured,
     );
     const runtime = worker.environment
       ? `Conda environment ${worker.environment}`
@@ -7791,11 +8060,19 @@ function renderSam3dRuntime() {
         ? "dedicated Python environment"
         : "isolated worker environment";
     elements.sam3dRuntimeLabel.textContent = "Worker ready";
-    elements.sam3dRuntimeTitle.textContent =
-      `${model} worker is ready`;
+    elements.sam3dRuntimeTitle.textContent = configuredModels.length > 1
+      ? `${configuredModels.length} SAM 3D models are ready`
+      : `${model} worker is ready`;
     elements.sam3dRuntimeMessage.textContent =
-      `Using ${runtime}. Inference unloads before VaM capture.`;
-    elements.sam3dTabState.textContent = "Ready";
+      configuredModels.length > 1
+        ? `${configuredModels
+            .map(sam3dModelDisplayName)
+            .join(" and ")} use the same ${runtime}. Inference runs serially and unloads before VaM capture.`
+        : `Using ${runtime}. Inference unloads before VaM capture.`;
+    elements.sam3dTabState.textContent =
+      configuredModels.length > 1
+        ? "2 models"
+        : "Ready";
   } else if (status) {
     elements.sam3dRuntimeLabel.textContent = "Setup required";
     elements.sam3dRuntimeTitle.textContent = String(
@@ -7819,8 +8096,14 @@ function renderSam3dRuntime() {
       "ComfyUI is not used or modified by this workspace.";
     elements.sam3dTabState.textContent = "—";
   }
+  const selectedModelIds = sam3dSelectedModelIds();
+  const modelChoiceReady =
+    app.sam3dModelChoice === SAM3D_COMPARE_MODEL_ID
+      ? selectedModelIds.length === SAM3D_MODEL_ORDER.length
+      : selectedModelIds.length === 1;
   elements.sam3dRunButton.disabled =
     !ready ||
+    !modelChoiceReady ||
     !app.sam3dSourceFile ||
     app.sam3dMutationInFlight;
 }
@@ -7834,10 +8117,13 @@ function sam3dHistoryStateClass(job) {
 
 function sam3dJobDisplayDate(job) {
   const value = job.updatedAt || job.createdAt;
-  if (!value) return sam3dJobState(job);
+  const model = sam3dModelDisplayName(job);
+  if (!value) return `${model} · ${sam3dJobState(job)}`;
   const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return sam3dJobState(job);
-  return `${sam3dJobState(job)} · ${date.toLocaleString()}`;
+  if (Number.isNaN(date.getTime())) {
+    return `${model} · ${sam3dJobState(job)}`;
+  }
+  return `${model} · ${sam3dJobState(job)} · ${date.toLocaleString()}`;
 }
 
 function renderSam3dHistory() {
@@ -8222,8 +8508,27 @@ async function createSam3dJob() {
   ) {
     return;
   }
+  const modelIds = sam3dSelectedModelIds();
+  const comparing = app.sam3dModelChoice === SAM3D_COMPARE_MODEL_ID;
+  if (
+    !modelIds.length ||
+    (comparing && modelIds.length !== SAM3D_MODEL_ORDER.length)
+  ) {
+    toast(
+      "Model unavailable",
+      comparing
+        ? "Both DINOv3-H+ and ViT-H must be configured before comparing them."
+        : "Choose a configured SAM 3D model.",
+      "error",
+    );
+    return;
+  }
   app.sam3dMutationInFlight = true;
-  setButtonBusy(elements.sam3dRunButton, true, "Uploading…");
+  setButtonBusy(
+    elements.sam3dRunButton,
+    true,
+    comparing ? "Creating comparison…" : "Uploading…",
+  );
   elements.sam3dJobProgress.hidden = false;
   elements.sam3dJobProgress.className =
     "sam3d-job-progress is-running";
@@ -8235,42 +8540,63 @@ async function createSam3dJob() {
   elements.sam3dJobRetry.hidden = true;
   let uploadedJob = null;
   try {
-    const uploadPayload = await Sam3dClient.create(
-      app.sam3dSourceFile,
-      sam3dBboxPixels(),
-      sam3dKnownVerticalFov(),
-    );
-    uploadedJob = normalizeSam3dJob(
-      uploadPayload.job || uploadPayload,
-    );
-    if (!uploadedJob) {
-      throw new Error("The manager did not return a valid SAM 3D job.");
+    const comparisonId = comparing ? newSam3dComparisonId() : "";
+    const bbox = sam3dBboxPixels();
+    const verticalFov = sam3dKnownVerticalFov();
+    const uploadedJobs = [];
+    for (const [index, modelId] of modelIds.entries()) {
+      const model = sam3dModelById(modelId);
+      elements.sam3dJobStage.textContent = comparing
+        ? `Uploading ${sam3dModelDisplayName(model)} · ${index + 1} of ${modelIds.length}`
+        : "Uploading source image…";
+      const uploadPayload = await Sam3dClient.create(
+        app.sam3dSourceFile,
+        bbox,
+        verticalFov,
+        modelId,
+        comparisonId,
+      );
+      uploadedJob = normalizeSam3dJob(
+        uploadPayload.job || uploadPayload,
+      );
+      if (!uploadedJob) {
+        throw new Error("The manager did not return a valid SAM 3D job.");
+      }
+      uploadedJobs.push(uploadedJob);
+      mergeSam3dJob(uploadedJob);
     }
-    app.sam3dSelectedJobId = uploadedJob.id;
-    app.sam3dSelectedJob = uploadedJob;
-    app.sam3dSelectedBodyIndex = uploadedJob.selectedBodyIndex;
+
+    const primaryJob = uploadedJobs[0];
+    app.sam3dSelectedJobId = primaryJob.id;
+    app.sam3dSelectedJob = primaryJob;
+    app.sam3dSelectedBodyIndex = primaryJob.selectedBodyIndex;
     app.sam3dSelectedCaptureRequestId = "";
-    app.sam3dSourceJobId = uploadedJob.id;
+    app.sam3dSourceJobId = primaryJob.id;
     app.sam3dPreviewKind = "source";
-    mergeSam3dJob(uploadedJob);
     elements.sam3dJobStage.textContent = "Starting isolated worker…";
     elements.sam3dJobMessage.textContent =
-      "The source is stored. VAM-PIP is queueing native SAM 3D Body inference.";
+      comparing
+        ? "Both sources are stored. VAM-PIP is queueing DINOv3-H+ and ViT-H inference in sequence."
+        : "The source is stored. VAM-PIP is queueing native SAM 3D Body inference.";
     renderSam3dWorkspace();
 
-    const runPayload = await Sam3dClient.run(uploadedJob.id);
-    const queuedJob = normalizeSam3dJob(
-      runPayload.job || runPayload,
-    );
-    if (!queuedJob) {
-      throw new Error("The manager did not confirm the queued job.");
+    for (const job of uploadedJobs) {
+      const runPayload = await Sam3dClient.run(job.id);
+      const queuedJob = normalizeSam3dJob(
+        runPayload.job || runPayload,
+      );
+      if (!queuedJob) {
+        throw new Error("The manager did not confirm the queued job.");
+      }
+      mergeSam3dJob(queuedJob);
     }
-    mergeSam3dJob(queuedJob);
     renderSam3dWorkspace();
     startSam3dPolling();
     toast(
-      "SAM 3D job started",
-      "The standalone worker is reconstructing the pose and camera.",
+      comparing ? "Model comparison started" : "SAM 3D job started",
+      comparing
+        ? "DINOv3-H+ and ViT-H are queued from the same input. Their overlays will appear together."
+        : "The standalone worker is reconstructing the pose and camera.",
     );
   } catch (error) {
     elements.sam3dJobProgress.className =
@@ -8283,6 +8609,7 @@ async function createSam3dJob() {
     app.sam3dMutationInFlight = false;
     setButtonBusy(elements.sam3dRunButton, false);
     renderSam3dRuntime();
+    renderSam3dHistory();
   }
 }
 
@@ -8457,6 +8784,99 @@ function sam3dArtifactUrl(job, kind) {
   }
 }
 
+function sam3dModelPillClass(job) {
+  if (job?.model?.id === SAM3D_DINOV3_MODEL_ID) return " is-dinov3";
+  if (job?.model?.id === SAM3D_VITH_MODEL_ID) return " is-vith";
+  return "";
+}
+
+function sam3dComparisonJobs(job) {
+  if (!SAM3D_JOB_ID_PATTERN.test(String(job?.comparisonId || ""))) return [];
+  const candidates = app.sam3dJobs.filter(
+    (candidate) => candidate.comparisonId === job.comparisonId,
+  );
+  const modelIds = new Set(
+    candidates.map((candidate) => candidate.model?.id || ""),
+  );
+  if (
+    candidates.length !== SAM3D_MODEL_ORDER.length ||
+    modelIds.size !== SAM3D_MODEL_ORDER.length ||
+    !SAM3D_MODEL_ORDER.every((modelId) => modelIds.has(modelId))
+  ) {
+    return [];
+  }
+  return SAM3D_MODEL_ORDER.map((modelId) =>
+    candidates.find((candidate) => candidate.model?.id === modelId),
+  ).filter(Boolean);
+}
+
+function renderSam3dComparison(job) {
+  const jobs = sam3dComparisonJobs(job);
+  const visible = jobs.length === SAM3D_MODEL_ORDER.length;
+  elements.sam3dComparison.hidden = !visible;
+  elements.sam3dComparisonGrid.replaceChildren();
+  if (!visible) return;
+
+  const fragment = document.createDocumentFragment();
+  for (const candidate of jobs) {
+    const card = createElement("article", "sam3d-comparison-card");
+    card.classList.toggle("active", candidate.id === app.sam3dSelectedJobId);
+
+    const heading = createElement("header", "sam3d-comparison-card-heading");
+    const model = createElement(
+      "span",
+      `sam3d-model-pill${sam3dModelPillClass(candidate)}`,
+    );
+    model.textContent = sam3dModelDisplayName(candidate);
+    const state = createElement(
+      "span",
+      `sam3d-comparison-state ${sam3dHistoryStateClass(candidate)}`.trim(),
+    );
+    state.textContent = sam3dJobState(candidate);
+    heading.append(model, state);
+
+    const media = createElement("div", "sam3d-comparison-media");
+    if (sam3dJobSucceeded(candidate)) {
+      const image = document.createElement("img");
+      image.alt = `${sam3dModelDisplayName(candidate)} joint overlay`;
+      image.loading = "lazy";
+      image.addEventListener("error", () => {
+        const empty = createElement("span", "sam3d-comparison-empty");
+        empty.textContent = "Overlay unavailable";
+        media.replaceChildren(empty);
+      });
+      image.src = sam3dArtifactUrl(candidate, "overlay");
+      media.append(image);
+    } else {
+      const empty = createElement("span", "sam3d-comparison-empty");
+      empty.textContent = sam3dJobFailed(candidate)
+        ? candidate.message || "Inference failed"
+        : `${Math.round(candidate.progressPercent)}% · ${candidate.stage}`;
+      media.append(empty);
+    }
+
+    const footer = createElement("footer", "sam3d-comparison-card-footer");
+    const detail = document.createElement("span");
+    detail.textContent = sam3dJobSucceeded(candidate)
+      ? "Joint overlay ready"
+      : sam3dJobState(candidate);
+    const select = button(
+      candidate.id === app.sam3dSelectedJobId
+        ? "Selected"
+        : sam3dJobSucceeded(candidate)
+          ? "Review & apply"
+          : "View job",
+      "secondary-button small",
+    );
+    select.dataset.sam3dCompareJobId = candidate.id;
+    select.disabled = candidate.id === app.sam3dSelectedJobId;
+    footer.append(detail, select);
+    card.append(heading, media, footer);
+    fragment.append(card);
+  }
+  elements.sam3dComparisonGrid.append(fragment);
+}
+
 function sam3dBodyLabel(body, index) {
   const score = Number(
     body?.score ?? body?.confidence ?? body?.detection_score,
@@ -8479,7 +8899,17 @@ function renderSam3dJob() {
     !hasJob || !sam3dJobSucceeded(job);
   elements.sam3dApplyPanel.hidden =
     !hasJob || !sam3dJobSucceeded(job);
-  if (!job) return;
+  if (!job) {
+    elements.sam3dComparison.hidden = true;
+    elements.sam3dComparisonGrid.replaceChildren();
+    return;
+  }
+
+  elements.sam3dResultModel.className =
+    `sam3d-model-pill${sam3dModelPillClass(job)}`;
+  elements.sam3dResultModel.textContent = sam3dModelDisplayName(job);
+  elements.sam3dResultModel.title = job.model?.backbone || "";
+  renderSam3dComparison(job);
 
   const succeeded = sam3dJobSucceeded(job);
   const failed = sam3dJobFailed(job);

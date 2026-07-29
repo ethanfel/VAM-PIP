@@ -95,6 +95,9 @@ export VAMPIP_SAM3D_REPO=/absolute/path/to/vampip-sam3d-runtime/sam-3d-body
 export VAMPIP_SAM3D_DINOV3_REPO=/absolute/path/to/vampip-sam3d-runtime/dinov3
 export VAMPIP_SAM3D_CHECKPOINT=/absolute/path/to/vampip-sam3d-runtime/models/dinov3/model.ckpt
 export VAMPIP_SAM3D_MHR=/absolute/path/to/vampip-sam3d-runtime/models/dinov3/assets/mhr_model.pt
+export VAMPIP_SAM3D_VITH_CHECKPOINT=/absolute/path/to/vampip-sam3d-runtime/models/vith/model.ckpt
+export VAMPIP_SAM3D_VITH_MHR=/absolute/path/to/vampip-sam3d-runtime/models/vith/assets/mhr_model.pt
+export VAMPIP_SAM3D_DEFAULT_MODEL=dinov3_vith16plus
 ```
 
 Alternatively, create a named Conda environment and set
@@ -102,9 +105,20 @@ Alternatively, create a named Conda environment and set
 The manager status endpoint reports each missing component without starting
 the worker.
 
+When both profiles are configured, the web workspace can run DINOv3-H+,
+ViT-H, or a linked comparison pair from the same source, bounding box, and
+camera FOV. Each result records its immutable model identity. The existing
+single GPU queue runs comparison jobs serially and each worker process exits
+before the next model loads, so the checkpoints do not occupy VRAM together.
+
 The older native ViT-H checkpoint and compatible custom native checkpoints
 remain supported. Their `model.ckpt` and `model_config.yaml` must match. A
-non-DINO checkpoint does not require `VAMPIP_SAM3D_DINOV3_REPO`.
+non-DINO checkpoint does not require `VAMPIP_SAM3D_DINOV3_REPO`. The optional
+model-specific override variables are
+`VAMPIP_SAM3D_DINOV3_CHECKPOINT`, `VAMPIP_SAM3D_DINOV3_MHR`,
+`VAMPIP_SAM3D_VITH_CHECKPOINT`, and `VAMPIP_SAM3D_VITH_MHR`; the original
+`VAMPIP_SAM3D_CHECKPOINT` and `VAMPIP_SAM3D_MHR` remain the default profile
+for backward-compatible deployments.
 
 Worker jobs, caches and scratch files live below VAM-PIP's persistent state
 directory under `sam3d/`; they do not use `/tmp`. The worker sets its own

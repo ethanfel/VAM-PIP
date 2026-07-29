@@ -275,6 +275,8 @@ def run(
     repo: Path,
     checkpoint: Path,
     mhr: Path,
+    model_id: str,
+    expected_backbone: str,
     dinov3_repo: Path | None,
     source: Path,
     request_path: Path,
@@ -298,6 +300,15 @@ def run(
             "model_config.yaml is missing beside the checkpoint or in its parent"
         )
     backbone = _checkpoint_backbone(model_config)
+    if (
+        not re.fullmatch(r"[a-z0-9][a-z0-9_.+-]{0,63}", model_id)
+        or not re.fullmatch(
+            r"[a-z0-9][a-z0-9_.+-]{0,127}",
+            expected_backbone,
+        )
+        or backbone != expected_backbone
+    ):
+        raise ValueError("worker checkpoint identity does not match its model profile")
     if backbone is not None and backbone.startswith("dinov3_"):
         if backbone != "dinov3_vith16plus":
             raise ValueError(f"the DINOv3 backbone is unsupported: {backbone}")
@@ -321,8 +332,13 @@ def run(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     request = json.loads(request_path.read_text(encoding="utf-8"))
-    if not isinstance(request, dict) or request.get("schema") != 1:
+    if (
+        not isinstance(request, dict)
+        or request.get("schema") not in {1, 2}
+    ):
         raise ValueError("worker request schema is unsupported")
+    if request.get("schema") == 2 and request.get("modelId") != model_id:
+        raise ValueError("worker request model does not match the checkpoint")
     width = request.get("sourceWidth")
     height = request.get("sourceHeight")
     if not isinstance(width, int) or not isinstance(height, int):
@@ -457,12 +473,20 @@ def run(
     overlay_partial.write_bytes(encoded.tobytes())
     os.replace(overlay_partial, output_dir / "overlay.png")
 
+    engine = {
+        "name": "facebookresearch/sam-3d-body",
+        "mode": "native-standalone",
+    }
+    if request["schema"] == 2:
+        engine.update(
+            {
+                "modelId": model_id,
+                "backbone": backbone,
+            }
+        )
     manifest = {
-        "schema": 1,
-        "engine": {
-            "name": "facebookresearch/sam-3d-body",
-            "mode": "native-standalone",
-        },
+        "schema": request["schema"],
+        "engine": engine,
         "jobId": request["jobId"],
         "source": {
             "width": width,
@@ -485,6 +509,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--repo", required=True, type=Path)
     parser.add_argument("--checkpoint", required=True, type=Path)
     parser.add_argument("--mhr", required=True, type=Path)
+    parser.add_argument("--model-id", required=True)
+    parser.add_argument("--backbone", required=True)
     parser.add_argument("--dinov3-repo", type=Path)
     parser.add_argument("--source", required=True, type=Path)
     parser.add_argument("--request", required=True, type=Path)
@@ -494,6 +520,8 @@ def main(argv: list[str] | None = None) -> int:
         repo=args.repo,
         checkpoint=args.checkpoint,
         mhr=args.mhr,
+        model_id=args.model_id,
+        expected_backbone=args.backbone,
         dinov3_repo=args.dinov3_repo,
         source=args.source,
         request_path=args.request,

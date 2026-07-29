@@ -2880,10 +2880,15 @@ process.stdout.write(JSON.stringify({{
             "sam3d-file-input",
             "sam3d-source-canvas",
             "sam3d-manual-bbox",
+            "sam3d-model-select",
+            "sam3d-model-note",
             "sam3d-run-button",
             "sam3d-job-progress",
             "sam3d-history-list",
+            "sam3d-result-model",
             "sam3d-body-select",
+            "sam3d-comparison",
+            "sam3d-comparison-grid",
             "sam3d-preview-source",
             "sam3d-preview-overlay",
             "sam3d-preview-result",
@@ -2943,9 +2948,54 @@ process.stdout.write(JSON.stringify({{
             '"Content-Type": sam3dFileContentType(file)',
             client,
         )
-        self.assertIn("Sam3dClient.run(uploadedJob.id)", client)
+        self.assertIn('query.set("model_id", modelId)', client)
+        self.assertIn('query.set("comparison_id", comparisonId)', client)
+        self.assertIn("Sam3dClient.run(job.id)", client)
         self.assertNotIn("/select", client)
         self.assertIn("sam3dStatusError.status !== 404", client)
+
+    def test_sam3d_model_comparison_is_grouped_and_labeled(self) -> None:
+        for value in ("dinov3_vith16plus", "vit_hmr_512_384", "compare"):
+            self.assertIn(f'<option value="{value}">', self.html)
+        for contract in (
+            "status?.worker",
+            "worker.models",
+            "normalizeSam3dModel",
+            "sam3dSelectedModelIds",
+            "newSam3dComparisonId",
+            "window.crypto.getRandomValues",
+            "const comparisonId = comparing ? newSam3dComparisonId()",
+            "for (const [index, modelId] of modelIds.entries())",
+            "comparisonId: SAM3D_JOB_ID_PATTERN.test(comparisonId)",
+            "function renderSam3dComparison(",
+            "candidate.comparisonId === job.comparisonId",
+            "sam3dModelDisplayName(job)",
+        ):
+            with self.subTest(contract=contract):
+                self.assertIn(contract, self.javascript)
+        for selector in (
+            ".sam3d-model-runner",
+            ".sam3d-model-pill",
+            ".sam3d-comparison-grid",
+            ".sam3d-comparison-card",
+        ):
+            with self.subTest(selector=selector):
+                self.assertIn(selector, self.styles)
+
+    def test_sam3d_custom_models_render_without_weakening_comparison(self) -> None:
+        for contract in (
+            'option.dataset.sam3dDynamicModel === "true"',
+            "if (SAM3D_MODEL_ORDER.includes(model.id)) continue;",
+            'option.dataset.sam3dDynamicModel = "true"',
+            "elements.sam3dModelSelect.insertBefore(",
+            '`${model.default ? " · default" : ""}`',
+            "candidates.length !== SAM3D_MODEL_ORDER.length",
+            "modelIds.size !== SAM3D_MODEL_ORDER.length",
+            "SAM3D_MODEL_ORDER.every((modelId) => modelIds.has(modelId))",
+            "candidate.model?.id === modelId",
+        ):
+            with self.subTest(contract=contract):
+                self.assertIn(contract, self.javascript)
 
     def test_sam3d_source_box_and_artifacts_are_bounded(self) -> None:
         self.assertIn(
@@ -3163,8 +3213,8 @@ process.stdout.write(JSON.stringify(output));
         self.assertIn("@media (max-width: 500px)", self.styles)
 
     def test_static_assets_use_the_current_cache_version(self) -> None:
-        self.assertIn("/styles.css?v=0.14.1", self.html)
-        self.assertIn("/app.js?v=0.14.1", self.html)
+        self.assertIn("/styles.css?v=0.15.0", self.html)
+        self.assertIn("/app.js?v=0.15.0", self.html)
 
 
 if __name__ == "__main__":

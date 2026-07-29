@@ -6,6 +6,7 @@ from pathlib import Path
 import tempfile
 import threading
 import unittest
+from unittest import mock
 
 from vampip.service import ManagerService
 from vampip.web import ManagerHTTPServer
@@ -80,6 +81,44 @@ class Sam3dWebTests(unittest.TestCase):
         response = self.connection.getresponse()
         self.assertEqual(response.status, 200)
         self.assertEqual(self.json(response)["id"], job["id"])
+
+    def test_raw_upload_passes_bounded_model_and_comparison_identity(self) -> None:
+        image = png_header()
+        comparison_id = "a" * 32
+        returned = {
+            "id": "b" * 32,
+            "state": "uploaded",
+        }
+        with mock.patch.object(
+            self.service,
+            "create_sam3d_job",
+            return_value=returned,
+        ) as create:
+            self.connection.request(
+                "POST",
+                (
+                    "/api/sam3d/jobs"
+                    "?model_id=vit_hmr_512_384"
+                    f"&comparison_id={comparison_id}"
+                ),
+                body=image,
+                headers={
+                    "X-VAMPIP-Token": self.token,
+                    "Content-Type": "image/png",
+                    "Content-Length": str(len(image)),
+                },
+            )
+            response = self.connection.getresponse()
+            self.assertEqual(response.status, 201)
+            self.assertEqual(self.json(response)["id"], returned["id"])
+        create.assert_called_once_with(
+            image,
+            "image/png",
+            bbox=None,
+            vertical_fov=None,
+            model_id="vit_hmr_512_384",
+            comparison_id=comparison_id,
+        )
 
     def test_raw_upload_rejects_spoofed_type_and_foreign_origin(self) -> None:
         image = png_header()

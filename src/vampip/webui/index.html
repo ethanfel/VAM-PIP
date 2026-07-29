@@ -6,8 +6,8 @@
     <meta name="color-scheme" content="dark">
     <meta name="theme-color" content="#111316">
     <title>VAM-PIP Manager</title>
-    <link rel="stylesheet" href="/styles.css?v=0.14.1">
-    <script src="/app.js?v=0.14.1" defer></script>
+    <link rel="stylesheet" href="/styles.css?v=0.15.0">
+    <script src="/app.js?v=0.15.0" defer></script>
   </head>
   <body>
     <a class="skip-link" href="#main-content">Skip to library</a>
@@ -789,6 +789,19 @@
                     Run SAM 3D Body
                   </button>
                 </header>
+                <div class="sam3d-model-runner">
+                  <label class="sam3d-model-field" for="sam3d-model-select">
+                    <span>Inference model</span>
+                    <select id="sam3d-model-select">
+                      <option value="dinov3_vith16plus">DINOv3-H+ · recommended</option>
+                      <option value="vit_hmr_512_384">ViT-H</option>
+                      <option value="compare">Compare both</option>
+                    </select>
+                  </label>
+                  <p id="sam3d-model-note">
+                    DINOv3-H+ is selected. Each result keeps its model identity in job history.
+                  </p>
+                </div>
                 <div class="sam3d-job-progress" id="sam3d-job-progress" hidden>
                   <div class="sam3d-progress-copy">
                     <span class="sam3d-progress-dot" aria-hidden="true"></span>
@@ -812,11 +825,25 @@
                       <h3 id="sam3d-result-title">Check the reconstruction</h3>
                     </div>
                   </div>
-                  <label class="sam3d-body-field" for="sam3d-body-select">
-                    <span>Detected body</span>
-                    <select id="sam3d-body-select"></select>
-                  </label>
+                  <div class="sam3d-result-tools">
+                    <span class="sam3d-model-pill" id="sam3d-result-model">Model unknown</span>
+                    <label class="sam3d-body-field" for="sam3d-body-select">
+                      <span>Detected body</span>
+                      <select id="sam3d-body-select"></select>
+                    </label>
+                  </div>
                 </header>
+
+                <section class="sam3d-comparison" id="sam3d-comparison" hidden aria-labelledby="sam3d-comparison-title">
+                  <header>
+                    <div>
+                      <strong id="sam3d-comparison-title">Model comparison</strong>
+                      <span>Same source, person box, and camera input</span>
+                    </div>
+                    <span>Inference runs one model at a time</span>
+                  </header>
+                  <div class="sam3d-comparison-grid" id="sam3d-comparison-grid"></div>
+                </section>
 
                 <div class="sam3d-preview">
                   <div class="sam3d-preview-tabs" role="tablist" aria-label="Reconstruction preview">

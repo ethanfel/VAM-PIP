@@ -1,3 +1,3 @@
 """VAM-PIP: local package management for Virt-A-Mate archives."""
 
-__version__ = "0.14.1"
+__version__ = "0.15.0"

@@ -15,6 +15,7 @@ from vampip.bridge import bridge_directory, install_bridge
 from vampip.database import connect
 from vampip.sam3d import (
     SAM3D_MODEL_CONFIG_LIMIT,
+    Sam3dConfigurationError,
     Sam3dJobError,
     Sam3dJobManager,
     Sam3dWorkerConfig,
@@ -101,6 +102,14 @@ class FakeWorker:
     def __call__(self, config, paths, runtime_dir) -> None:
         request = json.loads(paths.request.read_text(encoding="utf-8"))
         manifest = sample_manifest(request["jobId"])
+        if request["schema"] == 2:
+            manifest["schema"] = 2
+            manifest["engine"].update(
+                {
+                    "modelId": request["modelId"],
+                    "backbone": config.public_status()["backbone"],
+                }
+            )
         manifest["source"]["bbox"] = request["bbox"]
         manifest["source"]["verticalFov"] = request["verticalFov"]
         paths.manifest.write_text(json.dumps(manifest), encoding="utf-8")
@@ -145,11 +154,41 @@ class Sam3dBackendTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temporary.cleanup()
 
-    def manager(self) -> Sam3dJobManager:
+    def manager(self, worker=None) -> Sam3dJobManager:
         return Sam3dJobManager(
             self.state,
             config=self.config,
-            worker=FakeWorker(),
+            worker=worker or FakeWorker(),
+        )
+
+    def dual_model_manager(self, worker=None) -> Sam3dJobManager:
+        checkpoint = self.base / "models" / "dinov3" / "model.ckpt"
+        checkpoint.parent.mkdir()
+        checkpoint.write_bytes(b"dino-checkpoint")
+        (checkpoint.parent / "model_config.yaml").write_text(
+            "MODEL:\n  BACKBONE:\n    TYPE: dinov3_vith16plus\n",
+            encoding="utf-8",
+        )
+        dinov3_repo = self.base / "dinov3"
+        (dinov3_repo / "dinov3").mkdir(parents=True)
+        (dinov3_repo / "dinov3" / "__init__.py").write_text(
+            "",
+            encoding="utf-8",
+        )
+        (dinov3_repo / "hubconf.py").write_text("", encoding="utf-8")
+        dino_config = replace(
+            self.config,
+            checkpoint=checkpoint,
+            dinov3_repo=dinov3_repo,
+        )
+        return Sam3dJobManager(
+            self.state,
+            model_configs={
+                "dinov3_vith16plus": dino_config,
+                "vit_hmr_512_384": self.config,
+            },
+            default_model_id="dinov3_vith16plus",
+            worker=worker or FakeWorker(),
         )
 
     def completed_job(self) -> tuple[Sam3dJobManager, dict[str, object]]:
@@ -225,6 +264,254 @@ class Sam3dBackendTests(unittest.TestCase):
         self.assertEqual(status["model"], "SAM 3D Body DINOv3-H+")
         self.assertEqual(status["backbone"], "dinov3_vith16plus")
         self.assertTrue(status["dinov3_repository"])
+
+    def test_dual_model_jobs_are_immutable_labeled_and_serialized(self) -> None:
+        calls: list[str] = []
+
+        class RecordingWorker:
+            def __call__(worker_self, config, paths, runtime_dir) -> None:
+                calls.append(str(config.public_status()["backbone"]))
+                FakeWorker()(config, paths, runtime_dir)
+
+        manager = self.dual_model_manager(worker=RecordingWorker())
+        status = manager.status()
+        self.assertTrue(status["available"])
+        self.assertEqual(
+            status["worker"]["default_model_id"],
+            "dinov3_vith16plus",
+        )
+        self.assertEqual(
+            {
+                model["id"]
+                for model in status["worker"]["models"]
+                if model["configured"]
+            },
+            {"dinov3_vith16plus", "vit_hmr_512_384"},
+        )
+
+        comparison_id = "1" * 32
+        created = manager.create(
+            png_header(),
+            "image/png",
+            model_id="vit_hmr_512_384",
+            comparison_id=comparison_id,
+        )
+        self.assertEqual(created["model"]["id"], "vit_hmr_512_384")
+        self.assertEqual(created["model"]["name"], "SAM 3D Body ViT-H")
+        self.assertEqual(created["comparison_id"], comparison_id)
+        request = json.loads(
+            manager._paths(created["id"]).request.read_text(encoding="utf-8")
+        )
+        self.assertEqual(request["schema"], 2)
+        self.assertEqual(request["modelId"], "vit_hmr_512_384")
+        self.assertEqual(request["comparisonId"], comparison_id)
+
+        manager.queue(created["id"])
+        manager._queue.join()
+        completed = manager.get(created["id"])
+        self.assertEqual(completed["state"], "succeeded")
+        self.assertEqual(calls, ["vit_hmr_512_384"])
+        manifest = manager.manifest(created["id"])
+        self.assertEqual(
+            manifest["engine"],
+            {
+                "name": "facebookresearch/sam-3d-body",
+                "mode": "native-standalone",
+                "modelId": "vit_hmr_512_384",
+                "backbone": "vit_hmr_512_384",
+            },
+        )
+
+    def test_job_model_identity_survives_profile_removal(self) -> None:
+        manager = self.dual_model_manager()
+        dino_config = manager.model_configs["dinov3_vith16plus"]
+        created = manager.create(
+            png_header(),
+            "image/png",
+            model_id="vit_hmr_512_384",
+        )
+        manager.close()
+
+        restarted = Sam3dJobManager(
+            self.state,
+            model_configs={"dinov3_vith16plus": dino_config},
+            default_model_id="dinov3_vith16plus",
+            worker=FakeWorker(),
+        )
+        try:
+            self.assertEqual(
+                restarted.get(created["id"])["model"],
+                {
+                    "id": "vit_hmr_512_384",
+                    "name": "SAM 3D Body ViT-H",
+                    "backbone": "vit_hmr_512_384",
+                },
+            )
+        finally:
+            restarted.close()
+
+    def test_comparison_group_is_bound_to_exact_inputs_and_models(self) -> None:
+        manager = self.dual_model_manager()
+        source = png_header()
+        bbox = [0.0, 0.0, 64.0, 64.0]
+
+        comparison_id = "1" * 32
+        first = manager.create(
+            source,
+            "image/png",
+            bbox=bbox,
+            vertical_fov=55.0,
+            model_id="dinov3_vith16plus",
+            comparison_id=comparison_id,
+        )
+        second = manager.create(
+            source,
+            "image/png",
+            bbox=bbox,
+            vertical_fov=55.0,
+            model_id="vit_hmr_512_384",
+            comparison_id=comparison_id,
+        )
+        self.assertEqual(first["comparison_id"], comparison_id)
+        self.assertEqual(second["comparison_id"], comparison_id)
+        with self.assertRaisesRegex(ValueError, "already contains two"):
+            manager.create(
+                source,
+                "image/png",
+                bbox=bbox,
+                vertical_fov=55.0,
+                model_id="dinov3_vith16plus",
+                comparison_id=comparison_id,
+            )
+
+        duplicate_id = "2" * 32
+        manager.create(
+            source,
+            "image/png",
+            model_id="dinov3_vith16plus",
+            comparison_id=duplicate_id,
+        )
+        with self.assertRaisesRegex(ValueError, "distinct model IDs"):
+            manager.create(
+                source,
+                "image/png",
+                model_id="dinov3_vith16plus",
+                comparison_id=duplicate_id,
+            )
+
+        changed_source_id = "3" * 32
+        manager.create(
+            source,
+            "image/png",
+            model_id="dinov3_vith16plus",
+            comparison_id=changed_source_id,
+        )
+        with self.assertRaisesRegex(ValueError, "identical source bytes"):
+            manager.create(
+                source + b"different",
+                "image/png",
+                model_id="vit_hmr_512_384",
+                comparison_id=changed_source_id,
+            )
+
+        changed_camera_id = "4" * 32
+        manager.create(
+            source,
+            "image/png",
+            bbox=bbox,
+            vertical_fov=55.0,
+            model_id="dinov3_vith16plus",
+            comparison_id=changed_camera_id,
+        )
+        with self.assertRaisesRegex(ValueError, "same source, box, and FOV"):
+            manager.create(
+                source,
+                "image/png",
+                bbox=[1.0, 0.0, 64.0, 64.0],
+                vertical_fov=55.0,
+                model_id="vit_hmr_512_384",
+                comparison_id=changed_camera_id,
+            )
+
+    def test_comparison_rejects_non_official_model_profiles(self) -> None:
+        manager = Sam3dJobManager(
+            self.state,
+            model_configs={"custom_vit": self.config},
+            default_model_id="custom_vit",
+            worker=FakeWorker(),
+        )
+        with self.assertRaisesRegex(ValueError, r"only DINOv3-H\+ and ViT-H"):
+            manager.create(
+                png_header(),
+                "image/png",
+                model_id="custom_vit",
+                comparison_id="5" * 32,
+            )
+
+    def test_model_registry_rejects_unknown_and_mismatched_profiles(self) -> None:
+        manager = self.dual_model_manager()
+        with self.assertRaisesRegex(
+            Sam3dConfigurationError,
+            "not configured",
+        ):
+            manager.create(
+                png_header(),
+                "image/png",
+                model_id="unknown_model",
+            )
+
+        mismatched = Sam3dJobManager(
+            self.state / "mismatch",
+            model_configs={"dinov3_vith16plus": self.config},
+            default_model_id="dinov3_vith16plus",
+            worker=FakeWorker(),
+        )
+        created = mismatched.create(png_header(), "image/png")
+        with self.assertRaisesRegex(
+            Sam3dConfigurationError,
+            "uses checkpoint backbone",
+        ):
+            mismatched.queue(created["id"])
+
+    def test_legacy_schema_one_job_remains_readable_and_runnable(self) -> None:
+        manager = self.manager()
+        created = manager.create(png_header(), "image/png")
+        paths = manager._paths(created["id"])
+        request = json.loads(paths.request.read_text(encoding="utf-8"))
+        request["schema"] = 1
+        request.pop("modelId")
+        encoded = json.dumps(request, separators=(",", ":"), sort_keys=True)
+        paths.request.write_text(encoded, encoding="utf-8")
+        with connect(self.state) as connection:
+            connection.execute(
+                "UPDATE sam3d_jobs SET request_json = ? WHERE id = ?",
+                (encoded, created["id"]),
+            )
+
+        manager.queue(created["id"])
+        manager._queue.join()
+        completed = manager.get(created["id"])
+        self.assertEqual(completed["state"], "succeeded")
+        self.assertIsNone(completed["model"])
+        self.assertEqual(manager.manifest(created["id"])["schema"], 1)
+
+    def test_worker_rejects_model_config_without_supported_backbone(self) -> None:
+        assert self.config.checkpoint is not None
+        (self.config.checkpoint.parent / "model_config.yaml").write_text(
+            "MODEL:\n  BACKBONE:\n    TYPE: unsupported_encoder\n",
+            encoding="utf-8",
+        )
+        self.assertIn(
+            "model_config.yaml does not declare a supported "
+            "dinov3_* or vit_hmr* backbone",
+            self.config.errors(),
+        )
+        manager = Sam3dJobManager(
+            self.state,
+            config=self.config,
+            worker=FakeWorker(),
+        )
+        self.assertFalse(manager.status()["available"])
 
     def test_worker_rejects_unsafe_model_config_files(self) -> None:
         assert self.config.checkpoint is not None
@@ -334,6 +621,15 @@ class Sam3dBackendTests(unittest.TestCase):
 
         options = popen.call_args.kwargs
         self.assertTrue(options["start_new_session"])
+        command = popen.call_args.args[0]
+        self.assertEqual(
+            command[command.index("--model-id") + 1],
+            "vit_hmr_512_384",
+        )
+        self.assertEqual(
+            command[command.index("--backbone") + 1],
+            "vit_hmr_512_384",
+        )
         environment = options["env"]
         self.assertEqual(environment["SAFE_KEEP"], "yes")
         self.assertEqual(environment["PYTHONNOUSERSITE"], "1")
@@ -487,7 +783,7 @@ class Sam3dBackendTests(unittest.TestCase):
 
         path.write_bytes(original)
         document = json.loads(original)
-        document["schema"] = 2
+        document["schema"] = 1
         path.write_text(json.dumps(document), encoding="utf-8")
         with self.assertRaisesRegex(Sam3dJobError, "validation"):
             manager.manifest(job["id"])
@@ -535,6 +831,9 @@ class Sam3dBackendTests(unittest.TestCase):
             ),
             lambda document: document["people"][0].__setitem__(
                 "keypointNames", list(reversed(MHR70_NAMES))
+            ),
+            lambda document: document["engine"].__setitem__(
+                "modelId", "dinov3_vith16plus"
             ),
             lambda document: document.__setitem__(
                 "engine", {"name": "other", "mode": "native-standalone"}

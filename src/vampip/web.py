@@ -777,7 +777,14 @@ class ManagerRequestHandler(BaseHTTPRequestHandler):
             service = self.server.service
             if method == "POST" and parsed.path == "/api/sam3d/jobs":
                 unexpected_fields = sorted(
-                    set(query) - {"bbox", "vertical_fov", "token"}
+                    set(query)
+                    - {
+                        "bbox",
+                        "vertical_fov",
+                        "model_id",
+                        "comparison_id",
+                        "token",
+                    }
                 )
                 if unexpected_fields:
                     raise ValueError(
@@ -811,12 +818,28 @@ class ManagerRequestHandler(BaseHTTPRequestHandler):
                         raise ValueError(
                             "vertical_fov must be a finite number"
                         ) from error
+                raw_model_id = query.get("model_id", [])
+                if len(raw_model_id) > 1:
+                    raise ValueError("model_id must be supplied at most once")
+                model_id = raw_model_id[0] if raw_model_id else None
+                raw_comparison_id = query.get("comparison_id", [])
+                if len(raw_comparison_id) > 1:
+                    raise ValueError(
+                        "comparison_id must be supplied at most once"
+                    )
+                comparison_id = (
+                    raw_comparison_id[0]
+                    if raw_comparison_id
+                    else None
+                )
                 image_data, content_type = self._read_image()
                 result = service.create_sam3d_job(
                     image_data,
                     content_type,
                     bbox=bbox,
                     vertical_fov=vertical_fov,
+                    model_id=model_id,
+                    comparison_id=comparison_id,
                 )
                 self._sam3d_job_links(result)
                 self._json(HTTPStatus.CREATED, result)

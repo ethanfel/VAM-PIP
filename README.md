@@ -23,7 +23,7 @@ leaving managed mode restores that baseline.
 
 ## Current status
 
-Version 0.14.1 is functional but should still be treated as an early release.
+Version 0.15.0 is functional but should still be treated as an early release.
 Package switching is deliberately conservative:
 
 - entering managed mode requires explicit confirmation;
@@ -262,12 +262,15 @@ transforms are written, then restored before VaM's simulation-reset settle
 window completes. Captures are kept as a bounded per-job history; existing
 VAM-PIP images in the legacy renderer directory are backfilled automatically.
 
-The recommended model is the official DINOv3-H+ checkpoint, loaded through a
-pinned local DINOv3 source checkout. Native ViT-H and compatible custom native
-checkpoints remain supported. The worker is isolated from ComfyUI, and bridge
-installation includes the fixed camera preset and renderer scripts needed by
-that workflow. See the [standalone SAM 3D Body setup](docs/SAM3D_SETUP.md) for
-environment, model, and configuration instructions.
+The workspace exposes both official DINOv3-H+ and original ViT-H checkpoints.
+A run records its immutable model identity, and **Compare both** creates a
+linked pair from the same source inputs. The single GPU queue loads them
+serially in separate worker processes, so they never occupy VRAM together.
+DINOv3-H+ remains the default and uses a pinned local DINOv3 source checkout.
+The worker is isolated from ComfyUI, and bridge installation includes the
+fixed camera preset and renderer scripts needed by that workflow. See the
+[standalone SAM 3D Body setup](docs/SAM3D_SETUP.md) for environment, model,
+and configuration instructions.
 
 ## External workspace
 

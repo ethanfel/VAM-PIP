@@ -1928,12 +1928,16 @@ class ManagerService:
         *,
         bbox: list[float] | None = None,
         vertical_fov: float | None = None,
+        model_id: str | None = None,
+        comparison_id: str | None = None,
     ) -> dict[str, object]:
         return self._sam3d().create(
             image_data,
             content_type,
             bbox=bbox,
             vertical_fov=vertical_fov,
+            model_id=model_id,
+            comparison_id=comparison_id,
         )
 
     def run_sam3d_job(self, job_id: str) -> dict[str, object]:
