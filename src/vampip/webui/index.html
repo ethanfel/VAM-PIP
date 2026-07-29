@@ -6,8 +6,8 @@
     <meta name="color-scheme" content="dark">
     <meta name="theme-color" content="#111316">
     <title>VAM-PIP Manager</title>
-    <link rel="stylesheet" href="/styles.css?v=0.17.0">
-    <script src="/app.js?v=0.17.0" defer></script>
+    <link rel="stylesheet" href="/styles.css?v=0.18.0">
+    <script src="/app.js?v=0.18.0" defer></script>
   </head>
   <body>
     <a class="skip-link" href="#main-content">Skip to library</a>
@@ -928,7 +928,7 @@
                       <option value="">Waiting for VaM…</option>
                     </select>
                     <small>
-                      Shared by both tabs. Morph analysis is read-only until you press Apply morphs.
+                      Shared by both tabs. Morph analysis is read-only until you press Apply body fit.
                     </small>
                   </label>
                 </div>
@@ -944,7 +944,7 @@
                     <span class="sam3d-step">4</span>
                     <div>
                       <p class="eyebrow">Body proportions</p>
-                      <h3 id="sam3d-proportions-title">Fit lengths and widths before posing</h3>
+                      <h3 id="sam3d-proportions-title">Fit structure and body shape before posing</h3>
                     </div>
                   </div>
                   <button
@@ -993,8 +993,8 @@
                         >Delete</button>
                       </div>
                       <p id="sam3d-profile-note">
-                        Profiles stay in this browser and store regions, fit strength,
-                        and Morph references—never live morph values or revisions.
+                        Profiles stay in this browser and store Structure and Body Shape
+                        preferences plus Morph references—never live morph values or revisions.
                       </p>
                     </section>
 
@@ -1018,13 +1018,13 @@
                       ></div>
                       <p id="sam3d-morph-reference-note">
                         Choose up to eight completed bodies. These references drive only
-                        Morph analysis; legacy solo-only results stay usable alone.
-                        Pose + camera continues to use the current job.
+                        Morph analysis; legacy results can combine for Body Shape but remain
+                        solo-only for Structure. Pose + camera continues to use the current job.
                       </p>
                     </section>
 
                     <fieldset class="sam3d-region-fieldset">
-                      <legend>Regions to fit</legend>
+                      <legend>Structure to fit</legend>
                       <div class="sam3d-region-grid">
                         <label for="sam3d-region-arms">
                           <input id="sam3d-region-arms" type="checkbox" value="arms" checked>
@@ -1073,6 +1073,71 @@
                       <input id="sam3d-fit-strength" type="range" min="0" max="100" step="5" value="75">
                       <small>Lower values blend the proposed morph changes toward the current body.</small>
                     </label>
+
+                    <section
+                      class="sam3d-shape-controls"
+                      aria-labelledby="sam3d-shape-controls-title"
+                    >
+                      <header>
+                        <div>
+                          <span>Body Shape</span>
+                          <strong id="sam3d-shape-controls-title">Fit the silhouette</strong>
+                        </div>
+                        <small>Optional</small>
+                      </header>
+                      <fieldset class="sam3d-region-fieldset sam3d-shape-fieldset">
+                        <legend>Shape regions to fit</legend>
+                        <div class="sam3d-region-grid sam3d-shape-region-grid">
+                          <label for="sam3d-shape-region-breasts">
+                            <input id="sam3d-shape-region-breasts" type="checkbox" value="breasts">
+                            <span>
+                              <strong>Breasts</strong>
+                              <small>Bust volume and projection</small>
+                            </span>
+                          </label>
+                          <label for="sam3d-shape-region-waist">
+                            <input id="sam3d-shape-region-waist" type="checkbox" value="waist">
+                            <span>
+                              <strong>Waist</strong>
+                              <small>Mid-torso width and depth</small>
+                            </span>
+                          </label>
+                          <label for="sam3d-shape-region-hips">
+                            <input id="sam3d-shape-region-hips" type="checkbox" value="hips">
+                            <span>
+                              <strong>Hips</strong>
+                              <small>Pelvic silhouette width</small>
+                            </span>
+                          </label>
+                          <label for="sam3d-shape-region-glutes">
+                            <input id="sam3d-shape-region-glutes" type="checkbox" value="glutes">
+                            <span>
+                              <strong>Glutes</strong>
+                              <small>Seat volume and projection</small>
+                            </span>
+                          </label>
+                          <label for="sam3d-shape-region-thighs">
+                            <input id="sam3d-shape-region-thighs" type="checkbox" value="thighs">
+                            <span>
+                              <strong>Thighs</strong>
+                              <small>Upper-leg volume</small>
+                            </span>
+                          </label>
+                        </div>
+                      </fieldset>
+                      <label class="sam3d-fit-strength sam3d-shape-strength" for="sam3d-shape-strength">
+                        <span>
+                          <strong>Shape strength</strong>
+                          <output id="sam3d-shape-strength-value" for="sam3d-shape-strength">50%</output>
+                        </span>
+                        <input id="sam3d-shape-strength" type="range" min="0" max="100" step="5" value="50">
+                        <small>Blends only the selected silhouette changes toward the image references.</small>
+                      </label>
+                      <p>
+                        Face morphs are always excluded. Breast and glute physics,
+                        soft-body settings, and materials are never changed.
+                      </p>
+                    </section>
                   </div>
 
                   <div class="sam3d-proportions-report">
@@ -1100,8 +1165,12 @@
                     <div id="sam3d-proportions-results" hidden>
                       <div class="sam3d-proportions-summary">
                         <div>
-                          <span>Geometric confidence</span>
+                          <span>Structure confidence</span>
                           <strong id="sam3d-proportions-confidence">—</strong>
+                        </div>
+                        <div>
+                          <span>Body Shape confidence</span>
+                          <strong id="sam3d-shape-confidence">—</strong>
                         </div>
                         <div>
                           <span>Reference disagreement</span>
@@ -1112,7 +1181,7 @@
                       <div class="sam3d-proportions-section">
                         <div class="sam3d-proportions-section-heading">
                           <div>
-                            <strong>Measured proportions</strong>
+                            <strong>Structure measurements</strong>
                             <span>Current VaM → image target</span>
                           </div>
                         </div>
@@ -1125,8 +1194,8 @@
                       <div class="sam3d-proportions-section">
                         <div class="sam3d-proportions-section-heading">
                           <div>
-                            <strong>Proposed morph changes</strong>
-                            <span>Bounded changes at the selected fit strength</span>
+                            <strong>Proposed Structure changes</strong>
+                            <span>Bounded changes at the Structure strength</span>
                           </div>
                         </div>
                         <div
@@ -1134,13 +1203,52 @@
                           id="sam3d-proportions-morphs"
                         ></div>
                       </div>
+
+                      <section
+                        class="sam3d-shape-results"
+                        id="sam3d-shape-results"
+                        aria-labelledby="sam3d-shape-results-title"
+                      >
+                        <div class="sam3d-shape-results-heading">
+                          <div>
+                            <span>Body Shape</span>
+                            <strong id="sam3d-shape-results-title">Silhouette fit</strong>
+                          </div>
+                          <small>Face and physics excluded</small>
+                        </div>
+                        <div class="sam3d-proportions-section">
+                          <div class="sam3d-proportions-section-heading">
+                            <div>
+                              <strong>Shape measurements</strong>
+                              <span>Current VaM → image target</span>
+                            </div>
+                          </div>
+                          <div
+                            class="sam3d-measurement-list"
+                            id="sam3d-shape-measurements"
+                          ></div>
+                        </div>
+                        <div class="sam3d-proportions-section">
+                          <div class="sam3d-proportions-section-heading">
+                            <div>
+                              <strong>Proposed Body Shape changes</strong>
+                              <span>Bounded changes at the Shape strength</span>
+                            </div>
+                          </div>
+                          <div
+                            class="sam3d-morph-change-list"
+                            id="sam3d-shape-morphs"
+                          ></div>
+                        </div>
+                      </section>
                     </div>
 
                     <p
                       class="sam3d-apply-note sam3d-proportions-note"
                       id="sam3d-proportions-note"
                     >
-                      Arms, legs, torso, and widths are geometric fits. Soft-body physics is not inferred.
+                      Structure and selected Body Shape regions are geometric fits.
+                      Face morphs and soft-body physics are not changed.
                     </p>
                     <div class="sam3d-action-row">
                       <button
@@ -1148,7 +1256,7 @@
                         id="sam3d-proportions-apply"
                         type="button"
                         disabled
-                      >Apply morphs</button>
+                      >Apply body fit</button>
                       <button
                         class="secondary-button"
                         id="sam3d-proportions-undo"

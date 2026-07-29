@@ -23,7 +23,7 @@ leaving managed mode restores that baseline.
 
 ## Current status
 
-Version 0.17.0 is functional but should still be treated as an early release.
+Version 0.18.0 is functional but should still be treated as an early release.
 Package switching is deliberately conservative:
 
 - entering managed mode requires explicit confirmation;
@@ -278,26 +278,40 @@ fixed camera preset and renderer scripts needed by that workflow. See the
 and configuration instructions.
 
 Completed reconstructions now use two independent workspaces. **Morph** owns an
-ordered reference gallery of up to eight completed bodies, combines their
-neutral skeleton measurements with bounded outlier rejection, and proposes
-built-in morph changes for the selected VaM Person. **Pose + camera** keeps its
-own current reconstruction and body selection, so choosing another pose image
-does not replace, reset, or re-analyze the Morph reference set. Applying a body
-fit creates one exact Person-wide undo snapshot; another fit cannot replace
-that snapshot until it is restored. Body Scale, face morphs, and soft-body
+ordered reference gallery of up to eight completed bodies. Its **Structure**
+layer combines neutral skeleton measurements with bounded outlier rejection.
+Its separately optional **Body Shape** layer measures the neutral mesh
+silhouette for breasts, waist, hips, glutes, and upper thighs, then calibrates
+five allowlisted built-in VaM morphs against the selected Person without first
+changing that Person. Each layer has independent regions and fit strength.
+The bridge prepares that live neutral-mesh calibration incrementally, with one
+contour step per frame, and the workspace shows its preparing state. Structure
+can still be analyzed and reviewed while it warms, but Apply waits for the
+stable cache so the exact undo cannot be bound to a stale mesh.
+**Pose + camera** keeps its own current reconstruction and body selection, so
+choosing another pose image does not replace, reset, or re-analyze the Morph
+reference set.
+
+Applying Structure and Body Shape creates one exact Person-wide undo snapshot
+and one atomic bridge request; another fit cannot replace that snapshot until
+it is restored. Body Scale, face morphs, materials, and breast/glute soft-body
 physics are not changed. Leg and torso length morphs can still alter final
-height.
+height. If an allowlisted shape morph is unavailable, the workspace reports the
+region instead of enabling an arbitrary package morph.
 
 Named Person profiles stay in browser-local storage. They remember selected
-regions, fit strength, and the independent Morph reference set, but never store
-live VaM morph identifiers, values, or revision tokens. Existing one-reference
-profiles are imported into the new format automatically. Reopening a profile
-therefore always requires a fresh read-only analysis against the current
-Person before **Apply morphs** becomes available.
+Structure and Body Shape regions, both strengths, and the independent Morph
+reference set, but never store live VaM morph identifiers, values, or revision
+tokens. Existing profiles are imported with Body Shape disabled, so an upgrade
+cannot silently change soft anatomy. Reopening a profile always requires a
+fresh read-only analysis against the current Person before **Apply body fit**
+becomes available.
 
 Jobs created before neutral-body signatures were added remain valid as a
-single Morph reference and are marked **Legacy · solo only**. Rerun an older
-image with the current worker before combining it with other views.
+single Structure reference and are marked **Legacy · solo only**. Their
+persisted SAM arrays can still produce a cached CPU-only Body Shape sidecar
+without rerunning inference or changing the job revision. Rerun an older image
+with the current worker before combining it with other views for Structure.
 
 ## External workspace
 

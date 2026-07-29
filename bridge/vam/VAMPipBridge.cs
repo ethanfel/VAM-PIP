@@ -40,8 +40,8 @@ namespace VAMPip
         private const int MaximumClothingRefsGlobally = 1024;
         private const int MaximumHairItemsPerPerson = 128;
         private const int MaximumHairItemsGlobally = 512;
-        private const int MaximumBodyProportionMorphs = 16;
-        private const int MaximumBodyProportionChanges = 8;
+        private const int MaximumBodyProportionMorphs = 32;
+        private const int MaximumBodyProportionChanges = 16;
         private const int MaximumRosterDisplayNameLength = 256;
         private const int MaximumRosterTagLength = 100;
         private const int MaximumRosterTagsPerItem = 32;
@@ -65,6 +65,17 @@ namespace VAMPip
         private const float MaximumOperationWaitSeconds = 120.0f;
         private const float MaximumBodyProportionMagnitude = 1.0f;
         private const float MaximumBodyProportionDelta = 0.25f;
+        private const float BodyShapeResponseStep = 0.1f;
+        private const float BodyShapeLoopJoinTolerance = 0.00025f;
+        private const float BodyShapeBustFirstFraction = 0.58f;
+        private const float BodyShapeBustLastFraction = 0.76f;
+        private const float BodyShapeWaistFirstFraction = 0.34f;
+        private const float BodyShapeWaistLastFraction = 0.58f;
+        private const float BodyShapeSeatFirstFraction = -0.08f;
+        private const float BodyShapeSeatLastFraction = 0.12f;
+        private const float BodyShapeUpperThighLegFraction = 0.35f;
+        private const float BodyShapeBuildFrameBudgetSeconds = 0.003f;
+        private const int BodyShapeBuildMaximumStepsPerFrame = 1;
 
         private const string CommandRescan = "rescan";
         private const string CommandApplyPersonPreset = "applyPersonPreset";
@@ -123,6 +134,29 @@ namespace VAMPip
         private const string StateCapturingSam3d = "capturing-sam3d";
         private const string StateOk = "ok";
         private const string StateError = "error";
+        private static readonly string[] BodyShapeMetricNames =
+            new string[]
+            {
+                "bustGirth",
+                "bustWidth",
+                "bustDepth",
+                "underbustGirth",
+                "underbustWidth",
+                "underbustDepth",
+                "breastGirthExcess",
+                "breastDepthExcess",
+                "breastProjection",
+                "waistGirth",
+                "waistWidth",
+                "waistDepth",
+                "seatGirth",
+                "seatWidth",
+                "seatDepth",
+                "gluteProjection",
+                "upperThighGirth",
+                "upperThighWidth",
+                "upperThighDepth"
+            };
 
         // VaM 1.22 native non-Person atom types, audited against
         // BrowserAssist 39's static native-type registry. Custom/package atom
@@ -402,9 +436,127 @@ namespace VAMPip
             public string Key;
             public string Name;
             public string Region;
+            public string FitKind;
+            public string ShapeRegion;
+            public Dictionary<string, float> ShapeResponses;
             public float Value;
             public float Minimum;
             public float Maximum;
+        }
+
+        private sealed class BodyShapeMetric
+        {
+            public string Region;
+            public float Meters;
+            public bool Bilateral;
+            public float LeftMeters;
+            public float RightMeters;
+        }
+
+        private sealed class BodyShapeSignature
+        {
+            public float StructuralLength;
+            public float BustTorsoFraction;
+            public float UnderbustTorsoFraction;
+            public float WaistTorsoFraction;
+            public float SeatTorsoFraction;
+            public float UpperThighLegFraction;
+            public Dictionary<string, BodyShapeMetric> Measurements;
+        }
+
+        private sealed class BodyShapeSegment
+        {
+            public Vector2 First;
+            public Vector2 Second;
+            public bool Used;
+        }
+
+        private sealed class BodyShapeLoop
+        {
+            public List<Vector2> Points;
+            public float Perimeter;
+            public float Area;
+            public float MinimumX;
+            public float MaximumX;
+            public float MinimumZ;
+            public float MaximumZ;
+            public Vector2 Centroid;
+        }
+
+        private sealed class BodyShapeSection
+        {
+            public float Girth;
+            public float Width;
+            public float Depth;
+            public float MinimumX;
+            public float MaximumX;
+            public float MinimumZ;
+            public float MaximumZ;
+        }
+
+        private sealed class BodyShapeFrame
+        {
+            public Vector3 Origin;
+            public Vector3 Lateral;
+            public Vector3 Up;
+            public Vector3 Front;
+            public Vector3 LeftThigh;
+            public Vector3 RightThigh;
+            public Vector3 LeftShin;
+            public Vector3 RightShin;
+            public float TorsoLength;
+            public float HipToKnee;
+            public float StructuralLength;
+            public float ShoulderSpan;
+        }
+
+        private sealed class BodyShapeSignatureWork
+        {
+            public Vector3[] Vertices;
+            public int[] Triangles;
+            public BodyShapeFrame Frame;
+            public float ScaleX;
+            public float ScaleZ;
+            public int Phase;
+            public int ScanIndex;
+            public bool Complete;
+            public bool Failed;
+            public BodyShapeSection Bust;
+            public BodyShapeSection Underbust;
+            public BodyShapeSection Waist;
+            public BodyShapeSection Seat;
+            public BodyShapeSection LeftThigh;
+            public BodyShapeSection RightThigh;
+            public float BustFraction;
+            public float UnderbustFraction;
+            public float WaistFraction;
+            public float SeatFraction;
+            public BodyShapeSignature Result;
+        }
+
+        private sealed class PersonBodyShapeCache
+        {
+            public Atom Atom;
+            public DAZCharacterSelector Geometry;
+            public string MeshChecksum;
+            public BodyShapeSignature Signature;
+            public Dictionary<
+                DAZMorph,
+                Dictionary<string, float>> Responses;
+        }
+
+        private sealed class PersonBodyShapeBuild
+        {
+            public Atom Atom;
+            public DAZCharacterSelector Geometry;
+            public string MeshChecksum;
+            public Vector3[] Vertices;
+            public int[] Triangles;
+            public BodyShapeFrame Frame;
+            public float ScaleX;
+            public float ScaleZ;
+            public List<BodyProportionMorphEntry> Entries;
+            public bool Cancelled;
         }
 
         private sealed class PersonBodyProportionSnapshot
@@ -414,6 +566,8 @@ namespace VAMPip
             public string GenerationKey;
             public string Revision;
             public List<BodyProportionMorphEntry> Entries;
+            public BodyShapeSignature BodyShape;
+            public string BodyShapeMeshChecksum;
         }
 
         private sealed class BodyProportionUndoValue
@@ -428,6 +582,12 @@ namespace VAMPip
             public DAZCharacterSelector Geometry;
             public string TargetUid;
             public string PostApplyGenerationKey;
+            public string PreApplyGenerationKey;
+            public string PreApplyBodyShapeChecksum;
+            public bool RequireBodyShapeReady;
+            public bool RequireChangedBodyShapeChecksum;
+            public string PendingBodyShapeChecksum;
+            public int PendingStableObservations;
             public List<BodyProportionUndoValue> Values;
         }
 
@@ -511,6 +671,12 @@ namespace VAMPip
         private readonly Dictionary<string, PersonBodyProportionUndo>
             _personBodyProportionUndo =
                 new Dictionary<string, PersonBodyProportionUndo>();
+        private readonly Dictionary<string, PersonBodyShapeCache>
+            _personBodyShapeCaches =
+                new Dictionary<string, PersonBodyShapeCache>();
+        private readonly Dictionary<string, PersonBodyShapeBuild>
+            _personBodyShapeBuilds =
+                new Dictionary<string, PersonBodyShapeBuild>();
         private readonly Dictionary<string, TimelineSnapshot>
             _timelineSnapshots =
                 new Dictionary<string, TimelineSnapshot>();
@@ -595,6 +761,7 @@ namespace VAMPip
                 interruptedRequest != null ||
                 _inFlightSam3dCameraResult != null;
             StopAllCoroutines();
+            _personBodyShapeBuilds.Clear();
             _requestInProgress = false;
             _pendingRequest = null;
             _skipPendingProcessing = false;
@@ -2914,10 +3081,34 @@ namespace VAMPip
 
                 List<BodyProportionMorphEntry> currentEntries =
                     GetBodyProportionMorphEntries(geometry);
+                string currentBodyShapeChecksum = "";
+                if (!TryBodyShapeMeshChecksum(
+                        geometry,
+                        out currentBodyShapeChecksum) ||
+                    !string.Equals(
+                        snapshot.BodyShapeMeshChecksum,
+                        currentBodyShapeChecksum,
+                        StringComparison.Ordinal))
+                {
+                    throw new Exception(
+                        "The neutral body-shape cache changed; refresh the " +
+                        "selected Person.");
+                }
+                if (!IsValidBodyShapeSignature(
+                        snapshot.BodyShape))
+                {
+                    throw new Exception(
+                        "The neutral body-shape cache is not ready; wait for " +
+                        "preparation or inspect bodyShapeReason.");
+                }
+                BodyShapeSignature currentBodyShape =
+                    snapshot.BodyShape;
                 string currentGeneration =
                     BuildBodyProportionGenerationKey(
                         geometry,
-                        currentEntries);
+                        currentEntries,
+                        currentBodyShape,
+                        currentBodyShapeChecksum);
                 if (!IsCurrentBodyProportionSnapshot(
                         snapshot,
                         currentEntries,
@@ -2980,6 +3171,13 @@ namespace VAMPip
                     newUndo.Atom = person;
                     newUndo.Geometry = geometry;
                     newUndo.TargetUid = request.TargetUid;
+                    newUndo.PreApplyGenerationKey =
+                        currentGeneration;
+                    newUndo.PreApplyBodyShapeChecksum =
+                        currentBodyShapeChecksum;
+                    newUndo.RequireBodyShapeReady = true;
+                    newUndo.RequireChangedBodyShapeChecksum =
+                        false;
                     newUndo.Values =
                         new List<BodyProportionUndoValue>();
 
@@ -3025,6 +3223,8 @@ namespace VAMPip
                         {
                             continue;
                         }
+                        newUndo.RequireChangedBodyShapeChecksum =
+                            true;
                         BodyProportionUndoValue old =
                             new BodyProportionUndoValue();
                         old.Morph = entry.Morph;
@@ -3041,12 +3241,9 @@ namespace VAMPip
                     }
                     if (newUndo.Values.Count != 0)
                     {
-                        List<BodyProportionMorphEntry> postEntries =
-                            GetBodyProportionMorphEntries(geometry);
-                        newUndo.PostApplyGenerationKey =
-                            BuildBodyProportionGenerationKey(
-                                geometry,
-                                postEntries);
+                        newUndo.PostApplyGenerationKey = "";
+                        newUndo.PendingBodyShapeChecksum = "";
+                        newUndo.PendingStableObservations = 0;
                         _personBodyProportionUndo[
                             request.TargetUid] = newUndo;
                         undoBookkeepingChanged = true;
@@ -7829,6 +8026,38 @@ namespace VAMPip
                 name == "Shoulder Width (B)";
         }
 
+        private static string BodyShapeRegionForMorphName(
+            string name)
+        {
+            if (name == "Breasts Size")
+            {
+                return "breasts";
+            }
+            if (name == "Waist Width")
+            {
+                return "waist";
+            }
+            if (name == "Hip Size")
+            {
+                return "hips";
+            }
+            if (name == "Glutes Size")
+            {
+                return "glutes";
+            }
+            if (name == "Thighs Size")
+            {
+                return "thighs";
+            }
+            return "";
+        }
+
+        private static bool IsAllowlistedBodyShapeMorphName(
+            string name)
+        {
+            return BodyShapeRegionForMorphName(name).Length != 0;
+        }
+
         private static bool IsEligibleBodyProportionMorph(
             DAZMorphBank bank,
             DAZMorph morph)
@@ -7850,7 +8079,22 @@ namespace VAMPip
                 return false;
             }
             string name = morph.resolvedDisplayName ?? "";
-            if (!IsAllowlistedBodyProportionMorphName(name))
+            bool structural =
+                IsAllowlistedBodyProportionMorphName(name);
+            bool shape =
+                IsAllowlistedBodyShapeMorphName(name);
+            if (!structural && !shape)
+            {
+                return false;
+            }
+            if (shape &&
+                (
+                    morph.hasBoneModificationFormulas ||
+                    (
+                        morph.group != null &&
+                        morph.group.IndexOf(
+                            "Pose/",
+                            StringComparison.OrdinalIgnoreCase) >= 0)))
             {
                 return false;
             }
@@ -7938,6 +8182,13 @@ namespace VAMPip
                 entry.Bank = bank;
                 entry.Name = morph.resolvedDisplayName ?? "";
                 entry.Region = morph.resolvedRegionName ?? "";
+                entry.ShapeRegion =
+                    BodyShapeRegionForMorphName(entry.Name);
+                entry.FitKind =
+                    entry.ShapeRegion.Length == 0
+                    ? "structure"
+                    : "shape";
+                entry.ShapeResponses = null;
                 entry.Value = morph.morphValue;
                 entry.Minimum = minimum;
                 entry.Maximum = maximum;
@@ -7964,7 +8215,9 @@ namespace VAMPip
 
         private static string BuildBodyProportionGenerationKey(
             DAZCharacterSelector geometry,
-            List<BodyProportionMorphEntry> entries)
+            List<BodyProportionMorphEntry> entries,
+            BodyShapeSignature bodyShape,
+            string bodyShapeMeshChecksum)
         {
             ulong first = 1469598103934665603UL;
             ulong second = 7809847782465536322UL;
@@ -8000,6 +8253,11 @@ namespace VAMPip
                         entry.Morph == null ? "" : entry.Morph.uid);
                     HashCuaText(ref first, ref second, entry.Name);
                     HashCuaText(ref first, ref second, entry.Region);
+                    HashCuaText(ref first, ref second, entry.FitKind);
+                    HashCuaText(
+                        ref first,
+                        ref second,
+                        entry.ShapeRegion);
                     HashCuaText(
                         ref first,
                         ref second,
@@ -8014,7 +8272,91 @@ namespace VAMPip
                         entry.Maximum.ToString("R"));
                 }
             }
+            HashBodyShapeSignature(
+                ref first,
+                ref second,
+                bodyShape);
+            HashCuaText(
+                ref first,
+                ref second,
+                bodyShapeMeshChecksum ?? "");
             return first.ToString("x16") + second.ToString("x16");
+        }
+
+        private static void HashBodyShapeSignature(
+            ref ulong first,
+            ref ulong second,
+            BodyShapeSignature signature)
+        {
+            if (signature == null ||
+                signature.Measurements == null)
+            {
+                HashCuaText(
+                    ref first,
+                    ref second,
+                    "body-shape-unavailable");
+                return;
+            }
+            HashCuaText(
+                ref first,
+                ref second,
+                "body-shape-v1");
+            HashCuaText(
+                ref first,
+                ref second,
+                signature.StructuralLength.ToString("R"));
+            HashCuaText(
+                ref first,
+                ref second,
+                signature.BustTorsoFraction.ToString("R"));
+            HashCuaText(
+                ref first,
+                ref second,
+                signature.UnderbustTorsoFraction.ToString("R"));
+            HashCuaText(
+                ref first,
+                ref second,
+                signature.WaistTorsoFraction.ToString("R"));
+            HashCuaText(
+                ref first,
+                ref second,
+                signature.SeatTorsoFraction.ToString("R"));
+            HashCuaText(
+                ref first,
+                ref second,
+                signature.UpperThighLegFraction.ToString("R"));
+            int index;
+            for (index = 0;
+                 index < BodyShapeMetricNames.Length;
+                 index++)
+            {
+                string name = BodyShapeMetricNames[index];
+                BodyShapeMetric metric = null;
+                HashCuaText(ref first, ref second, name);
+                if (!signature.Measurements.TryGetValue(
+                        name,
+                        out metric) ||
+                    metric == null)
+                {
+                    HashCuaText(ref first, ref second, "missing");
+                    continue;
+                }
+                HashCuaText(
+                    ref first,
+                    ref second,
+                    metric.Meters.ToString("R"));
+                if (metric.Bilateral)
+                {
+                    HashCuaText(
+                        ref first,
+                        ref second,
+                        metric.LeftMeters.ToString("R"));
+                    HashCuaText(
+                        ref first,
+                        ref second,
+                        metric.RightMeters.ToString("R"));
+                }
+            }
         }
 
         private static void HashBodyProportionBankState(
@@ -8320,6 +8662,2590 @@ namespace VAMPip
             return result;
         }
 
+        private static bool TryBuildBodyShapeFrame(
+            DAZCharacterSelector geometry,
+            DAZSkinV2 skin,
+            out BodyShapeFrame frame)
+        {
+            frame = null;
+            DAZBone leftShoulder =
+                BodyProportionBone(
+                    geometry,
+                    "lShldr",
+                    "lShoulder");
+            DAZBone rightShoulder =
+                BodyProportionBone(
+                    geometry,
+                    "rShldr",
+                    "rShoulder");
+            DAZBone leftThigh =
+                BodyProportionBone(geometry, "lThigh");
+            DAZBone rightThigh =
+                BodyProportionBone(geometry, "rThigh");
+            DAZBone leftShin =
+                BodyProportionBone(geometry, "lShin");
+            DAZBone rightShin =
+                BodyProportionBone(geometry, "rShin");
+            DAZBone leftFoot =
+                geometry == null ? null : geometry.leftFootBone;
+            if (leftFoot == null)
+            {
+                leftFoot = BodyProportionBone(geometry, "lFoot");
+            }
+            DAZBone rightFoot =
+                geometry == null ? null : geometry.rightFootBone;
+            if (rightFoot == null)
+            {
+                rightFoot = BodyProportionBone(geometry, "rFoot");
+            }
+            Vector3 leftShoulderPoint;
+            Vector3 rightShoulderPoint;
+            Vector3 leftThighPoint;
+            Vector3 rightThighPoint;
+            Vector3 leftShinPoint;
+            Vector3 rightShinPoint;
+            Vector3 leftFootPoint;
+            Vector3 rightFootPoint;
+            if (!TryBodyShapeBoneLocalPoint(
+                    skin,
+                    leftShoulder,
+                    out leftShoulderPoint) ||
+                !TryBodyShapeBoneLocalPoint(
+                    skin,
+                    rightShoulder,
+                    out rightShoulderPoint) ||
+                !TryBodyShapeBoneLocalPoint(
+                    skin,
+                    leftThigh,
+                    out leftThighPoint) ||
+                !TryBodyShapeBoneLocalPoint(
+                    skin,
+                    rightThigh,
+                    out rightThighPoint) ||
+                !TryBodyShapeBoneLocalPoint(
+                    skin,
+                    leftShin,
+                    out leftShinPoint) ||
+                !TryBodyShapeBoneLocalPoint(
+                    skin,
+                    rightShin,
+                    out rightShinPoint) ||
+                !TryBodyShapeBoneLocalPoint(
+                    skin,
+                    leftFoot,
+                    out leftFootPoint) ||
+                !TryBodyShapeBoneLocalPoint(
+                    skin,
+                    rightFoot,
+                    out rightFootPoint))
+            {
+                return false;
+            }
+            Vector3 shoulderCenter =
+                (
+                    leftShoulderPoint +
+                    rightShoulderPoint) * 0.5f;
+            Vector3 thighCenter =
+                (
+                    leftThighPoint +
+                    rightThighPoint) * 0.5f;
+            Vector3 lateral =
+                leftShoulderPoint - rightShoulderPoint;
+            float shoulderSpan = lateral.magnitude;
+            if (!IsFinite(shoulderSpan) ||
+                shoulderSpan <= 0.000001f)
+            {
+                return false;
+            }
+            lateral /= shoulderSpan;
+            Vector3 up = shoulderCenter - thighCenter;
+            up -= lateral * Vector3.Dot(up, lateral);
+            float torsoLength = up.magnitude;
+            if (!IsFinite(torsoLength) ||
+                torsoLength <= 0.000001f)
+            {
+                return false;
+            }
+            up /= torsoLength;
+            Vector3 front =
+                Vector3.Cross(lateral, up);
+            float frontMagnitude = front.magnitude;
+            if (!IsFinite(frontMagnitude) ||
+                frontMagnitude <= 0.000001f)
+            {
+                return false;
+            }
+            front /= frontMagnitude;
+            Vector3 localForward =
+                skin.transform.InverseTransformDirection(
+                    skin.transform.forward);
+            if (Vector3.Dot(front, localForward) < 0f)
+            {
+                front = -front;
+            }
+            float localThighLength =
+                (
+                    Vector3.Distance(
+                        leftThighPoint,
+                        leftShinPoint) +
+                    Vector3.Distance(
+                        rightThighPoint,
+                        rightShinPoint)) * 0.5f;
+            float localShinLength =
+                (
+                    Vector3.Distance(
+                        leftShinPoint,
+                        leftFootPoint) +
+                    Vector3.Distance(
+                        rightShinPoint,
+                        rightFootPoint)) * 0.5f;
+            float localStructuralLength =
+                torsoLength +
+                localThighLength +
+                localShinLength;
+            float structuralLength =
+                skin.transform.TransformVector(
+                    up * torsoLength).magnitude +
+                (
+                    skin.transform.TransformVector(
+                        leftShinPoint -
+                        leftThighPoint).magnitude +
+                    skin.transform.TransformVector(
+                        rightShinPoint -
+                        rightThighPoint).magnitude) * 0.5f +
+                (
+                    skin.transform.TransformVector(
+                        leftFootPoint -
+                        leftShinPoint).magnitude +
+                    skin.transform.TransformVector(
+                        rightFootPoint -
+                        rightShinPoint).magnitude) * 0.5f;
+            Vector3 kneeCenter =
+                (
+                    leftShinPoint +
+                    rightShinPoint) * 0.5f;
+            float hipToKnee =
+                Vector3.Dot(
+                    thighCenter - kneeCenter,
+                    up);
+            if (!IsFinite(structuralLength) ||
+                structuralLength < 0.25f ||
+                structuralLength > 4.0f ||
+                !IsFinite(localStructuralLength) ||
+                localStructuralLength <= 0.000001f ||
+                !IsFinite(hipToKnee) ||
+                hipToKnee < 0.05f ||
+                hipToKnee >= localStructuralLength)
+            {
+                return false;
+            }
+            BodyShapeFrame measured =
+                new BodyShapeFrame();
+            measured.Origin = thighCenter;
+            measured.Lateral = lateral;
+            measured.Up = up;
+            measured.Front = front;
+            measured.LeftThigh = leftThighPoint;
+            measured.RightThigh = rightThighPoint;
+            measured.LeftShin = leftShinPoint;
+            measured.RightShin = rightShinPoint;
+            measured.TorsoLength = torsoLength;
+            measured.HipToKnee = hipToKnee;
+            measured.StructuralLength = structuralLength;
+            measured.ShoulderSpan = shoulderSpan;
+            frame = measured;
+            return true;
+        }
+
+        private static bool TryBodyShapeMesh(
+            DAZCharacterSelector geometry,
+            out DAZSkinV2 skin,
+            out Vector3[] vertices,
+            out int[] triangles)
+        {
+            skin = null;
+            vertices = null;
+            triangles = null;
+            if (geometry == null ||
+                geometry.selectedCharacter == null ||
+                !geometry.selectedCharacter.ready)
+            {
+                return false;
+            }
+            skin = geometry.selectedCharacter.skin;
+            if (skin == null ||
+                !skin.wasInit ||
+                skin.dazMesh == null)
+            {
+                return false;
+            }
+            vertices = skin.dazMesh.morphedBaseVertices;
+            triangles = skin.dazMesh.baseTriangles;
+            return
+                vertices != null &&
+                vertices.Length >= 1000 &&
+                triangles != null &&
+                triangles.Length >= 3 &&
+                triangles.Length % 3 == 0;
+        }
+
+        private static void MixBodyShapeChecksum(
+            ref ulong first,
+            ref ulong second,
+            int value)
+        {
+            unchecked
+            {
+                uint encoded = (uint)value;
+                first ^= encoded;
+                first *= 1099511628211UL;
+                second +=
+                    encoded +
+                    0x9e3779b9UL +
+                    (second << 6) +
+                    (second >> 2);
+            }
+        }
+
+        private static void MixBodyShapeVector(
+            ref ulong first,
+            ref ulong second,
+            Vector3 value)
+        {
+            MixBodyShapeChecksum(
+                ref first,
+                ref second,
+                Mathf.RoundToInt(value.x * 1000000f));
+            MixBodyShapeChecksum(
+                ref first,
+                ref second,
+                Mathf.RoundToInt(value.y * 1000000f));
+            MixBodyShapeChecksum(
+                ref first,
+                ref second,
+                Mathf.RoundToInt(value.z * 1000000f));
+        }
+
+        private static bool TryBodyShapeMeshChecksum(
+            DAZCharacterSelector geometry,
+            out string checksum)
+        {
+            checksum = "";
+            DAZSkinV2 skin;
+            Vector3[] vertices;
+            int[] triangles;
+            if (!TryBodyShapeMesh(
+                    geometry,
+                    out skin,
+                    out vertices,
+                    out triangles))
+            {
+                return false;
+            }
+            ulong first = 1469598103934665603UL;
+            ulong second = 7809847782465536322UL;
+            MixBodyShapeChecksum(
+                ref first,
+                ref second,
+                vertices.Length);
+            MixBodyShapeChecksum(
+                ref first,
+                ref second,
+                triangles.Length);
+            BodyShapeFrame frame;
+            if (!TryBuildBodyShapeFrame(
+                    geometry,
+                    skin,
+                    out frame))
+            {
+                return false;
+            }
+            MixBodyShapeVector(
+                ref first,
+                ref second,
+                frame.Origin);
+            MixBodyShapeVector(
+                ref first,
+                ref second,
+                frame.Lateral);
+            MixBodyShapeVector(
+                ref first,
+                ref second,
+                frame.Up);
+            MixBodyShapeVector(
+                ref first,
+                ref second,
+                frame.Front);
+            MixBodyShapeChecksum(
+                ref first,
+                ref second,
+                Mathf.RoundToInt(
+                    frame.TorsoLength * 1000000f));
+            MixBodyShapeChecksum(
+                ref first,
+                ref second,
+                Mathf.RoundToInt(
+                    frame.HipToKnee * 1000000f));
+            MixBodyShapeChecksum(
+                ref first,
+                ref second,
+                Mathf.RoundToInt(
+                    frame.StructuralLength * 1000000f));
+            int index;
+            for (index = 0; index < vertices.Length; index++)
+            {
+                Vector3 point = vertices[index];
+                if (!IsFiniteBodyProportionPoint(point))
+                {
+                    return false;
+                }
+                MixBodyShapeChecksum(
+                    ref first,
+                    ref second,
+                    Mathf.RoundToInt(point.x * 1000000f));
+                MixBodyShapeChecksum(
+                    ref first,
+                    ref second,
+                    Mathf.RoundToInt(point.y * 1000000f));
+                MixBodyShapeChecksum(
+                    ref first,
+                    ref second,
+                    Mathf.RoundToInt(point.z * 1000000f));
+            }
+            checksum =
+                first.ToString("x16") +
+                second.ToString("x16");
+            return true;
+        }
+
+        private static bool TryBodyShapeBoneLocalPoint(
+            DAZSkinV2 skin,
+            DAZBone bone,
+            out Vector3 point)
+        {
+            point = Vector3.zero;
+            if (skin == null || bone == null)
+            {
+                return false;
+            }
+            point =
+                skin.transform.InverseTransformPoint(
+                    bone.morphedWorldPosition);
+            return IsFiniteBodyProportionPoint(point);
+        }
+
+        private static bool TryBodyShapeEdgeIntersection(
+            Vector3 first,
+            Vector3 second,
+            BodyShapeFrame frame,
+            float planeOffset,
+            out Vector2 point)
+        {
+            point = Vector2.zero;
+            const float epsilon = 0.0000001f;
+            if (frame == null)
+            {
+                return false;
+            }
+            float firstDistance =
+                Vector3.Dot(
+                    first - frame.Origin,
+                    frame.Up) -
+                planeOffset;
+            float secondDistance =
+                Vector3.Dot(
+                    second - frame.Origin,
+                    frame.Up) -
+                planeOffset;
+            if (
+                (
+                    firstDistance > epsilon &&
+                    secondDistance > epsilon) ||
+                (
+                    firstDistance < -epsilon &&
+                    secondDistance < -epsilon) ||
+                (
+                    Mathf.Abs(firstDistance) <= epsilon &&
+                    Mathf.Abs(secondDistance) <= epsilon))
+            {
+                return false;
+            }
+            float denominator =
+                firstDistance - secondDistance;
+            if (Mathf.Abs(denominator) <= epsilon)
+            {
+                return false;
+            }
+            float amount =
+                Mathf.Clamp01(firstDistance / denominator);
+            Vector3 intersection =
+                Vector3.Lerp(first, second, amount) -
+                frame.Origin;
+            point = new Vector2(
+                Vector3.Dot(
+                    intersection,
+                    frame.Lateral),
+                Vector3.Dot(
+                    intersection,
+                    frame.Front));
+            return IsFinite(point.x) && IsFinite(point.y);
+        }
+
+        private static int AddUniqueBodyShapeIntersection(
+            Vector2[] points,
+            int count,
+            Vector2 point)
+        {
+            float toleranceSquared =
+                BodyShapeLoopJoinTolerance *
+                BodyShapeLoopJoinTolerance;
+            int index;
+            for (index = 0; index < count; index++)
+            {
+                if ((points[index] - point).sqrMagnitude <=
+                    toleranceSquared)
+                {
+                    return count;
+                }
+            }
+            if (count < points.Length)
+            {
+                points[count] = point;
+                return count + 1;
+            }
+            return count;
+        }
+
+        private static List<BodyShapeSegment>
+            BuildBodyShapeSegments(
+                Vector3[] vertices,
+                int[] triangles,
+                BodyShapeFrame frame,
+                float planeOffset)
+        {
+            List<BodyShapeSegment> segments =
+                new List<BodyShapeSegment>();
+            if (vertices == null || triangles == null)
+            {
+                return segments;
+            }
+            Vector2[] intersections = new Vector2[3];
+            float adjustedOffset =
+                planeOffset +
+                (
+                    frame == null
+                    ? 0f
+                    : frame.StructuralLength *
+                        0.0000001f *
+                        0.61803398875f);
+            float minimumLengthSquared =
+                BodyShapeLoopJoinTolerance *
+                BodyShapeLoopJoinTolerance * 0.01f;
+            int index;
+            for (index = 0;
+                 index + 2 < triangles.Length;
+                 index += 3)
+            {
+                int firstIndex = triangles[index];
+                int secondIndex = triangles[index + 1];
+                int thirdIndex = triangles[index + 2];
+                if (firstIndex < 0 ||
+                    secondIndex < 0 ||
+                    thirdIndex < 0 ||
+                    firstIndex >= vertices.Length ||
+                    secondIndex >= vertices.Length ||
+                    thirdIndex >= vertices.Length)
+                {
+                    continue;
+                }
+                Vector3 first = vertices[firstIndex];
+                Vector3 second = vertices[secondIndex];
+                Vector3 third = vertices[thirdIndex];
+                if (!IsFiniteBodyProportionPoint(first) ||
+                    !IsFiniteBodyProportionPoint(second) ||
+                    !IsFiniteBodyProportionPoint(third))
+                {
+                    continue;
+                }
+                int count = 0;
+                Vector2 intersection;
+                if (TryBodyShapeEdgeIntersection(
+                        first,
+                        second,
+                        frame,
+                        adjustedOffset,
+                        out intersection))
+                {
+                    count = AddUniqueBodyShapeIntersection(
+                        intersections,
+                        count,
+                        intersection);
+                }
+                if (TryBodyShapeEdgeIntersection(
+                        second,
+                        third,
+                        frame,
+                        adjustedOffset,
+                        out intersection))
+                {
+                    count = AddUniqueBodyShapeIntersection(
+                        intersections,
+                        count,
+                        intersection);
+                }
+                if (TryBodyShapeEdgeIntersection(
+                        third,
+                        first,
+                        frame,
+                        adjustedOffset,
+                        out intersection))
+                {
+                    count = AddUniqueBodyShapeIntersection(
+                        intersections,
+                        count,
+                        intersection);
+                }
+                if (count < 2)
+                {
+                    continue;
+                }
+                int firstPoint = 0;
+                int secondPoint = 1;
+                if (count == 3)
+                {
+                    float firstSecond =
+                        (
+                            intersections[0] -
+                            intersections[1]).sqrMagnitude;
+                    float firstThird =
+                        (
+                            intersections[0] -
+                            intersections[2]).sqrMagnitude;
+                    float secondThird =
+                        (
+                            intersections[1] -
+                            intersections[2]).sqrMagnitude;
+                    if (firstThird >= firstSecond &&
+                        firstThird >= secondThird)
+                    {
+                        secondPoint = 2;
+                    }
+                    else if (secondThird >= firstSecond)
+                    {
+                        firstPoint = 1;
+                        secondPoint = 2;
+                    }
+                }
+                if (
+                    (
+                        intersections[firstPoint] -
+                        intersections[secondPoint]).sqrMagnitude <=
+                    minimumLengthSquared)
+                {
+                    continue;
+                }
+                BodyShapeSegment segment =
+                    new BodyShapeSegment();
+                segment.First = intersections[firstPoint];
+                segment.Second = intersections[secondPoint];
+                segments.Add(segment);
+            }
+            return segments;
+        }
+
+        private static BodyShapeLoop CreateBodyShapeLoop(
+            List<Vector2> points,
+            float scaleX,
+            float scaleZ)
+        {
+            if (points == null || points.Count < 3)
+            {
+                return null;
+            }
+            BodyShapeLoop loop = new BodyShapeLoop();
+            loop.Points = points;
+            loop.MinimumX = float.MaxValue;
+            loop.MaximumX = float.MinValue;
+            loop.MinimumZ = float.MaxValue;
+            loop.MaximumZ = float.MinValue;
+            float signedArea = 0f;
+            float perimeter = 0f;
+            Vector2 centroid = Vector2.zero;
+            int index;
+            for (index = 0; index < points.Count; index++)
+            {
+                Vector2 current = points[index];
+                Vector2 next =
+                    points[(index + 1) % points.Count];
+                loop.MinimumX =
+                    Mathf.Min(loop.MinimumX, current.x);
+                loop.MaximumX =
+                    Mathf.Max(loop.MaximumX, current.x);
+                loop.MinimumZ =
+                    Mathf.Min(loop.MinimumZ, current.y);
+                loop.MaximumZ =
+                    Mathf.Max(loop.MaximumZ, current.y);
+                float dx = (next.x - current.x) * scaleX;
+                float dz = (next.y - current.y) * scaleZ;
+                perimeter += Mathf.Sqrt(dx * dx + dz * dz);
+                signedArea +=
+                    current.x * next.y -
+                    next.x * current.y;
+                centroid += current;
+            }
+            loop.Perimeter = perimeter;
+            loop.Area =
+                Mathf.Abs(signedArea) *
+                0.5f * scaleX * scaleZ;
+            loop.Centroid = centroid / points.Count;
+            if (!IsFinite(loop.Perimeter) ||
+                !IsFinite(loop.Area) ||
+                loop.Perimeter <= 0.001f ||
+                loop.Area <= 0.000001f)
+            {
+                return null;
+            }
+            return loop;
+        }
+
+        private static List<BodyShapeLoop> BuildBodyShapeLoops(
+            Vector3[] vertices,
+            int[] triangles,
+            BodyShapeFrame frame,
+            float planeOffset,
+            float scaleX,
+            float scaleZ)
+        {
+            List<BodyShapeSegment> segments =
+                BuildBodyShapeSegments(
+                    vertices,
+                    triangles,
+                    frame,
+                    planeOffset);
+            List<BodyShapeLoop> loops =
+                new List<BodyShapeLoop>();
+            float toleranceSquared =
+                BodyShapeLoopJoinTolerance *
+                BodyShapeLoopJoinTolerance;
+            int segmentIndex;
+            for (segmentIndex = 0;
+                 segmentIndex < segments.Count;
+                 segmentIndex++)
+            {
+                BodyShapeSegment starting =
+                    segments[segmentIndex];
+                if (starting.Used)
+                {
+                    continue;
+                }
+                starting.Used = true;
+                List<Vector2> points = new List<Vector2>();
+                points.Add(starting.First);
+                points.Add(starting.Second);
+                bool closed = false;
+                int guard = 0;
+                while (guard <= segments.Count)
+                {
+                    guard++;
+                    Vector2 end = points[points.Count - 1];
+                    if (points.Count >= 4 &&
+                        (
+                            end -
+                            points[0]).sqrMagnitude <=
+                        toleranceSquared)
+                    {
+                        points.RemoveAt(points.Count - 1);
+                        closed = true;
+                        break;
+                    }
+                    int bestIndex = -1;
+                    bool bestUsesFirst = true;
+                    float bestDistance = float.MaxValue;
+                    int candidateIndex;
+                    for (candidateIndex = 0;
+                         candidateIndex < segments.Count;
+                         candidateIndex++)
+                    {
+                        BodyShapeSegment candidate =
+                            segments[candidateIndex];
+                        if (candidate.Used)
+                        {
+                            continue;
+                        }
+                        float firstDistance =
+                            (
+                                end -
+                                candidate.First).sqrMagnitude;
+                        if (firstDistance < bestDistance)
+                        {
+                            bestDistance = firstDistance;
+                            bestIndex = candidateIndex;
+                            bestUsesFirst = true;
+                        }
+                        float secondDistance =
+                            (
+                                end -
+                                candidate.Second).sqrMagnitude;
+                        if (secondDistance < bestDistance)
+                        {
+                            bestDistance = secondDistance;
+                            bestIndex = candidateIndex;
+                            bestUsesFirst = false;
+                        }
+                    }
+                    if (bestIndex < 0 ||
+                        bestDistance > toleranceSquared)
+                    {
+                        break;
+                    }
+                    BodyShapeSegment best = segments[bestIndex];
+                    best.Used = true;
+                    points.Add(
+                        bestUsesFirst
+                        ? best.Second
+                        : best.First);
+                }
+                if (!closed)
+                {
+                    continue;
+                }
+                BodyShapeLoop loop =
+                    CreateBodyShapeLoop(
+                        points,
+                        scaleX,
+                        scaleZ);
+                if (loop != null)
+                {
+                    loops.Add(loop);
+                }
+            }
+            return loops;
+        }
+
+        private static bool BodyShapeLoopContains(
+            BodyShapeLoop loop,
+            Vector2 target)
+        {
+            if (loop == null ||
+                loop.Points == null ||
+                loop.Points.Count < 3 ||
+                target.x < loop.MinimumX ||
+                target.x > loop.MaximumX ||
+                target.y < loop.MinimumZ ||
+                target.y > loop.MaximumZ)
+            {
+                return false;
+            }
+            bool inside = false;
+            int previous = loop.Points.Count - 1;
+            int index;
+            for (index = 0;
+                 index < loop.Points.Count;
+                 index++)
+            {
+                Vector2 currentPoint = loop.Points[index];
+                Vector2 previousPoint = loop.Points[previous];
+                bool crosses =
+                    (
+                        currentPoint.y > target.y) !=
+                    (
+                        previousPoint.y > target.y);
+                if (crosses)
+                {
+                    float crossingX =
+                        (
+                            previousPoint.x -
+                            currentPoint.x) *
+                        (
+                            target.y -
+                            currentPoint.y) /
+                        (
+                            previousPoint.y -
+                            currentPoint.y) +
+                        currentPoint.x;
+                    if (target.x < crossingX)
+                    {
+                        inside = !inside;
+                    }
+                }
+                previous = index;
+            }
+            return inside;
+        }
+
+        private static BodyShapeLoop SelectBodyShapeLoop(
+            List<BodyShapeLoop> loops,
+            Vector2 target,
+            BodyShapeLoop excluded)
+        {
+            BodyShapeLoop bestContaining = null;
+            BodyShapeLoop bestNearby = null;
+            float bestNearbyDistance = float.MaxValue;
+            int index;
+            for (index = 0; index < loops.Count; index++)
+            {
+                BodyShapeLoop loop = loops[index];
+                if (loop == null ||
+                    object.ReferenceEquals(loop, excluded))
+                {
+                    continue;
+                }
+                if (BodyShapeLoopContains(loop, target))
+                {
+                    if (bestContaining == null ||
+                        loop.Area > bestContaining.Area)
+                    {
+                        bestContaining = loop;
+                    }
+                    continue;
+                }
+                float distance =
+                    (
+                        loop.Centroid -
+                        target).sqrMagnitude;
+                if (distance < bestNearbyDistance)
+                {
+                    bestNearbyDistance = distance;
+                    bestNearby = loop;
+                }
+            }
+            return bestContaining ?? bestNearby;
+        }
+
+        private static bool TryBodyShapeSectionFromLoops(
+            List<BodyShapeLoop> loops,
+            Vector2 target,
+            BodyShapeLoop excluded,
+            float scaleX,
+            float scaleZ,
+            out BodyShapeSection section,
+            out BodyShapeLoop selectedLoop)
+        {
+            section = null;
+            selectedLoop =
+                SelectBodyShapeLoop(loops, target, excluded);
+            if (selectedLoop == null)
+            {
+                return false;
+            }
+            BodyShapeSection measured =
+                new BodyShapeSection();
+            measured.Girth = selectedLoop.Perimeter;
+            measured.Width =
+                (
+                    selectedLoop.MaximumX -
+                    selectedLoop.MinimumX) * scaleX;
+            measured.Depth =
+                (
+                    selectedLoop.MaximumZ -
+                    selectedLoop.MinimumZ) * scaleZ;
+            measured.MinimumX =
+                selectedLoop.MinimumX * scaleX;
+            measured.MaximumX =
+                selectedLoop.MaximumX * scaleX;
+            measured.MinimumZ =
+                selectedLoop.MinimumZ * scaleZ;
+            measured.MaximumZ =
+                selectedLoop.MaximumZ * scaleZ;
+            if (!IsFinite(measured.Girth) ||
+                !IsFinite(measured.Width) ||
+                !IsFinite(measured.Depth) ||
+                measured.Girth <= 0.001f ||
+                measured.Width <= 0.001f ||
+                measured.Depth <= 0.001f)
+            {
+                selectedLoop = null;
+                return false;
+            }
+            section = measured;
+            return true;
+        }
+
+        private static bool TryBodyShapeSection(
+            Vector3[] vertices,
+            int[] triangles,
+            BodyShapeFrame frame,
+            float planeOffset,
+            Vector2 target,
+            float scaleX,
+            float scaleZ,
+            out BodyShapeSection section)
+        {
+            List<BodyShapeLoop> loops =
+                BuildBodyShapeLoops(
+                    vertices,
+                    triangles,
+                    frame,
+                    planeOffset,
+                    scaleX,
+                    scaleZ);
+            BodyShapeLoop best = null;
+            float maximumWidth =
+                Mathf.Max(
+                    frame.ShoulderSpan * scaleX * 1.65f,
+                    frame.StructuralLength * 0.28f);
+            int loopIndex;
+            for (loopIndex = 0;
+                 loopIndex < loops.Count;
+                 loopIndex++)
+            {
+                BodyShapeLoop loop = loops[loopIndex];
+                float width =
+                    (
+                        loop.MaximumX -
+                        loop.MinimumX) * scaleX;
+                float depth =
+                    (
+                        loop.MaximumZ -
+                        loop.MinimumZ) * scaleZ;
+                if (loop.MinimumX > 0f ||
+                    loop.MaximumX < 0f ||
+                    width <=
+                        frame.StructuralLength * 0.04f ||
+                    width >= maximumWidth ||
+                    depth <=
+                        frame.StructuralLength * 0.03f ||
+                    depth >=
+                        frame.StructuralLength * 0.40f ||
+                    loop.Perimeter <=
+                        frame.StructuralLength * 0.10f ||
+                    loop.Perimeter >=
+                        frame.StructuralLength * 2.0f)
+                {
+                    continue;
+                }
+                if (best == null ||
+                    Mathf.Abs(loop.Centroid.x) <
+                        Mathf.Abs(best.Centroid.x))
+                {
+                    best = loop;
+                }
+            }
+            if (best == null)
+            {
+                section = null;
+                return false;
+            }
+            List<BodyShapeLoop> selectedLoops =
+                new List<BodyShapeLoop>();
+            selectedLoops.Add(best);
+            BodyShapeLoop selected;
+            return TryBodyShapeSectionFromLoops(
+                selectedLoops,
+                target,
+                null,
+                scaleX,
+                scaleZ,
+                out section,
+                out selected);
+        }
+
+        private static BodyShapeLoop SelectBodyShapeThighLoop(
+            List<BodyShapeLoop> loops,
+            bool left,
+            BodyShapeFrame frame,
+            float scaleX,
+            float scaleZ)
+        {
+            BodyShapeLoop best = null;
+            int index;
+            for (index = 0; index < loops.Count; index++)
+            {
+                BodyShapeLoop loop = loops[index];
+                float width =
+                    (
+                        loop.MaximumX -
+                        loop.MinimumX) * scaleX;
+                float depth =
+                    (
+                        loop.MaximumZ -
+                        loop.MinimumZ) * scaleZ;
+                if (
+                    (
+                        left &&
+                        loop.Centroid.x <= 0f) ||
+                    (
+                        !left &&
+                        loop.Centroid.x >= 0f) ||
+                    width <=
+                        frame.StructuralLength * 0.025f ||
+                    width >=
+                        frame.StructuralLength * 0.25f ||
+                    depth <=
+                        frame.StructuralLength * 0.025f ||
+                    depth >=
+                        frame.StructuralLength * 0.25f ||
+                    loop.Perimeter <=
+                        frame.StructuralLength * 0.10f ||
+                    loop.Perimeter >=
+                        frame.StructuralLength)
+                {
+                    continue;
+                }
+                if (best == null ||
+                    loop.Perimeter > best.Perimeter)
+                {
+                    best = loop;
+                }
+            }
+            return best;
+        }
+
+        private static bool TryScanBodyShapeTorsoSection(
+            Vector3[] vertices,
+            int[] triangles,
+            BodyShapeFrame frame,
+            float firstFraction,
+            float lastFraction,
+            int selectionKind,
+            float scaleX,
+            float scaleZ,
+            out float selectedFraction,
+            out BodyShapeSection selectedSection)
+        {
+            selectedFraction = 0f;
+            selectedSection = null;
+            float bestValue = 0f;
+            int count =
+                Mathf.RoundToInt(
+                    (
+                        lastFraction -
+                        firstFraction) / 0.01f);
+            int index;
+            for (index = 0; index <= count; index++)
+            {
+                float fraction =
+                    firstFraction + index * 0.01f;
+                BodyShapeSection candidate;
+                if (!TryBodyShapeSection(
+                        vertices,
+                        triangles,
+                        frame,
+                        fraction * frame.TorsoLength,
+                        Vector2.zero,
+                        scaleX,
+                        scaleZ,
+                        out candidate))
+                {
+                    continue;
+                }
+                float value =
+                    selectionKind == 0
+                    ? candidate.MaximumZ
+                    : selectionKind == 1
+                    ? candidate.Girth
+                    : candidate.MinimumZ;
+                bool better =
+                    selectedSection == null ||
+                    (
+                        selectionKind == 0 &&
+                        value > bestValue) ||
+                    (
+                        selectionKind != 0 &&
+                        value < bestValue);
+                if (better)
+                {
+                    bestValue = value;
+                    selectedFraction = fraction;
+                    selectedSection = candidate;
+                }
+            }
+            return selectedSection != null;
+        }
+
+        private static void AddBodyShapeMetric(
+            BodyShapeSignature signature,
+            string name,
+            string region,
+            float meters)
+        {
+            BodyShapeMetric metric = new BodyShapeMetric();
+            metric.Region = region;
+            metric.Meters = meters;
+            signature.Measurements[name] = metric;
+        }
+
+        private static void AddBilateralBodyShapeMetric(
+            BodyShapeSignature signature,
+            string name,
+            string region,
+            float leftMeters,
+            float rightMeters)
+        {
+            BodyShapeMetric metric = new BodyShapeMetric();
+            metric.Region = region;
+            metric.Bilateral = true;
+            metric.LeftMeters = leftMeters;
+            metric.RightMeters = rightMeters;
+            metric.Meters =
+                (leftMeters + rightMeters) * 0.5f;
+            signature.Measurements[name] = metric;
+        }
+
+        private static bool IsValidBodyShapeSignature(
+            BodyShapeSignature signature)
+        {
+            if (signature == null ||
+                signature.Measurements == null ||
+                signature.Measurements.Count !=
+                    BodyShapeMetricNames.Length ||
+                !IsFinite(signature.StructuralLength) ||
+                signature.StructuralLength < 0.25f ||
+                signature.StructuralLength > 4.0f ||
+                signature.BustTorsoFraction <
+                    BodyShapeBustFirstFraction ||
+                signature.BustTorsoFraction >
+                    BodyShapeBustLastFraction ||
+                signature.UnderbustTorsoFraction < 0.50f ||
+                signature.UnderbustTorsoFraction > 0.64f ||
+                signature.WaistTorsoFraction <
+                    BodyShapeWaistFirstFraction ||
+                signature.WaistTorsoFraction >
+                    BodyShapeWaistLastFraction ||
+                signature.SeatTorsoFraction <
+                    BodyShapeSeatFirstFraction ||
+                signature.SeatTorsoFraction >
+                    BodyShapeSeatLastFraction ||
+                signature.UpperThighLegFraction < 0.30f ||
+                signature.UpperThighLegFraction > 0.40f)
+            {
+                return false;
+            }
+            int index;
+            for (index = 0;
+                 index < BodyShapeMetricNames.Length;
+                 index++)
+            {
+                string name = BodyShapeMetricNames[index];
+                BodyShapeMetric metric = null;
+                if (!signature.Measurements.TryGetValue(
+                        name,
+                        out metric) ||
+                    metric == null ||
+                    !IsFinite(metric.Meters))
+                {
+                    return false;
+                }
+                bool signed =
+                    name == "breastGirthExcess" ||
+                    name == "breastDepthExcess" ||
+                    name == "breastProjection" ||
+                    name == "gluteProjection";
+                if (
+                    (
+                        signed &&
+                        Mathf.Abs(metric.Meters) >=
+                            signature.StructuralLength) ||
+                    (
+                        !signed &&
+                        (
+                            metric.Meters <= 0.000001f ||
+                            metric.Meters >=
+                                signature.StructuralLength * 4.0f)))
+                {
+                    return false;
+                }
+                if (metric.Bilateral &&
+                    (
+                        !IsFinite(metric.LeftMeters) ||
+                        !IsFinite(metric.RightMeters) ||
+                        metric.LeftMeters <= 0.000001f ||
+                        metric.RightMeters <= 0.000001f))
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        private static bool TryBuildBodyShapeSignature(
+            DAZCharacterSelector geometry,
+            Vector3[] verticesOverride,
+            out BodyShapeSignature signature)
+        {
+            signature = null;
+            DAZSkinV2 skin;
+            Vector3[] currentVertices;
+            int[] triangles;
+            if (!TryBodyShapeMesh(
+                    geometry,
+                    out skin,
+                    out currentVertices,
+                    out triangles))
+            {
+                return false;
+            }
+            Vector3[] vertices =
+                verticesOverride ?? currentVertices;
+            if (vertices == null ||
+                vertices.Length != currentVertices.Length)
+            {
+                return false;
+            }
+            BodyShapeFrame frame;
+            if (!TryBuildBodyShapeFrame(
+                    geometry,
+                    skin,
+                    out frame))
+            {
+                return false;
+            }
+
+            float scaleX =
+                skin.transform.TransformVector(
+                    frame.Lateral).magnitude;
+            float scaleZ =
+                skin.transform.TransformVector(
+                    frame.Front).magnitude;
+            if (!IsFinite(scaleX) ||
+                !IsFinite(scaleZ) ||
+                scaleX <= 0.000001f ||
+                scaleZ <= 0.000001f)
+            {
+                return false;
+            }
+
+            BodyShapeSection bust;
+            BodyShapeSection underbust;
+            BodyShapeSection waist;
+            BodyShapeSection seat;
+            float bustFraction;
+            float waistFraction;
+            float seatFraction;
+            if (!TryScanBodyShapeTorsoSection(
+                    vertices,
+                    triangles,
+                    frame,
+                    BodyShapeBustFirstFraction,
+                    BodyShapeBustLastFraction,
+                    0,
+                    scaleX,
+                    scaleZ,
+                    out bustFraction,
+                    out bust) ||
+                !TryScanBodyShapeTorsoSection(
+                    vertices,
+                    triangles,
+                    frame,
+                    BodyShapeWaistFirstFraction,
+                    BodyShapeWaistLastFraction,
+                    1,
+                    scaleX,
+                    scaleZ,
+                    out waistFraction,
+                    out waist) ||
+                !TryScanBodyShapeTorsoSection(
+                    vertices,
+                    triangles,
+                    frame,
+                    BodyShapeSeatFirstFraction,
+                    BodyShapeSeatLastFraction,
+                    2,
+                    scaleX,
+                    scaleZ,
+                    out seatFraction,
+                    out seat))
+            {
+                return false;
+            }
+            float underbustFraction =
+                Mathf.Max(
+                    0.50f,
+                    Mathf.Min(
+                        0.64f,
+                        bustFraction - 0.14f));
+            if (
+                !TryBodyShapeSection(
+                    vertices,
+                    triangles,
+                    frame,
+                    underbustFraction *
+                        frame.TorsoLength,
+                    Vector2.zero,
+                    scaleX,
+                    scaleZ,
+                    out underbust))
+            {
+                return false;
+            }
+
+            List<BodyShapeLoop> thighLoops =
+                BuildBodyShapeLoops(
+                    vertices,
+                    triangles,
+                    frame,
+                    -BodyShapeUpperThighLegFraction *
+                        frame.HipToKnee,
+                    scaleX,
+                    scaleZ);
+            BodyShapeSection leftThighSection;
+            BodyShapeSection rightThighSection;
+            BodyShapeLoop leftThighLoop =
+                SelectBodyShapeThighLoop(
+                    thighLoops,
+                    true,
+                    frame,
+                    scaleX,
+                    scaleZ);
+            BodyShapeLoop rightThighLoop =
+                SelectBodyShapeThighLoop(
+                    thighLoops,
+                    false,
+                    frame,
+                    scaleX,
+                    scaleZ);
+            List<BodyShapeLoop> leftThighLoops =
+                new List<BodyShapeLoop>();
+            List<BodyShapeLoop> rightThighLoops =
+                new List<BodyShapeLoop>();
+            if (leftThighLoop != null)
+            {
+                leftThighLoops.Add(leftThighLoop);
+            }
+            if (rightThighLoop != null)
+            {
+                rightThighLoops.Add(rightThighLoop);
+            }
+            if (!TryBodyShapeSectionFromLoops(
+                    leftThighLoops,
+                    Vector2.zero,
+                    null,
+                    scaleX,
+                    scaleZ,
+                    out leftThighSection,
+                    out leftThighLoop) ||
+                !TryBodyShapeSectionFromLoops(
+                    rightThighLoops,
+                    Vector2.zero,
+                    null,
+                    scaleX,
+                    scaleZ,
+                    out rightThighSection,
+                    out rightThighLoop))
+            {
+                return false;
+            }
+            float meanThighGirth =
+                (
+                    leftThighSection.Girth +
+                    rightThighSection.Girth) * 0.5f;
+            if (Mathf.Abs(
+                    leftThighSection.Girth -
+                    rightThighSection.Girth) /
+                    Mathf.Max(meanThighGirth, 0.00000001f) >
+                0.35f)
+            {
+                return false;
+            }
+
+            BodyShapeSignature measured =
+                new BodyShapeSignature();
+            measured.StructuralLength =
+                frame.StructuralLength;
+            measured.BustTorsoFraction = bustFraction;
+            measured.UnderbustTorsoFraction =
+                underbustFraction;
+            measured.WaistTorsoFraction =
+                waistFraction;
+            measured.SeatTorsoFraction = seatFraction;
+            measured.UpperThighLegFraction =
+                BodyShapeUpperThighLegFraction;
+            measured.Measurements =
+                new Dictionary<string, BodyShapeMetric>();
+            AddBodyShapeMetric(
+                measured,
+                "bustGirth",
+                "breasts",
+                bust.Girth);
+            AddBodyShapeMetric(
+                measured,
+                "bustWidth",
+                "breasts",
+                bust.Width);
+            AddBodyShapeMetric(
+                measured,
+                "bustDepth",
+                "breasts",
+                bust.Depth);
+            AddBodyShapeMetric(
+                measured,
+                "underbustGirth",
+                "breasts",
+                underbust.Girth);
+            AddBodyShapeMetric(
+                measured,
+                "underbustWidth",
+                "breasts",
+                underbust.Width);
+            AddBodyShapeMetric(
+                measured,
+                "underbustDepth",
+                "breasts",
+                underbust.Depth);
+            AddBodyShapeMetric(
+                measured,
+                "breastGirthExcess",
+                "breasts",
+                bust.Girth - underbust.Girth);
+            AddBodyShapeMetric(
+                measured,
+                "breastDepthExcess",
+                "breasts",
+                bust.Depth - underbust.Depth);
+            AddBodyShapeMetric(
+                measured,
+                "breastProjection",
+                "breasts",
+                bust.MaximumZ - underbust.MaximumZ);
+            AddBodyShapeMetric(
+                measured,
+                "waistGirth",
+                "waist",
+                waist.Girth);
+            AddBodyShapeMetric(
+                measured,
+                "waistWidth",
+                "waist",
+                waist.Width);
+            AddBodyShapeMetric(
+                measured,
+                "waistDepth",
+                "waist",
+                waist.Depth);
+            AddBodyShapeMetric(
+                measured,
+                "seatGirth",
+                "hips",
+                seat.Girth);
+            AddBodyShapeMetric(
+                measured,
+                "seatWidth",
+                "hips",
+                seat.Width);
+            AddBodyShapeMetric(
+                measured,
+                "seatDepth",
+                "glutes",
+                seat.Depth);
+            AddBodyShapeMetric(
+                measured,
+                "gluteProjection",
+                "glutes",
+                waist.MinimumZ - seat.MinimumZ);
+            AddBilateralBodyShapeMetric(
+                measured,
+                "upperThighGirth",
+                "thighs",
+                leftThighSection.Girth,
+                rightThighSection.Girth);
+            AddBilateralBodyShapeMetric(
+                measured,
+                "upperThighWidth",
+                "thighs",
+                leftThighSection.Width,
+                rightThighSection.Width);
+            AddBilateralBodyShapeMetric(
+                measured,
+                "upperThighDepth",
+                "thighs",
+                leftThighSection.Depth,
+                rightThighSection.Depth);
+            if (!IsValidBodyShapeSignature(measured))
+            {
+                return false;
+            }
+            signature = measured;
+            return true;
+        }
+
+        private static BodyShapeSignature BuildBodyShapeWorkResult(
+            BodyShapeSignatureWork work)
+        {
+            if (work == null ||
+                work.Frame == null ||
+                work.Bust == null ||
+                work.Underbust == null ||
+                work.Waist == null ||
+                work.Seat == null ||
+                work.LeftThigh == null ||
+                work.RightThigh == null)
+            {
+                return null;
+            }
+            BodyShapeSignature measured =
+                new BodyShapeSignature();
+            measured.StructuralLength =
+                work.Frame.StructuralLength;
+            measured.BustTorsoFraction =
+                work.BustFraction;
+            measured.UnderbustTorsoFraction =
+                work.UnderbustFraction;
+            measured.WaistTorsoFraction =
+                work.WaistFraction;
+            measured.SeatTorsoFraction =
+                work.SeatFraction;
+            measured.UpperThighLegFraction =
+                BodyShapeUpperThighLegFraction;
+            measured.Measurements =
+                new Dictionary<string, BodyShapeMetric>();
+            AddBodyShapeMetric(
+                measured,
+                "bustGirth",
+                "breasts",
+                work.Bust.Girth);
+            AddBodyShapeMetric(
+                measured,
+                "bustWidth",
+                "breasts",
+                work.Bust.Width);
+            AddBodyShapeMetric(
+                measured,
+                "bustDepth",
+                "breasts",
+                work.Bust.Depth);
+            AddBodyShapeMetric(
+                measured,
+                "underbustGirth",
+                "breasts",
+                work.Underbust.Girth);
+            AddBodyShapeMetric(
+                measured,
+                "underbustWidth",
+                "breasts",
+                work.Underbust.Width);
+            AddBodyShapeMetric(
+                measured,
+                "underbustDepth",
+                "breasts",
+                work.Underbust.Depth);
+            AddBodyShapeMetric(
+                measured,
+                "breastGirthExcess",
+                "breasts",
+                work.Bust.Girth -
+                    work.Underbust.Girth);
+            AddBodyShapeMetric(
+                measured,
+                "breastDepthExcess",
+                "breasts",
+                work.Bust.Depth -
+                    work.Underbust.Depth);
+            AddBodyShapeMetric(
+                measured,
+                "breastProjection",
+                "breasts",
+                work.Bust.MaximumZ -
+                    work.Underbust.MaximumZ);
+            AddBodyShapeMetric(
+                measured,
+                "waistGirth",
+                "waist",
+                work.Waist.Girth);
+            AddBodyShapeMetric(
+                measured,
+                "waistWidth",
+                "waist",
+                work.Waist.Width);
+            AddBodyShapeMetric(
+                measured,
+                "waistDepth",
+                "waist",
+                work.Waist.Depth);
+            AddBodyShapeMetric(
+                measured,
+                "seatGirth",
+                "hips",
+                work.Seat.Girth);
+            AddBodyShapeMetric(
+                measured,
+                "seatWidth",
+                "hips",
+                work.Seat.Width);
+            AddBodyShapeMetric(
+                measured,
+                "seatDepth",
+                "glutes",
+                work.Seat.Depth);
+            AddBodyShapeMetric(
+                measured,
+                "gluteProjection",
+                "glutes",
+                work.Waist.MinimumZ -
+                    work.Seat.MinimumZ);
+            AddBilateralBodyShapeMetric(
+                measured,
+                "upperThighGirth",
+                "thighs",
+                work.LeftThigh.Girth,
+                work.RightThigh.Girth);
+            AddBilateralBodyShapeMetric(
+                measured,
+                "upperThighWidth",
+                "thighs",
+                work.LeftThigh.Width,
+                work.RightThigh.Width);
+            AddBilateralBodyShapeMetric(
+                measured,
+                "upperThighDepth",
+                "thighs",
+                work.LeftThigh.Depth,
+                work.RightThigh.Depth);
+            return
+                IsValidBodyShapeSignature(measured)
+                ? measured
+                : null;
+        }
+
+        private static BodyShapeSignatureWork
+            CreateBodyShapeSignatureWork(
+                Vector3[] vertices,
+                int[] triangles,
+                BodyShapeFrame frame,
+                float scaleX,
+                float scaleZ)
+        {
+            if (vertices == null ||
+                triangles == null ||
+                frame == null ||
+                !IsFinite(scaleX) ||
+                !IsFinite(scaleZ) ||
+                scaleX <= 0.000001f ||
+                scaleZ <= 0.000001f)
+            {
+                return null;
+            }
+            BodyShapeSignatureWork work =
+                new BodyShapeSignatureWork();
+            work.Vertices = vertices;
+            work.Triangles = triangles;
+            work.Frame = frame;
+            work.ScaleX = scaleX;
+            work.ScaleZ = scaleZ;
+            return work;
+        }
+
+        private static void FailBodyShapeSignatureWork(
+            BodyShapeSignatureWork work)
+        {
+            work.Failed = true;
+            work.Complete = true;
+            work.Result = null;
+        }
+
+        private static void StepBodyShapeSignatureWork(
+            BodyShapeSignatureWork work)
+        {
+            if (work == null ||
+                work.Complete ||
+                work.Failed)
+            {
+                return;
+            }
+            if (work.Phase == 0)
+            {
+                int count =
+                    Mathf.RoundToInt(
+                        (
+                            BodyShapeBustLastFraction -
+                            BodyShapeBustFirstFraction) /
+                        0.01f);
+                if (work.ScanIndex <= count)
+                {
+                    float fraction =
+                        BodyShapeBustFirstFraction +
+                        work.ScanIndex * 0.01f;
+                    BodyShapeSection candidate;
+                    if (TryBodyShapeSection(
+                            work.Vertices,
+                            work.Triangles,
+                            work.Frame,
+                            fraction *
+                                work.Frame.TorsoLength,
+                            Vector2.zero,
+                            work.ScaleX,
+                            work.ScaleZ,
+                            out candidate) &&
+                        (
+                            work.Bust == null ||
+                            candidate.MaximumZ >
+                                work.Bust.MaximumZ))
+                    {
+                        work.Bust = candidate;
+                        work.BustFraction = fraction;
+                    }
+                    work.ScanIndex++;
+                    return;
+                }
+                if (work.Bust == null)
+                {
+                    FailBodyShapeSignatureWork(work);
+                    return;
+                }
+                work.UnderbustFraction =
+                    Mathf.Max(
+                        0.50f,
+                        Mathf.Min(
+                            0.64f,
+                            work.BustFraction - 0.14f));
+                work.Phase = 1;
+                work.ScanIndex = 0;
+                return;
+            }
+            if (work.Phase == 1)
+            {
+                if (!TryBodyShapeSection(
+                        work.Vertices,
+                        work.Triangles,
+                        work.Frame,
+                        work.UnderbustFraction *
+                            work.Frame.TorsoLength,
+                        Vector2.zero,
+                        work.ScaleX,
+                        work.ScaleZ,
+                        out work.Underbust))
+                {
+                    FailBodyShapeSignatureWork(work);
+                    return;
+                }
+                work.Phase = 2;
+                work.ScanIndex = 0;
+                return;
+            }
+            if (work.Phase == 2)
+            {
+                int count =
+                    Mathf.RoundToInt(
+                        (
+                            BodyShapeWaistLastFraction -
+                            BodyShapeWaistFirstFraction) /
+                        0.01f);
+                if (work.ScanIndex <= count)
+                {
+                    float fraction =
+                        BodyShapeWaistFirstFraction +
+                        work.ScanIndex * 0.01f;
+                    BodyShapeSection candidate;
+                    if (TryBodyShapeSection(
+                            work.Vertices,
+                            work.Triangles,
+                            work.Frame,
+                            fraction *
+                                work.Frame.TorsoLength,
+                            Vector2.zero,
+                            work.ScaleX,
+                            work.ScaleZ,
+                            out candidate) &&
+                        (
+                            work.Waist == null ||
+                            candidate.Girth <
+                                work.Waist.Girth))
+                    {
+                        work.Waist = candidate;
+                        work.WaistFraction = fraction;
+                    }
+                    work.ScanIndex++;
+                    return;
+                }
+                if (work.Waist == null)
+                {
+                    FailBodyShapeSignatureWork(work);
+                    return;
+                }
+                work.Phase = 3;
+                work.ScanIndex = 0;
+                return;
+            }
+            if (work.Phase == 3)
+            {
+                int count =
+                    Mathf.RoundToInt(
+                        (
+                            BodyShapeSeatLastFraction -
+                            BodyShapeSeatFirstFraction) /
+                        0.01f);
+                if (work.ScanIndex <= count)
+                {
+                    float fraction =
+                        BodyShapeSeatFirstFraction +
+                        work.ScanIndex * 0.01f;
+                    BodyShapeSection candidate;
+                    if (TryBodyShapeSection(
+                            work.Vertices,
+                            work.Triangles,
+                            work.Frame,
+                            fraction *
+                                work.Frame.TorsoLength,
+                            Vector2.zero,
+                            work.ScaleX,
+                            work.ScaleZ,
+                            out candidate) &&
+                        (
+                            work.Seat == null ||
+                            candidate.MinimumZ <
+                                work.Seat.MinimumZ))
+                    {
+                        work.Seat = candidate;
+                        work.SeatFraction = fraction;
+                    }
+                    work.ScanIndex++;
+                    return;
+                }
+                if (work.Seat == null)
+                {
+                    FailBodyShapeSignatureWork(work);
+                    return;
+                }
+                work.Phase = 4;
+                work.ScanIndex = 0;
+                return;
+            }
+
+            List<BodyShapeLoop> thighLoops =
+                BuildBodyShapeLoops(
+                    work.Vertices,
+                    work.Triangles,
+                    work.Frame,
+                    -BodyShapeUpperThighLegFraction *
+                        work.Frame.HipToKnee,
+                    work.ScaleX,
+                    work.ScaleZ);
+            BodyShapeLoop leftLoop =
+                SelectBodyShapeThighLoop(
+                    thighLoops,
+                    true,
+                    work.Frame,
+                    work.ScaleX,
+                    work.ScaleZ);
+            BodyShapeLoop rightLoop =
+                SelectBodyShapeThighLoop(
+                    thighLoops,
+                    false,
+                    work.Frame,
+                    work.ScaleX,
+                    work.ScaleZ);
+            List<BodyShapeLoop> leftLoops =
+                new List<BodyShapeLoop>();
+            List<BodyShapeLoop> rightLoops =
+                new List<BodyShapeLoop>();
+            if (leftLoop != null)
+            {
+                leftLoops.Add(leftLoop);
+            }
+            if (rightLoop != null)
+            {
+                rightLoops.Add(rightLoop);
+            }
+            if (!TryBodyShapeSectionFromLoops(
+                    leftLoops,
+                    Vector2.zero,
+                    null,
+                    work.ScaleX,
+                    work.ScaleZ,
+                    out work.LeftThigh,
+                    out leftLoop) ||
+                !TryBodyShapeSectionFromLoops(
+                    rightLoops,
+                    Vector2.zero,
+                    null,
+                    work.ScaleX,
+                    work.ScaleZ,
+                    out work.RightThigh,
+                    out rightLoop))
+            {
+                FailBodyShapeSignatureWork(work);
+                return;
+            }
+            float meanGirth =
+                (
+                    work.LeftThigh.Girth +
+                    work.RightThigh.Girth) * 0.5f;
+            if (Mathf.Abs(
+                    work.LeftThigh.Girth -
+                    work.RightThigh.Girth) /
+                    Mathf.Max(meanGirth, 0.00000001f) >
+                0.35f)
+            {
+                FailBodyShapeSignatureWork(work);
+                return;
+            }
+            work.Result = BuildBodyShapeWorkResult(work);
+            work.Complete = true;
+            work.Failed = work.Result == null;
+        }
+
+        private static JSONClass BodyShapeMetricJson(
+            BodyShapeMetric metric,
+            float structuralLength)
+        {
+            JSONClass result = new JSONClass();
+            result["meters"].AsFloat = metric.Meters;
+            result["ratio"].AsFloat =
+                metric.Meters / structuralLength;
+            result["confidence"].AsFloat = 1.0f;
+            if (metric.Bilateral)
+            {
+                result["leftMeters"].AsFloat =
+                    metric.LeftMeters;
+                result["rightMeters"].AsFloat =
+                    metric.RightMeters;
+            }
+            return result;
+        }
+
+        private static JSONClass BodyShapeRegionJson()
+        {
+            JSONClass result = new JSONClass();
+            result["geometryConfidence"].AsFloat = 1.0f;
+            result["evidenceConfidence"].AsFloat = 1.0f;
+            result["confidence"].AsFloat = 1.0f;
+            return result;
+        }
+
+        private static JSONClass BuildBodyShapeJson(
+            BodyShapeSignature signature)
+        {
+            if (!IsValidBodyShapeSignature(signature))
+            {
+                return null;
+            }
+            JSONClass result = new JSONClass();
+            result["schema"].AsInt = 1;
+            result["space"] = "mhr-neutral-bind";
+            JSONClass normalizer = new JSONClass();
+            normalizer["id"] = "structural-length";
+            normalizer["meters"].AsFloat =
+                signature.StructuralLength;
+            result["normalizer"] = normalizer;
+            result["confidenceKind"] =
+                "heuristic-evidence-consistency";
+            JSONClass measurements = new JSONClass();
+            int index;
+            for (index = 0;
+                 index < BodyShapeMetricNames.Length;
+                 index++)
+            {
+                string name = BodyShapeMetricNames[index];
+                measurements[name] =
+                    BodyShapeMetricJson(
+                        signature.Measurements[name],
+                        signature.StructuralLength);
+            }
+            result["measurements"] = measurements;
+            JSONClass regions = new JSONClass();
+            regions["breasts"] = BodyShapeRegionJson();
+            regions["waist"] = BodyShapeRegionJson();
+            regions["hips"] = BodyShapeRegionJson();
+            regions["glutes"] = BodyShapeRegionJson();
+            regions["thighs"] = BodyShapeRegionJson();
+            result["regions"] = regions;
+            JSONClass planes = new JSONClass();
+            planes["bustTorsoFraction"].AsFloat =
+                signature.BustTorsoFraction;
+            planes["underbustTorsoFraction"].AsFloat =
+                signature.UnderbustTorsoFraction;
+            planes["waistTorsoFraction"].AsFloat =
+                signature.WaistTorsoFraction;
+            planes["seatTorsoFraction"].AsFloat =
+                signature.SeatTorsoFraction;
+            planes["upperThighLegFraction"].AsFloat =
+                signature.UpperThighLegFraction;
+            result["planes"] = planes;
+            result["overallConfidence"].AsFloat = 1.0f;
+            return result;
+        }
+
+        private static float BodyShapeCalibrationStep(
+            BodyProportionMorphEntry entry)
+        {
+            if (entry == null)
+            {
+                return 0f;
+            }
+            float positive =
+                entry.Maximum - entry.Value;
+            if (positive > 0.0001f)
+            {
+                return Mathf.Min(
+                    BodyShapeResponseStep,
+                    positive);
+            }
+            float negative =
+                entry.Minimum - entry.Value;
+            if (negative < -0.0001f)
+            {
+                return Mathf.Max(
+                    -BodyShapeResponseStep,
+                    negative);
+            }
+            return 0f;
+        }
+
+        private static void PopulateBodyShapeResponses(
+            DAZCharacterSelector geometry,
+            BodyShapeSignature baseline,
+            List<BodyProportionMorphEntry> entries)
+        {
+            if (!IsValidBodyShapeSignature(baseline) ||
+                entries == null)
+            {
+                return;
+            }
+            DAZSkinV2 skin;
+            Vector3[] vertices;
+            int[] triangles;
+            if (!TryBodyShapeMesh(
+                    geometry,
+                    out skin,
+                    out vertices,
+                    out triangles))
+            {
+                return;
+            }
+            Vector3[] scratch =
+                new Vector3[vertices.Length];
+            int entryIndex;
+            for (entryIndex = 0;
+                 entryIndex < entries.Count;
+                 entryIndex++)
+            {
+                BodyProportionMorphEntry entry =
+                    entries[entryIndex];
+                if (entry == null ||
+                    entry.Morph == null ||
+                    entry.FitKind != "shape" ||
+                    entry.Morph.hasBoneModificationFormulas)
+                {
+                    continue;
+                }
+                float step = BodyShapeCalibrationStep(entry);
+                if (Mathf.Abs(step) <= 0.0001f)
+                {
+                    continue;
+                }
+                try
+                {
+                    entry.Morph.LoadDeltas();
+                    DAZMorphVertex[] deltas =
+                        entry.Morph.deltas;
+                    if (deltas == null || deltas.Length == 0)
+                    {
+                        continue;
+                    }
+                    Array.Copy(
+                        vertices,
+                        scratch,
+                        vertices.Length);
+                    int applied = 0;
+                    int deltaIndex;
+                    for (deltaIndex = 0;
+                         deltaIndex < deltas.Length;
+                         deltaIndex++)
+                    {
+                        DAZMorphVertex delta =
+                            deltas[deltaIndex];
+                        if (delta.vertex < 0 ||
+                            delta.vertex >= scratch.Length ||
+                            !IsFiniteBodyProportionPoint(
+                                delta.delta))
+                        {
+                            continue;
+                        }
+                        scratch[delta.vertex] +=
+                            delta.delta * step;
+                        applied++;
+                    }
+                    if (applied == 0)
+                    {
+                        continue;
+                    }
+                    BodyShapeSignature sampled;
+                    if (!TryBuildBodyShapeSignature(
+                            geometry,
+                            scratch,
+                            out sampled))
+                    {
+                        continue;
+                    }
+                    Dictionary<string, float> responses =
+                        new Dictionary<string, float>();
+                    int metricIndex;
+                    for (metricIndex = 0;
+                         metricIndex <
+                            BodyShapeMetricNames.Length;
+                         metricIndex++)
+                    {
+                        string name =
+                            BodyShapeMetricNames[metricIndex];
+                        float baselineRatio =
+                            baseline.Measurements[name].Meters /
+                            baseline.StructuralLength;
+                        float sampledRatio =
+                            sampled.Measurements[name].Meters /
+                            sampled.StructuralLength;
+                        float response =
+                            (
+                                sampledRatio -
+                                baselineRatio) / step;
+                        if (IsFinite(response) &&
+                            Mathf.Abs(response) <= 10.0f)
+                        {
+                            responses[name] = response;
+                        }
+                    }
+                    if (responses.Count != 0)
+                    {
+                        entry.ShapeResponses = responses;
+                    }
+                }
+                catch
+                {
+                    entry.ShapeResponses = null;
+                }
+            }
+        }
+
+        private bool IsCurrentBodyShapeBuild(
+            PersonBodyShapeBuild build)
+        {
+            if (build == null ||
+                build.Cancelled ||
+                build.Atom == null)
+            {
+                return false;
+            }
+            PersonBodyShapeBuild current = null;
+            return
+                _personBodyShapeBuilds.TryGetValue(
+                    build.Atom.uid,
+                    out current) &&
+                object.ReferenceEquals(current, build);
+        }
+
+        private void RemoveBodyShapeBuild(
+            PersonBodyShapeBuild build)
+        {
+            if (build == null || build.Atom == null)
+            {
+                return;
+            }
+            PersonBodyShapeBuild current = null;
+            if (_personBodyShapeBuilds.TryGetValue(
+                    build.Atom.uid,
+                    out current) &&
+                object.ReferenceEquals(current, build))
+            {
+                _personBodyShapeBuilds.Remove(
+                    build.Atom.uid);
+            }
+        }
+
+        private void CancelPersonBodyShapeBuild(
+            string atomUid)
+        {
+            if (atomUid == null || atomUid.Length == 0)
+            {
+                return;
+            }
+            PersonBodyShapeBuild build = null;
+            if (_personBodyShapeBuilds.TryGetValue(
+                    atomUid,
+                    out build))
+            {
+                build.Cancelled = true;
+                _personBodyShapeBuilds.Remove(atomUid);
+            }
+        }
+
+        private IEnumerator BuildPersonBodyShapeCacheCoroutine(
+            PersonBodyShapeBuild build)
+        {
+            BodyShapeSignatureWork baselineWork =
+                CreateBodyShapeSignatureWork(
+                    build.Vertices,
+                    build.Triangles,
+                    build.Frame,
+                    build.ScaleX,
+                    build.ScaleZ);
+            if (baselineWork == null)
+            {
+                RemoveBodyShapeBuild(build);
+                yield break;
+            }
+            while (!baselineWork.Complete)
+            {
+                float deadline =
+                    Time.realtimeSinceStartup +
+                    BodyShapeBuildFrameBudgetSeconds;
+                int stepsThisFrame = 0;
+                do
+                {
+                    if (!IsCurrentBodyShapeBuild(build))
+                    {
+                        yield break;
+                    }
+                    StepBodyShapeSignatureWork(
+                        baselineWork);
+                    stepsThisFrame++;
+                }
+                while (
+                    !baselineWork.Complete &&
+                    stepsThisFrame <
+                        BodyShapeBuildMaximumStepsPerFrame &&
+                    Time.realtimeSinceStartup < deadline);
+                if (!baselineWork.Complete)
+                {
+                    yield return null;
+                }
+            }
+            if (baselineWork.Failed ||
+                baselineWork.Result == null ||
+                !IsCurrentBodyShapeBuild(build))
+            {
+                RemoveBodyShapeBuild(build);
+                yield break;
+            }
+
+            Dictionary<
+                DAZMorph,
+                Dictionary<string, float>> responses =
+                new Dictionary<
+                    DAZMorph,
+                    Dictionary<string, float>>();
+            Vector3[] scratch =
+                new Vector3[build.Vertices.Length];
+            int entryIndex;
+            for (entryIndex = 0;
+                 entryIndex < build.Entries.Count;
+                 entryIndex++)
+            {
+                if (!IsCurrentBodyShapeBuild(build))
+                {
+                    yield break;
+                }
+                BodyProportionMorphEntry entry =
+                    build.Entries[entryIndex];
+                if (entry == null ||
+                    entry.Morph == null ||
+                    entry.FitKind != "shape" ||
+                    entry.Morph.hasBoneModificationFormulas ||
+                    !IsEligibleBodyProportionMorph(
+                        entry.Bank,
+                        entry.Morph) ||
+                    Mathf.Abs(
+                        entry.Morph.morphValue -
+                        entry.Value) > 0.000001f)
+                {
+                    continue;
+                }
+                float step =
+                    BodyShapeCalibrationStep(entry);
+                if (Mathf.Abs(step) <= 0.0001f)
+                {
+                    continue;
+                }
+                DAZMorphVertex[] deltas = null;
+                try
+                {
+                    entry.Morph.LoadDeltas();
+                    deltas = entry.Morph.deltas;
+                }
+                catch
+                {
+                    deltas = null;
+                }
+                if (deltas == null || deltas.Length == 0)
+                {
+                    continue;
+                }
+                Array.Copy(
+                    build.Vertices,
+                    scratch,
+                    build.Vertices.Length);
+                int applied = 0;
+                int deltaIndex;
+                for (deltaIndex = 0;
+                     deltaIndex < deltas.Length;
+                     deltaIndex++)
+                {
+                    DAZMorphVertex delta =
+                        deltas[deltaIndex];
+                    if (delta.vertex < 0 ||
+                        delta.vertex >= scratch.Length ||
+                        !IsFiniteBodyProportionPoint(
+                            delta.delta))
+                    {
+                        continue;
+                    }
+                    scratch[delta.vertex] +=
+                        delta.delta * step;
+                    applied++;
+                }
+                if (applied == 0)
+                {
+                    continue;
+                }
+                BodyShapeSignatureWork sampledWork =
+                    CreateBodyShapeSignatureWork(
+                        scratch,
+                        build.Triangles,
+                        build.Frame,
+                        build.ScaleX,
+                        build.ScaleZ);
+                if (sampledWork == null)
+                {
+                    continue;
+                }
+                yield return null;
+                while (!sampledWork.Complete)
+                {
+                    float deadline =
+                        Time.realtimeSinceStartup +
+                        BodyShapeBuildFrameBudgetSeconds;
+                    int stepsThisFrame = 0;
+                    do
+                    {
+                        if (!IsCurrentBodyShapeBuild(build))
+                        {
+                            yield break;
+                        }
+                        StepBodyShapeSignatureWork(
+                            sampledWork);
+                        stepsThisFrame++;
+                    }
+                    while (
+                        !sampledWork.Complete &&
+                        stepsThisFrame <
+                            BodyShapeBuildMaximumStepsPerFrame &&
+                        Time.realtimeSinceStartup < deadline);
+                    if (!sampledWork.Complete)
+                    {
+                        yield return null;
+                    }
+                }
+                if (sampledWork.Failed ||
+                    sampledWork.Result == null)
+                {
+                    continue;
+                }
+                Dictionary<string, float> morphResponses =
+                    new Dictionary<string, float>();
+                int metricIndex;
+                for (metricIndex = 0;
+                     metricIndex <
+                        BodyShapeMetricNames.Length;
+                     metricIndex++)
+                {
+                    string name =
+                        BodyShapeMetricNames[metricIndex];
+                    float baselineRatio =
+                        baselineWork.Result.
+                            Measurements[name].Meters /
+                        baselineWork.Result.
+                            StructuralLength;
+                    float sampledRatio =
+                        sampledWork.Result.
+                            Measurements[name].Meters /
+                        sampledWork.Result.
+                            StructuralLength;
+                    float response =
+                        (
+                            sampledRatio -
+                            baselineRatio) / step;
+                    if (IsFinite(response) &&
+                        Mathf.Abs(response) <= 10.0f)
+                    {
+                        morphResponses[name] = response;
+                    }
+                }
+                if (morphResponses.Count != 0)
+                {
+                    responses[entry.Morph] =
+                        morphResponses;
+                }
+                yield return null;
+            }
+
+            if (!IsCurrentBodyShapeBuild(build))
+            {
+                yield break;
+            }
+            string currentChecksum = "";
+            if (!TryBodyShapeMeshChecksum(
+                    build.Geometry,
+                    out currentChecksum) ||
+                !string.Equals(
+                    currentChecksum,
+                    build.MeshChecksum,
+                    StringComparison.Ordinal))
+            {
+                RemoveBodyShapeBuild(build);
+                yield break;
+            }
+            PersonBodyShapeCache cache =
+                new PersonBodyShapeCache();
+            cache.Atom = build.Atom;
+            cache.Geometry = build.Geometry;
+            cache.MeshChecksum = build.MeshChecksum;
+            cache.Signature = baselineWork.Result;
+            cache.Responses = responses;
+            _personBodyShapeCaches[
+                build.Atom.uid] = cache;
+            RemoveBodyShapeBuild(build);
+            PublishSceneStatus();
+        }
+
+        private void EnsurePersonBodyShapeBuild(
+            Atom atom,
+            DAZCharacterSelector geometry,
+            string meshChecksum,
+            List<BodyProportionMorphEntry> entries)
+        {
+            if (atom == null ||
+                geometry == null ||
+                meshChecksum == null ||
+                meshChecksum.Length == 0)
+            {
+                return;
+            }
+            PersonBodyShapeCache cache = null;
+            if (_personBodyShapeCaches.TryGetValue(
+                    atom.uid,
+                    out cache) &&
+                object.ReferenceEquals(cache.Atom, atom) &&
+                object.ReferenceEquals(
+                    cache.Geometry,
+                    geometry) &&
+                string.Equals(
+                    cache.MeshChecksum,
+                    meshChecksum,
+                    StringComparison.Ordinal) &&
+                IsValidBodyShapeSignature(
+                    cache.Signature))
+            {
+                return;
+            }
+            _personBodyShapeCaches.Remove(atom.uid);
+            PersonBodyShapeBuild existing = null;
+            if (_personBodyShapeBuilds.TryGetValue(
+                    atom.uid,
+                    out existing))
+            {
+                if (object.ReferenceEquals(
+                        existing.Atom,
+                        atom) &&
+                    object.ReferenceEquals(
+                        existing.Geometry,
+                        geometry) &&
+                    string.Equals(
+                        existing.MeshChecksum,
+                        meshChecksum,
+                        StringComparison.Ordinal))
+                {
+                    return;
+                }
+                existing.Cancelled = true;
+            }
+
+            DAZSkinV2 skin;
+            Vector3[] liveVertices;
+            int[] liveTriangles;
+            BodyShapeFrame frame;
+            if (!TryBodyShapeMesh(
+                    geometry,
+                    out skin,
+                    out liveVertices,
+                    out liveTriangles) ||
+                !TryBuildBodyShapeFrame(
+                    geometry,
+                    skin,
+                    out frame))
+            {
+                return;
+            }
+            float scaleX =
+                skin.transform.TransformVector(
+                    frame.Lateral).magnitude;
+            float scaleZ =
+                skin.transform.TransformVector(
+                    frame.Front).magnitude;
+            if (!IsFinite(scaleX) ||
+                !IsFinite(scaleZ) ||
+                scaleX <= 0.000001f ||
+                scaleZ <= 0.000001f)
+            {
+                return;
+            }
+            PersonBodyShapeBuild build =
+                new PersonBodyShapeBuild();
+            build.Atom = atom;
+            build.Geometry = geometry;
+            build.MeshChecksum = meshChecksum;
+            build.Vertices =
+                new Vector3[liveVertices.Length];
+            Array.Copy(
+                liveVertices,
+                build.Vertices,
+                liveVertices.Length);
+            build.Triangles =
+                new int[liveTriangles.Length];
+            Array.Copy(
+                liveTriangles,
+                build.Triangles,
+                liveTriangles.Length);
+            build.Frame = frame;
+            build.ScaleX = scaleX;
+            build.ScaleZ = scaleZ;
+            build.Entries =
+                new List<BodyProportionMorphEntry>();
+            if (entries != null)
+            {
+                int index;
+                for (index = 0;
+                     index < entries.Count;
+                     index++)
+                {
+                    if (entries[index] != null &&
+                        entries[index].FitKind == "shape")
+                    {
+                        build.Entries.Add(entries[index]);
+                    }
+                }
+            }
+            _personBodyShapeBuilds[atom.uid] =
+                build;
+            StartCoroutine(
+                BuildPersonBodyShapeCacheCoroutine(
+                    build));
+        }
+
+        private static void CopyBodyShapeResponsesFromCache(
+            List<BodyProportionMorphEntry> entries,
+            PersonBodyShapeCache cache)
+        {
+            if (entries == null ||
+                cache == null ||
+                cache.Responses == null)
+            {
+                return;
+            }
+            int index;
+            for (index = 0; index < entries.Count; index++)
+            {
+                BodyProportionMorphEntry entry =
+                    entries[index];
+                Dictionary<string, float> response = null;
+                if (entry != null &&
+                    entry.Morph != null &&
+                    entry.FitKind == "shape" &&
+                    cache.Responses.TryGetValue(
+                        entry.Morph,
+                        out response))
+                {
+                    entry.ShapeResponses = response;
+                }
+            }
+        }
+
         private static JSONClass BuildBodyProportionMeasurements(
             DAZCharacterSelector geometry)
         {
@@ -8510,9 +11436,12 @@ namespace VAMPip
             result["ready"].AsBool = false;
             result["revision"] = "";
             result["undoAvailable"].AsBool = false;
+            result["undoPending"].AsBool = false;
             result["undoRevision"] = "";
             result["blockedBySam3d"].AsBool =
                 _sam3dUndoSnapshot != null;
+            result["bodyShapeReady"].AsBool = false;
+            result["bodyShapePreparing"].AsBool = false;
             JSONArray publishedMorphs = new JSONArray();
             result["morphs"] = publishedMorphs;
             JSONClass limits = new JSONClass();
@@ -8533,6 +11462,7 @@ namespace VAMPip
                 if (atom != null)
                 {
                     _personBodyProportionSnapshots.Remove(atom.uid);
+                    CancelPersonBodyShapeBuild(atom.uid);
                 }
                 return result;
             }
@@ -8545,6 +11475,8 @@ namespace VAMPip
                     "The selected Person has no native geometry.";
                 _personBodyProportionSnapshots.Remove(atom.uid);
                 _personBodyProportionUndo.Remove(atom.uid);
+                _personBodyShapeCaches.Remove(atom.uid);
+                CancelPersonBodyShapeBuild(atom.uid);
                 return result;
             }
 
@@ -8556,21 +11488,99 @@ namespace VAMPip
                 measurementSignature["normalizer"];
             result["measurements"] =
                 measurementSignature["measurements"];
-            List<BodyProportionMorphEntry> entries =
-                GetBodyProportionMorphEntries(geometry);
-            string generationKey =
-                BuildBodyProportionGenerationKey(
-                    geometry,
-                    entries);
             PersonBodyProportionSnapshot snapshot = null;
-            bool reuse =
+            bool priorSnapshotAvailable =
                 _personBodyProportionSnapshots.TryGetValue(
                     atom.uid,
                     out snapshot) &&
                 object.ReferenceEquals(snapshot.Atom, atom) &&
                 object.ReferenceEquals(
                     snapshot.Geometry,
+                    geometry);
+            string bodyShapeMeshChecksum = "";
+            bool hasBodyShapeMeshChecksum =
+                TryBodyShapeMeshChecksum(
+                    geometry,
+                    out bodyShapeMeshChecksum);
+            List<BodyProportionMorphEntry> entries =
+                GetBodyProportionMorphEntries(geometry);
+            PersonBodyShapeCache bodyShapeCache = null;
+            bool bodyShapeReady =
+                hasBodyShapeMeshChecksum &&
+                _personBodyShapeCaches.TryGetValue(
+                    atom.uid,
+                    out bodyShapeCache) &&
+                object.ReferenceEquals(
+                    bodyShapeCache.Atom,
+                    atom) &&
+                object.ReferenceEquals(
+                    bodyShapeCache.Geometry,
                     geometry) &&
+                string.Equals(
+                    bodyShapeCache.MeshChecksum,
+                    bodyShapeMeshChecksum,
+                    StringComparison.Ordinal) &&
+                IsValidBodyShapeSignature(
+                    bodyShapeCache.Signature);
+            BodyShapeSignature bodyShape =
+                bodyShapeReady
+                ? bodyShapeCache.Signature
+                : null;
+            if (bodyShapeReady)
+            {
+                CopyBodyShapeResponsesFromCache(
+                    entries,
+                    bodyShapeCache);
+            }
+            else if (hasBodyShapeMeshChecksum)
+            {
+                EnsurePersonBodyShapeBuild(
+                    atom,
+                    geometry,
+                    bodyShapeMeshChecksum,
+                    entries);
+            }
+            PersonBodyShapeBuild bodyShapeBuild = null;
+            bool bodyShapePreparing =
+                !bodyShapeReady &&
+                hasBodyShapeMeshChecksum &&
+                _personBodyShapeBuilds.TryGetValue(
+                    atom.uid,
+                    out bodyShapeBuild) &&
+                object.ReferenceEquals(
+                    bodyShapeBuild.Atom,
+                    atom) &&
+                object.ReferenceEquals(
+                    bodyShapeBuild.Geometry,
+                    geometry) &&
+                string.Equals(
+                    bodyShapeBuild.MeshChecksum,
+                    bodyShapeMeshChecksum,
+                    StringComparison.Ordinal);
+            result["bodyShapeReady"].AsBool =
+                bodyShapeReady;
+            result["bodyShapePreparing"].AsBool =
+                bodyShapePreparing;
+            if (bodyShapeReady)
+            {
+                result["bodyShape"] =
+                    BuildBodyShapeJson(bodyShape);
+            }
+            else
+            {
+                result["bodyShapeReason"] =
+                    bodyShapePreparing
+                    ? "Neutral body-shape measurements are being prepared."
+                    : "The neutral morphed body mesh could not be measured.";
+            }
+            string generationKey =
+                BuildBodyProportionGenerationKey(
+                    geometry,
+                    entries,
+                    bodyShape,
+                    bodyShapeMeshChecksum);
+            bool reuse =
+                priorSnapshotAvailable &&
                 IsCurrentBodyProportionSnapshot(
                     snapshot,
                     entries,
@@ -8602,12 +11612,18 @@ namespace VAMPip
                 {
                     entries[reuseIndex].Key =
                         snapshot.Entries[reuseIndex].Key;
+                    entries[reuseIndex].ShapeResponses =
+                        snapshot.Entries[
+                            reuseIndex].ShapeResponses;
                 }
                 snapshot.Entries = entries;
             }
             snapshot.Atom = atom;
             snapshot.Geometry = geometry;
             snapshot.GenerationKey = generationKey;
+            snapshot.BodyShape = bodyShape;
+            snapshot.BodyShapeMeshChecksum =
+                bodyShapeMeshChecksum;
             _personBodyProportionSnapshots[atom.uid] =
                 snapshot;
 
@@ -8620,6 +11636,38 @@ namespace VAMPip
                 published["key"] = entry.Key;
                 published["name"] = entry.Name;
                 published["region"] = entry.Region;
+                published["fitKind"] = entry.FitKind;
+                if (entry.FitKind == "shape")
+                {
+                    published["shapeRegion"] =
+                        entry.ShapeRegion;
+                    if (entry.ShapeResponses != null)
+                    {
+                        JSONClass responses =
+                            new JSONClass();
+                        int responseIndex;
+                        for (responseIndex = 0;
+                             responseIndex <
+                                BodyShapeMetricNames.Length;
+                             responseIndex++)
+                        {
+                            string responseName =
+                                BodyShapeMetricNames[
+                                    responseIndex];
+                            float response;
+                            if (entry.ShapeResponses.TryGetValue(
+                                    responseName,
+                                    out response))
+                            {
+                                responses[
+                                    responseName].AsFloat =
+                                    response;
+                            }
+                        }
+                        published["shapeResponses"] =
+                            responses;
+                    }
+                }
                 published["value"].AsFloat = entry.Value;
                 published["min"].AsFloat = entry.Minimum;
                 published["max"].AsFloat = entry.Maximum;
@@ -8628,7 +11676,7 @@ namespace VAMPip
             }
 
             PersonBodyProportionUndo undo = null;
-            bool undoAvailable =
+            bool undoRecordAvailable =
                 _personBodyProportionUndo.TryGetValue(
                     atom.uid,
                     out undo) &&
@@ -8637,18 +11685,90 @@ namespace VAMPip
                     undo.Geometry,
                     geometry) &&
                 undo.Values != null &&
-                undo.Values.Count != 0 &&
-                string.Equals(
-                    undo.PostApplyGenerationKey,
-                    generationKey,
-                    StringComparison.Ordinal);
-            if (!undoAvailable)
+                undo.Values.Count != 0;
+            bool undoAvailable = false;
+            bool undoPending = false;
+            if (undoRecordAvailable &&
+                string.IsNullOrEmpty(
+                    undo.PostApplyGenerationKey))
+            {
+                bool waitingForBodyShape =
+                    undo.RequireBodyShapeReady &&
+                    !bodyShapeReady;
+                bool waitingForChangedChecksum =
+                    undo.RequireChangedBodyShapeChecksum &&
+                    (
+                        bodyShapeMeshChecksum.Length == 0 ||
+                        string.Equals(
+                            bodyShapeMeshChecksum,
+                            undo.PreApplyBodyShapeChecksum,
+                            StringComparison.Ordinal));
+                bool waitingForChangedGeneration =
+                    undo.PreApplyGenerationKey != null &&
+                    undo.PreApplyGenerationKey.Length != 0 &&
+                    string.Equals(
+                        generationKey,
+                        undo.PreApplyGenerationKey,
+                        StringComparison.Ordinal);
+                if (
+                    waitingForBodyShape ||
+                    waitingForChangedChecksum ||
+                    waitingForChangedGeneration)
+                {
+                    undo.PendingBodyShapeChecksum = "";
+                    undo.PendingStableObservations = 0;
+                    undoPending = true;
+                }
+                else
+                {
+                    string stabilityToken =
+                        generationKey;
+                    if (string.Equals(
+                            undo.PendingBodyShapeChecksum,
+                            stabilityToken,
+                            StringComparison.Ordinal))
+                    {
+                        undo.PendingStableObservations++;
+                    }
+                    else
+                    {
+                        undo.PendingBodyShapeChecksum =
+                            stabilityToken;
+                        undo.PendingStableObservations = 1;
+                    }
+                    if (undo.PendingStableObservations >= 2)
+                    {
+                        undo.PostApplyGenerationKey =
+                            generationKey;
+                        undo.PendingBodyShapeChecksum = "";
+                        undo.PendingStableObservations = 0;
+                        undoAvailable = true;
+                    }
+                    else
+                    {
+                        undoPending = true;
+                    }
+                }
+            }
+            else if (undoRecordAvailable)
+            {
+                undoAvailable =
+                    string.Equals(
+                        undo.PostApplyGenerationKey,
+                        generationKey,
+                        StringComparison.Ordinal);
+            }
+            if (!undoRecordAvailable ||
+                (
+                    !undoAvailable &&
+                    !undoPending))
             {
                 _personBodyProportionUndo.Remove(atom.uid);
             }
             result["ready"].AsBool = entries.Count != 0;
             result["revision"] = snapshot.Revision;
             result["undoAvailable"].AsBool = undoAvailable;
+            result["undoPending"].AsBool = undoPending;
             result["undoRevision"] =
                 undoAvailable ? snapshot.Revision : "";
             result["morphCount"].AsInt = entries.Count;
@@ -10452,6 +13572,7 @@ namespace VAMPip
             capabilities.Add("person-body-proportion-measurements-v1");
             capabilities.Add("person-body-proportion-apply-v1");
             capabilities.Add("person-body-proportion-undo-v1");
+            capabilities.Add("person-body-shape-v1");
             capabilities.Add("person-add");
             capabilities.Add("person-select");
             capabilities.Add("timeline-roster");
@@ -10965,6 +14086,30 @@ namespace VAMPip
                         removedPersonUids.Add(entry.Key);
                     }
                 }
+                foreach (
+                    KeyValuePair<
+                        string,
+                        PersonBodyShapeCache> entry
+                    in _personBodyShapeCaches)
+                {
+                    if (!livePersonUids.Contains(entry.Key) &&
+                        !removedPersonUids.Contains(entry.Key))
+                    {
+                        removedPersonUids.Add(entry.Key);
+                    }
+                }
+                foreach (
+                    KeyValuePair<
+                        string,
+                        PersonBodyShapeBuild> entry
+                    in _personBodyShapeBuilds)
+                {
+                    if (!livePersonUids.Contains(entry.Key) &&
+                        !removedPersonUids.Contains(entry.Key))
+                    {
+                        removedPersonUids.Add(entry.Key);
+                    }
+                }
                 for (removedOffset = 0;
                      removedOffset < removedPersonUids.Count;
                      removedOffset++)
@@ -10974,6 +14119,10 @@ namespace VAMPip
                     _personBodyProportionSnapshots.Remove(
                         removedUid);
                     _personBodyProportionUndo.Remove(
+                        removedUid);
+                    _personBodyShapeCaches.Remove(
+                        removedUid);
+                    CancelPersonBodyShapeBuild(
                         removedUid);
                 }
                 scene["atoms"] = atoms;

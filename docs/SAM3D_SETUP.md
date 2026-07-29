@@ -125,3 +125,10 @@ directory under `sam3d/`; they do not use `/tmp`. The worker sets its own
 private cache paths and offline flags there. DINOv3 is loaded from the pinned
 local checkout, so inference does not fetch Torch Hub source or weights and
 does not consume the setup shell's cache or a ComfyUI cache.
+
+Current jobs persist both neutral skeletal proportions and a neutral-mesh Body
+Shape signature. When Body Shape is requested for an older successful job, the
+manager runs a CPU-only sidecar worker against that job's existing `arrays.npz`
+and the configured MHR model. The resulting cache is bound to the arrays,
+person index, MHR file, and checkpoint identity basis. It does not alter the
+signed manifest or job revision.

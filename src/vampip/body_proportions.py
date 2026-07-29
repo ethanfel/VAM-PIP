@@ -78,6 +78,7 @@ _MORPH_TARGETS = (
 _MAX_VALUE_CHANGE = 0.25
 _MAX_RATIO_CHANGE = 0.15
 _MIN_RATIO_CHANGE = 0.015
+_MAX_COMBINED_CHANGES = 16
 _MAX_CONSENSUS_SIGNATURES = 8
 _CONSENSUS_SPACE = "mhr-neutral-bind"
 
@@ -291,22 +292,20 @@ def _robust_weighted_value(
                 range(len(values)),
                 key=lambda index: (deviations[index], index),
             )[:2]
-    rejected = [
-        index for index in range(len(values)) if index not in accepted
-    ]
-    weights = [
-        _consensus_weight(confidences[index])
-        for index in accepted
-    ]
+    rejected = [index for index in range(len(values)) if index not in accepted]
+    weights = [_consensus_weight(confidences[index]) for index in accepted]
     total_weight = sum(weights)
-    combined = sum(
-        values[index] * weight
-        for index, weight in zip(accepted, weights)
-    ) / total_weight
-    variance = sum(
-        weight * (values[index] - combined) ** 2
-        for index, weight in zip(accepted, weights)
-    ) / total_weight
+    combined = (
+        sum(values[index] * weight for index, weight in zip(accepted, weights))
+        / total_weight
+    )
+    variance = (
+        sum(
+            weight * (values[index] - combined) ** 2
+            for index, weight in zip(accepted, weights)
+        )
+        / total_weight
+    )
     relative_disagreement = math.sqrt(max(0.0, variance)) / max(
         abs(combined),
         1e-8,
@@ -330,8 +329,7 @@ def _consensus_confidence(
     assert isinstance(accepted, list)
     weights = [_consensus_weight(confidences[index]) for index in accepted]
     combined = sum(
-        confidences[index] * weight
-        for index, weight in zip(accepted, weights)
+        confidences[index] * weight for index, weight in zip(accepted, weights)
     ) / sum(weights)
     disagreement = float(report["relativeDisagreement"])
     disagreement_factor = 1.0 - min(0.5, disagreement * 2.0)
@@ -371,14 +369,10 @@ def consensus_body_signatures(
         normalized_source_ids = list(source_ids)
         if len(normalized_source_ids) != len(raw_signatures):
             raise ValueError("source_ids must match the signature count")
-        if (
-            any(
-                not isinstance(source_id, str)
-                or _OPAQUE_TOKEN.fullmatch(source_id) is None
-                for source_id in normalized_source_ids
-            )
-            or len(set(normalized_source_ids)) != len(normalized_source_ids)
-        ):
+        if any(
+            not isinstance(source_id, str) or _OPAQUE_TOKEN.fullmatch(source_id) is None
+            for source_id in normalized_source_ids
+        ) or len(set(normalized_source_ids)) != len(normalized_source_ids):
             raise ValueError("source_ids must be unique lowercase SAM3D job IDs")
 
     if len(raw_signatures) == 1:
@@ -419,13 +413,13 @@ def consensus_body_signatures(
     metric_reports: dict[str, dict[str, object]] = {}
     for metric in BODY_PROPORTION_METRICS:
         items = [
-            signature["measurements"][metric]
-            for signature in signatures_validated
+            signature["measurements"][metric] for signature in signatures_validated
         ]
         assert all(isinstance(item, dict) for item in items)
         values = [float(item["ratio"]) for item in items]  # type: ignore[index]
         confidences = [
-            float(item["confidence"]) for item in items  # type: ignore[index]
+            float(item["confidence"])
+            for item in items  # type: ignore[index]
         ]
         combined, report = _robust_weighted_value(values, confidences)
         ratios[metric] = combined
@@ -442,47 +436,39 @@ def consensus_body_signatures(
             and "rightMeters" in items[index]  # type: ignore[operator]
             for index in accepted
         ):
-            accepted_confidences = [
-                confidences[index] for index in accepted
-            ]
+            accepted_confidences = [confidences[index] for index in accepted]
             accepted_weights = [
-                _consensus_weight(confidence)
-                for confidence in accepted_confidences
+                _consensus_weight(confidence) for confidence in accepted_confidences
             ]
             total_weight = sum(accepted_weights)
             sides: dict[str, float] = {}
             for side in ("leftMeters", "rightMeters"):
-                sides[side] = sum(
-                    (
-                        float(items[index][side])  # type: ignore[index]
-                        / float(
-                            signatures_validated[index]["normalizer"][  # type: ignore[index]
-                                "meters"
-                            ]
+                sides[side] = (
+                    sum(
+                        (
+                            float(items[index][side])  # type: ignore[index]
+                            / float(
+                                signatures_validated[index]["normalizer"][  # type: ignore[index]
+                                    "meters"
+                                ]
+                            )
                         )
+                        * weight
+                        for index, weight in zip(accepted, accepted_weights)
                     )
-                    * weight
-                    for index, weight in zip(accepted, accepted_weights)
-                ) / total_weight
+                    / total_weight
+                )
             side_ratios[metric] = sides
 
     # torso + thigh + shin define the existing structural-length normalizer.
     # Renormalizing those independently aggregated ratios keeps that invariant
     # exact even when per-metric outlier sets differ.
-    structural_ratio = sum(
-        ratios[metric] for metric in ("torso", "thigh", "shin")
-    )
+    structural_ratio = sum(ratios[metric] for metric in ("torso", "thigh", "shin"))
     if not math.isfinite(structural_ratio) or structural_ratio <= 1e-8:
         raise ValueError("body-proportion consensus structure is invalid")
-    ratios = {
-        metric: value / structural_ratio
-        for metric, value in ratios.items()
-    }
+    ratios = {metric: value / structural_ratio for metric, value in ratios.items()}
     side_ratios = {
-        metric: {
-            side: value / structural_ratio
-            for side, value in sides.items()
-        }
+        metric: {side: value / structural_ratio for side, value in sides.items()}
         for metric, sides in side_ratios.items()
     }
 
@@ -515,8 +501,7 @@ def consensus_body_signatures(
             source["jobId"] = normalized_source_ids[index]
         sources.append(source)
     disagreements = [
-        float(report["relativeDisagreement"])
-        for report in metric_reports.values()
+        float(report["relativeDisagreement"]) for report in metric_reports.values()
     ]
     result["consensus"] = {
         "schema": 1,
@@ -531,8 +516,7 @@ def consensus_body_signatures(
         "overallRelativeDisagreement": sum(disagreements) / len(disagreements),
         "maximumRelativeDisagreement": max(disagreements),
         "rejectedMeasurementCount": sum(
-            len(report["rejectedSourceIndices"])
-            for report in metric_reports.values()
+            len(report["rejectedSourceIndices"]) for report in metric_reports.values()
         ),
     }
     return result
@@ -830,12 +814,8 @@ def build_analysis(
                 }
             )
             continue
-        target_ratio, target_confidence = _combined_ratio(
-            target, mapping["metrics"]
-        )
-        current_ratio, live_confidence = _combined_ratio(
-            live, mapping["metrics"]
-        )
+        target_ratio, target_confidence = _combined_ratio(target, mapping["metrics"])
+        current_ratio, live_confidence = _combined_ratio(live, mapping["metrics"])
         confidence = min(target_confidence, live_confidence)
         relative = target_ratio / current_ratio - 1.0
         if confidence < 0.3:
@@ -867,6 +847,7 @@ def build_analysis(
                 "key": candidate["key"],
                 "name": candidate["name"],
                 "region": region,
+                "fitKind": "structure",
                 "from": current,
                 "value": proposed,
                 "delta": proposed - current,
@@ -892,12 +873,12 @@ def build_analysis(
         "target": target,
         "current": live,
         "measurements": rows,
-        "changes": changes[:8],
+        "changes": changes[:_MAX_COMBINED_CHANGES],
         "unavailable": unavailable,
         "canApply": bool(ready and changes and not undo_available),
         "undoAvailable": undo_available,
         "warning": (
-            "This fits skeletal proportions only. Dynamic soft-body physics "
+            "Structure fits skeletal proportions. Dynamic soft-body physics "
             "and face morphs are not changed. Body Scale stays untouched, "
             "but length morphs can change the Person's final height."
         ),

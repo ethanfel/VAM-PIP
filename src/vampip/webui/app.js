@@ -33,19 +33,28 @@ const SAM3D_BODY_PROPORTION_REGIONS = Object.freeze([
   "torso",
   "widths",
 ]);
+const SAM3D_BODY_SHAPE_REGIONS = Object.freeze([
+  "breasts",
+  "waist",
+  "hips",
+  "glutes",
+  "thighs",
+]);
 const SAM3D_BODY_PROPORTION_ACTIONS = Object.freeze({
   analyze: "analyze",
   apply: "apply",
   undo: "undo",
 });
 const SAM3D_BODY_PROPORTION_POLL_ATTEMPTS = 300;
-const SAM3D_BODY_PROFILE_STORAGE_KEY = "vampip-sam3d-body-profiles-v2";
-const SAM3D_BODY_PROFILE_LEGACY_STORAGE_KEY =
+const SAM3D_BODY_PROFILE_STORAGE_KEY = "vampip-sam3d-body-profiles-v3";
+const SAM3D_BODY_PROFILE_V2_STORAGE_KEY =
+  "vampip-sam3d-body-profiles-v2";
+const SAM3D_BODY_PROFILE_V1_STORAGE_KEY =
   "vampip-sam3d-body-profiles-v1";
 const SAM3D_BODY_PROFILE_MAX_COUNT = 24;
 const SAM3D_BODY_REFERENCE_MAX_COUNT = 8;
 const SAM3D_BODY_LEGACY_SOLO_MESSAGE =
-  "Legacy result is solo-only; rerun image to combine.";
+  "Legacy result is solo-only for Structure; use Body Shape only or rerun the image to combine Structure.";
 const SAM3D_RENDERER_RESOLUTIONS = Object.freeze({
   "36:9": Object.freeze(["1600x400", "3200x800", "6400x1600"]),
   "32:9": Object.freeze([
@@ -1043,9 +1052,13 @@ function cacheElements() {
     "sam3d-proportions-retry",
     "sam3d-proportions-results",
     "sam3d-proportions-confidence",
+    "sam3d-shape-confidence",
     "sam3d-proportions-disagreement",
     "sam3d-proportions-measurements",
     "sam3d-proportions-morphs",
+    "sam3d-shape-results",
+    "sam3d-shape-measurements",
+    "sam3d-shape-morphs",
     "sam3d-proportions-note",
     "sam3d-region-arms",
     "sam3d-region-legs",
@@ -1053,6 +1066,13 @@ function cacheElements() {
     "sam3d-region-widths",
     "sam3d-fit-strength",
     "sam3d-fit-strength-value",
+    "sam3d-shape-region-breasts",
+    "sam3d-shape-region-waist",
+    "sam3d-shape-region-hips",
+    "sam3d-shape-region-glutes",
+    "sam3d-shape-region-thighs",
+    "sam3d-shape-strength",
+    "sam3d-shape-strength-value",
     "sam3d-proportions-apply",
     "sam3d-proportions-undo",
     "sam3d-profile-select",
@@ -1469,12 +1489,26 @@ function bindEvents() {
   for (const region of SAM3D_BODY_PROPORTION_REGIONS) {
     sam3dBodyProportionRegionControl(region).addEventListener(
       "change",
+      () => {
+        markSam3dBodyProportionsDirty();
+        renderSam3dBodyReferenceGallery();
+      },
+    );
+  }
+  for (const region of SAM3D_BODY_SHAPE_REGIONS) {
+    sam3dBodyShapeRegionControl(region).addEventListener(
+      "change",
       markSam3dBodyProportionsDirty,
     );
   }
   elements.sam3dFitStrength.addEventListener("input", () => {
     elements.sam3dFitStrengthValue.value =
       `${Math.round(Number(elements.sam3dFitStrength.value) || 0)}%`;
+    markSam3dBodyProportionsDirty();
+  });
+  elements.sam3dShapeStrength.addEventListener("input", () => {
+    elements.sam3dShapeStrengthValue.value =
+      `${Math.round(Number(elements.sam3dShapeStrength.value) || 0)}%`;
     markSam3dBodyProportionsDirty();
   });
   elements.sam3dProportionsApply.addEventListener(
@@ -1835,18 +1869,26 @@ async function loadActivity({ refreshOnTerminal = true } = {}) {
     renderLiveState(app.status || {});
     const workspaceCategory =
       app.view === "workspace" ? currentWorkspaceCategory() : null;
+    const bodyShapeCalibrationPreparing =
+      app.view === "sam3d" &&
+      app.sam3dHandoffTab === "morph" &&
+      sam3dBodyShapeCalibrationState().preparing;
     const shouldPollScene =
       workspaceActionIsActive() ||
       Boolean(app.pendingHairMutation) ||
       snapshotBridgeBusy() ||
+      bodyShapeCalibrationPreparing ||
       Boolean(
         workspaceCategory &&
           (workspaceCategory.liveAction ||
             categoryUsesPersonContext(workspaceCategory) ||
             ATOM_TARGET_KINDS.has(workspaceCategory.targetKind)),
       );
-    const scenePollInterval =
+    const defaultScenePollInterval =
       workspaceActionIsActive() || app.pendingHairMutation ? 900 : 3000;
+    const scenePollInterval = bodyShapeCalibrationPreparing
+      ? SAM3D_POLL_MS
+      : defaultScenePollInterval;
     if (
       shouldPollScene &&
       Date.now() - app.personPollAt > scenePollInterval
@@ -6426,6 +6468,7 @@ async function loadPersons({ quiet = false } = {}) {
       renderAtomContext();
       if (app.view === "sam3d") {
         renderSam3dTargets();
+        renderSam3dBodyProportions();
         renderSam3dApplyState();
       }
       if (app.view === "workspace" && previousKey !== personControlKey()) {
@@ -7346,6 +7389,8 @@ const Sam3dClient = Object.freeze({
       personIndex = 0,
       strength = 50,
       regions = SAM3D_BODY_PROPORTION_REGIONS,
+      shapeStrength = 50,
+      shapeRegions = [],
       references = [],
     } = {},
     signal,
@@ -7365,6 +7410,9 @@ const Sam3dClient = Object.freeze({
       fit_strength: String(
         Math.max(0, Math.min(100, Number(strength) || 0)) / 100,
       ),
+      shape_strength: String(
+        Math.max(0, Math.min(100, Number(shapeStrength) || 0)) / 100,
+      ),
       references: serializeSam3dBodyReferences(normalizedReferences),
     });
     if (targetUid) query.set("target_uid", targetUid);
@@ -7374,6 +7422,12 @@ const Sam3dClient = Object.freeze({
     if (selectedRegions.length) {
       query.set("regions", selectedRegions.join(","));
     }
+    const selectedShapeRegions = asArray(shapeRegions).filter((region) =>
+      SAM3D_BODY_SHAPE_REGIONS.includes(region),
+    );
+    // Keep the opt-in explicit even when no Shape region is selected. This
+    // prevents a newer manager default from silently turning shape fitting on.
+    query.set("shape_regions", selectedShapeRegions.join(","));
     return api(`${this.paths.bodyProportions(normalizedJobId)}?${query}`, {
       signal,
     });
@@ -9615,7 +9669,14 @@ function sam3dBodyReferenceAvailable(reference) {
   return Boolean(sam3dBodyReferenceCandidate(reference));
 }
 
-function sam3dBodyReferenceSetIssue(references) {
+function sam3dBodyReferenceSetIssue(
+  references,
+  structureRegions = SAM3D_BODY_PROPORTION_REGIONS,
+) {
+  const structureSelected = asArray(structureRegions).some((region) =>
+    SAM3D_BODY_PROPORTION_REGIONS.includes(region),
+  );
+  if (!structureSelected) return "";
   const normalized = normalizeSam3dBodyReferences(references);
   if (normalized.length < 2) return "";
   const soloOnly = normalized.some((reference) => {
@@ -9665,7 +9726,10 @@ function setSam3dBodyReferences(references, { dirty = true } = {}) {
   return true;
 }
 
-function toggleSam3dBodyReference(value) {
+function toggleSam3dBodyReference(
+  value,
+  structureRegions = sam3dBodyProportionSettings().regions,
+) {
   const reference = normalizeSam3dBodyReference(value);
   if (!reference) return;
   const token = sam3dBodyReferenceToken(reference);
@@ -9686,7 +9750,7 @@ function toggleSam3dBodyReference(value) {
   if (sameJobIndex >= 0) {
     const replacement = [...current];
     replacement.splice(sameJobIndex, 1, reference);
-    if (sam3dBodyReferenceSetIssue(replacement)) {
+    if (sam3dBodyReferenceSetIssue(replacement, structureRegions)) {
       toast(
         "Cannot combine this Morph reference",
         SAM3D_BODY_LEGACY_SOLO_MESSAGE,
@@ -9697,17 +9761,12 @@ function toggleSam3dBodyReference(value) {
     setSam3dBodyReferences(replacement);
     return;
   }
-  const selectedSoloOnly = current.some((candidate) => {
-    const selectedCandidate = sam3dBodyReferenceCandidate(candidate);
-    return (
-      selectedCandidate &&
-      selectedCandidate.support.multiReference !== true
-    );
-  });
   if (
     current.length &&
-    (selectedSoloOnly ||
-      referenceCandidate.support.multiReference !== true)
+    sam3dBodyReferenceSetIssue(
+      [...current, reference],
+      structureRegions,
+    )
   ) {
     toast(
       "Cannot combine this Morph reference",
@@ -9794,7 +9853,7 @@ function createSam3dBodyReferenceCard(
       "span",
       "sam3d-morph-reference-compatibility",
     );
-    compatibility.textContent = "Legacy · solo only";
+    compatibility.textContent = "Structure · solo only";
     compatibility.title = SAM3D_BODY_LEGACY_SOLO_MESSAGE;
     copy.append(compatibility);
   }
@@ -9840,14 +9899,17 @@ function renderSam3dBodyReferenceGallery() {
   const missingCount = app.sam3dBodyReferences.filter(
     (reference) => !availableTokens.has(sam3dBodyReferenceToken(reference)),
   ).length;
+  const structureRegions = sam3dBodyProportionSettings().regions;
   const combinationIssue = sam3dBodyReferenceSetIssue(
     app.sam3dBodyReferences,
+    structureRegions,
   );
   const singleCandidate =
     app.sam3dBodyReferences.length === 1
       ? sam3dBodyReferenceCandidate(app.sam3dBodyReferences[0])
       : null;
   const soloLegacy =
+    structureRegions.length > 0 &&
     singleCandidate &&
     singleCandidate.support.multiReference !== true;
   elements.sam3dMorphReferenceNote.classList.toggle(
@@ -9892,6 +9954,19 @@ function normalizeSam3dBodyProfile(raw) {
     0,
     Math.min(100, Math.round(Number(raw.strength) || 0)),
   );
+  const shapeRegions = SAM3D_BODY_SHAPE_REGIONS.filter((region) =>
+    asArray(raw.shape_regions || raw.shapeRegions).includes(region),
+  );
+  const rawShapeStrength = Number(
+    raw.shape_strength ?? raw.shapeStrength ?? 50,
+  );
+  const shapeStrength = Math.max(
+    0,
+    Math.min(
+      100,
+      Math.round(Number.isFinite(rawShapeStrength) ? rawShapeStrength : 50),
+    ),
+  );
   const referenceJobs = normalizeSam3dBodyReferences(
     raw.reference_jobs || raw.referenceJobs,
     raw.reference_job_id || raw.referenceJobId,
@@ -9904,6 +9979,10 @@ function normalizeSam3dBodyProfile(raw) {
       ? regions
       : [...SAM3D_BODY_PROPORTION_REGIONS],
     strength,
+    // Missing Shape fields identify a v1/v2 profile. Keep Shape opt-in so
+    // upgrading cannot silently alter breasts, waist, hips, glutes, or thighs.
+    shapeRegions,
+    shapeStrength,
     referenceJobs,
     updatedAt: Math.max(0, Number(raw.updated_at || raw.updatedAt) || 0),
   };
@@ -9915,9 +9994,12 @@ function loadSam3dBodyProfiles() {
   try {
     let stored = window.localStorage.getItem(SAM3D_BODY_PROFILE_STORAGE_KEY);
     if (!stored) {
-      stored = window.localStorage.getItem(
-        SAM3D_BODY_PROFILE_LEGACY_STORAGE_KEY,
-      );
+      stored = window.localStorage.getItem(SAM3D_BODY_PROFILE_V2_STORAGE_KEY);
+      if (!stored) {
+        stored = window.localStorage.getItem(
+          SAM3D_BODY_PROFILE_V1_STORAGE_KEY,
+        );
+      }
       importedLegacyProfiles = Boolean(stored);
     }
     if (stored) {
@@ -9954,6 +10036,8 @@ function persistSam3dBodyProfiles() {
       name: profile.name,
       regions: profile.regions,
       strength: profile.strength,
+      shape_regions: profile.shapeRegions,
+      shape_strength: profile.shapeStrength,
       reference_jobs: profile.referenceJobs.map((reference) => ({
         job_id: reference.jobId,
         person_index: reference.personIndex,
@@ -9966,7 +10050,7 @@ function persistSam3dBodyProfiles() {
   try {
     window.localStorage.setItem(
       SAM3D_BODY_PROFILE_STORAGE_KEY,
-      JSON.stringify({ schema: 2, profiles }),
+      JSON.stringify({ schema: 3, profiles }),
     );
     return true;
   } catch (error) {
@@ -9992,6 +10076,8 @@ function currentSam3dBodyProfilePreferences() {
   return {
     regions: settings.regions,
     strength: settings.strength,
+    shapeRegions: settings.shapeRegions,
+    shapeStrength: settings.shapeStrength,
     referenceJobs: normalizeSam3dBodyReferences(settings.references),
   };
 }
@@ -10009,12 +10095,12 @@ function renderSam3dBodyProfileActionState() {
   const referenceCount = app.sam3dBodyReferences.length;
   if (profile) {
     elements.sam3dProfileNote.textContent =
-      `“${profile.name}” is local to this browser. Save updates regions, fit strength, and ${referenceCount} Morph reference${
+      `“${profile.name}” is local to this browser. Save updates Structure and Body Shape regions, both strengths, and ${referenceCount} Morph reference${
         referenceCount === 1 ? "" : "s"
       }—never morph values or revisions.`;
   } else {
     elements.sam3dProfileNote.textContent =
-      "Profiles stay in this browser and store regions, fit strength, and up to eight Morph references—never live morph values or revisions.";
+      "Profiles stay in this browser and store Structure and Body Shape preferences plus up to eight Morph references—never live morph values or revisions.";
   }
 }
 
@@ -10045,8 +10131,14 @@ function selectSam3dBodyProfile() {
     sam3dBodyProportionRegionControl(region).checked =
       profile.regions.includes(region);
   }
+  for (const region of SAM3D_BODY_SHAPE_REGIONS) {
+    sam3dBodyShapeRegionControl(region).checked =
+      profile.shapeRegions.includes(region);
+  }
   elements.sam3dFitStrength.value = String(profile.strength);
   elements.sam3dFitStrengthValue.value = `${profile.strength}%`;
+  elements.sam3dShapeStrength.value = String(profile.shapeStrength);
+  elements.sam3dShapeStrengthValue.value = `${profile.shapeStrength}%`;
   setSam3dBodyReferences(profile.referenceJobs);
   markSam3dBodyProportionsDirty();
   renderSam3dBodyProfiles();
@@ -10065,7 +10157,7 @@ async function createSam3dBodyProfile() {
     eyebrow: "New local Person profile",
     title: "Name these fitting preferences",
     message:
-      "This profile stays in this browser. It never stores VaM morph values, morph identifiers, or revision tokens.",
+      "This profile stores the currently selected Structure and Body Shape controls in this browser. It never stores VaM morph values, morph identifiers, or revision tokens.",
     confirmLabel: "Create profile",
     input: {
       label: "Profile name",
@@ -10193,6 +10285,17 @@ function sam3dBodyProportionRegionControl(region) {
   return controls[region] || null;
 }
 
+function sam3dBodyShapeRegionControl(region) {
+  const controls = {
+    breasts: elements.sam3dShapeRegionBreasts,
+    waist: elements.sam3dShapeRegionWaist,
+    hips: elements.sam3dShapeRegionHips,
+    glutes: elements.sam3dShapeRegionGlutes,
+    thighs: elements.sam3dShapeRegionThighs,
+  };
+  return controls[region] || null;
+}
+
 function resetSam3dBodyProportions(jobId = "") {
   stopSam3dBodyProportionPolling();
   app.sam3dBodyProportions = null;
@@ -10213,6 +10316,16 @@ function sam3dBodyProportionSettings() {
     0,
     Math.min(100, Math.round(Number(elements.sam3dFitStrength.value) || 0)),
   );
+  const shapeRegions = SAM3D_BODY_SHAPE_REGIONS.filter(
+    (region) => sam3dBodyShapeRegionControl(region)?.checked,
+  );
+  const shapeStrength = Math.max(
+    0,
+    Math.min(
+      100,
+      Math.round(Number(elements.sam3dShapeStrength.value) || 0),
+    ),
+  );
   const references = normalizeSam3dBodyReferences(
     app.sam3dBodyReferences,
   );
@@ -10224,6 +10337,8 @@ function sam3dBodyProportionSettings() {
     references,
     regions,
     strength,
+    shapeRegions,
+    shapeStrength,
   };
 }
 
@@ -10241,6 +10356,39 @@ function sam3dBodyProportionJob(settings = sam3dBodyProportionSettings()) {
     return app.sam3dSelectedJob;
   }
   return null;
+}
+
+function sam3dBodyShapeCalibrationState(
+  settings = sam3dBodyProportionSettings(),
+) {
+  const shapeRequested = settings.shapeRegions.length > 0;
+  const target = personList().find(
+    (person) => person.uid === settings.targetUid,
+  );
+  const status =
+    target?.bodyProportions && typeof target.bodyProportions === "object"
+      ? target.bodyProportions
+      : target?.body_proportions &&
+          typeof target.body_proportions === "object"
+        ? target.body_proportions
+        : null;
+  const ready =
+    status?.bodyShapeReady ?? status?.body_shape_ready;
+  const preparing =
+    status?.bodyShapePreparing ?? status?.body_shape_preparing;
+  const calibrationPreparing =
+    ready === false &&
+    preparing === true;
+  return {
+    requested: shapeRequested,
+    ready: ready === true,
+    preparing: calibrationPreparing,
+    analyzeBlocked: shapeRequested && calibrationPreparing,
+    applyBlocked: ready !== true,
+    reason: String(
+      status?.bodyShapeReason ?? status?.body_shape_reason ?? "",
+    ).trim(),
+  };
 }
 
 function sam3dBodyReferencesReady(references) {
@@ -10265,6 +10413,8 @@ function sam3dBodyProportionRequest(
     references: serializeSam3dBodyReferences(settings.references),
     regions: settings.regions,
     fit_strength: settings.strength / 100,
+    shape_regions: settings.shapeRegions,
+    shape_strength: settings.shapeStrength / 100,
   };
   if (analysisRevision) {
     request.expected_analysis_revision = analysisRevision;
@@ -10321,7 +10471,11 @@ function sam3dBodyProportionConfidence(value) {
   return Math.max(0, Math.min(100, number <= 1 ? number * 100 : number));
 }
 
-function normalizeSam3dBodyMeasurement(raw, fallbackId = "") {
+function normalizeSam3dBodyMeasurement(
+  raw,
+  fallbackId = "",
+  allowedRegions = SAM3D_BODY_PROPORTION_REGIONS,
+) {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
   const id = String(
     raw.id || raw.key || raw.measurement || fallbackId,
@@ -10368,7 +10522,7 @@ function normalizeSam3dBodyMeasurement(raw, fallbackId = "") {
     label: String(
       raw.label || raw.name || id || "Body proportion",
     ).trim(),
-    region: SAM3D_BODY_PROPORTION_REGIONS.includes(region) ? region : "",
+    region: allowedRegions.includes(region) ? region : "",
     current,
     target,
     delta,
@@ -10403,12 +10557,24 @@ function normalizeSam3dMorphChange(raw, fallbackId = "") {
     delta = target - current;
   }
   if (!Number.isFinite(target) && !Number.isFinite(delta)) return null;
+  const declaredFitKind = String(
+    raw.fit_kind || raw.fitKind || "",
+  ).trim().toLowerCase();
+  const fitKind =
+    declaredFitKind === "shape" || SAM3D_BODY_SHAPE_REGIONS.includes(region)
+      ? "shape"
+      : "structure";
+  const supportedRegions = [
+    ...SAM3D_BODY_PROPORTION_REGIONS,
+    ...SAM3D_BODY_SHAPE_REGIONS,
+  ];
   return {
     id: id || `morph-${fallbackId}`,
     label: String(
       raw.display_name || raw.displayName || raw.label || raw.name || id,
     ).trim() || "VaM morph",
-    region: SAM3D_BODY_PROPORTION_REGIONS.includes(region) ? region : "",
+    region: supportedRegions.includes(region) ? region : "",
+    fitKind,
     current: Number.isFinite(current) ? current : 0,
     target: Number.isFinite(target) ? target : null,
     delta: Number.isFinite(delta) ? delta : null,
@@ -10435,6 +10601,9 @@ function normalizeSam3dBodyProportions(payload) {
       message: "The manager returned an invalid body-proportion response.",
       measurements: [],
       morphs: [],
+      shapeMeasurements: [],
+      shapeMorphs: [],
+      shapeUnavailable: [],
     };
   }
   const nested =
@@ -10454,7 +10623,18 @@ function normalizeSam3dBodyProportions(payload) {
   )
     .map(([id, value]) => normalizeSam3dBodyMeasurement(value, id))
     .filter(Boolean);
-  const morphs = sam3dBodyProportionArray(
+  const shapeMeasurements = sam3dBodyProportionArray(
+    document.shape_measurements || document.shapeMeasurements,
+  )
+    .map(([id, value]) =>
+      normalizeSam3dBodyMeasurement(
+        value,
+        id,
+        SAM3D_BODY_SHAPE_REGIONS,
+      ),
+    )
+    .filter(Boolean);
+  const combinedMorphs = sam3dBodyProportionArray(
     document.proposed_morphs ||
       document.morph_changes ||
       document.morphs ||
@@ -10463,7 +10643,30 @@ function normalizeSam3dBodyProportions(payload) {
     .map(([id, value]) => normalizeSam3dMorphChange(value, id))
     .filter(Boolean)
     .slice(0, 32);
-  const unavailableRegions = asArray(document.unavailable)
+  const explicitShapeMorphs = sam3dBodyProportionArray(
+    document.shape_changes || document.shapeChanges,
+  )
+    .map(([id, value]) =>
+      normalizeSam3dMorphChange(
+        {
+          ...(value && typeof value === "object" && !Array.isArray(value)
+            ? value
+            : {}),
+          fit_kind: "shape",
+          fitKind: "shape",
+        },
+        id,
+      ),
+    )
+    .filter(Boolean)
+    .slice(0, 32);
+  const morphs = combinedMorphs.filter(
+    (morph) => morph.fitKind !== "shape",
+  );
+  const shapeMorphs = explicitShapeMorphs.length
+    ? explicitShapeMorphs
+    : combinedMorphs.filter((morph) => morph.fitKind === "shape");
+  const normalizeUnavailable = (raw) => asArray(raw)
     .filter(
       (item) =>
         item && typeof item === "object" && !Array.isArray(item),
@@ -10473,8 +10676,20 @@ function normalizeSam3dBodyProportions(payload) {
       reason: String(
         item.reason || item.message || "No safe morph is available.",
       ).trim(),
-    }))
+    }));
+  const combinedUnavailable = normalizeUnavailable(document.unavailable);
+  const explicitShapeUnavailable = normalizeUnavailable(
+    document.shape_unavailable || document.shapeUnavailable,
+  );
+  const unavailableRegions = combinedUnavailable
+    .filter((item) => !SAM3D_BODY_SHAPE_REGIONS.includes(item.region))
     .slice(0, 8);
+  const shapeUnavailable = (
+    explicitShapeUnavailable.length
+      ? explicitShapeUnavailable
+      : combinedUnavailable.filter((item) =>
+        SAM3D_BODY_SHAPE_REGIONS.includes(item.region))
+  ).slice(0, 8);
   const analysisRevision = sam3dBodyProportionRevision(
     document.analysis_revision ||
       document.analysisRevision ||
@@ -10509,7 +10724,13 @@ function normalizeSam3dBodyProportions(payload) {
     ready: Boolean(
       document.ready ??
         document.analyzed ??
-        Boolean(analysisRevision || measurements.length || morphs.length),
+        Boolean(
+          analysisRevision ||
+          measurements.length ||
+          morphs.length ||
+          shapeMeasurements.length ||
+          shapeMorphs.length,
+        ),
     ),
     state,
     message: String(
@@ -10557,11 +10778,26 @@ function normalizeSam3dBodyProportions(payload) {
         : null,
     measurements,
     morphs,
+    allMorphs: combinedMorphs.length
+      ? combinedMorphs
+      : [...morphs, ...shapeMorphs],
+    shapeMeasurements,
+    shapeMorphs,
+    shapeUnavailable,
+    shapeConfidence: sam3dBodyProportionConfidence(
+      document.shape_confidence ??
+        document.shapeConfidence ??
+        document.shape_target?.overallConfidence ??
+        document.shapeTarget?.overallConfidence,
+    ),
     unavailable: unavailableRegions,
     canApply: Boolean(
       document.can_apply ??
         document.canApply ??
-        (analysisRevision && morphs.some((morph) => morph.available)),
+        (
+          analysisRevision &&
+          [...morphs, ...shapeMorphs].some((morph) => morph.available)
+        ),
     ),
     canUndo: Boolean(
       document.can_undo ??
@@ -10571,6 +10807,12 @@ function normalizeSam3dBodyProportions(payload) {
         applyRevision,
     ),
     applied: Boolean(document.applied ?? applyRevision),
+    bodyShapeReady: Boolean(
+      document.body_shape_ready ?? document.bodyShapeReady,
+    ),
+    bodyShapePreparing: Boolean(
+      document.body_shape_preparing ?? document.bodyShapePreparing,
+    ),
     poseApplied: Boolean(
       document.pose_applied ?? document.poseApplied ?? false,
     ),
@@ -10606,7 +10848,7 @@ async function loadSam3dBodyProportions(
   if (
     settings.referenceJobId !== normalizedId ||
     !sam3dBodyReferencesReady(settings.references) ||
-    sam3dBodyReferenceSetIssue(settings.references)
+    sam3dBodyReferenceSetIssue(settings.references, settings.regions)
   ) {
     return null;
   }
@@ -10630,6 +10872,8 @@ async function loadSam3dBodyProportions(
         personIndex: settings.personIndex,
         strength: settings.strength,
         regions: settings.regions,
+        shapeStrength: settings.shapeStrength,
+        shapeRegions: settings.shapeRegions,
         references: settings.references,
       },
     );
@@ -10649,6 +10893,9 @@ async function loadSam3dBodyProportions(
           "Body-proportion fitting is not available in this manager build.",
         measurements: [],
         morphs: [],
+        shapeMeasurements: [],
+        shapeMorphs: [],
+        shapeUnavailable: [],
         canApply: false,
         canUndo: false,
       };
@@ -10720,8 +10967,8 @@ async function pollSam3dBodyProportions() {
     app.sam3dBodyProportionPollAttempts = 0;
     if (action === SAM3D_BODY_PROPORTION_ACTIONS.apply) {
       toast(
-        "Body proportions applied",
-        "VaM confirmed the exact morph revision. Apply pose + camera below to refit the controllers to the new bone lengths.",
+        "Body fit applied",
+        "VaM confirmed the exact Structure and Body Shape revision. Apply pose + camera below to refit the controllers.",
       );
     } else {
       toast(
@@ -10775,18 +11022,18 @@ function sam3dBodyConfidenceLabel(value) {
   return `${Math.round(value)}% · ${level}`;
 }
 
-function renderSam3dBodyMeasurements(analysis) {
-  elements.sam3dProportionsMeasurements.replaceChildren();
-  if (!analysis.measurements.length) {
+function renderSam3dMeasurementList(target, measurements, emptyMessage) {
+  target.replaceChildren();
+  if (!measurements.length) {
     const empty = createElement("div", "inline-empty");
     const message = document.createElement("p");
-    message.textContent = "No proportion measurements were returned.";
+    message.textContent = emptyMessage;
     empty.append(message);
-    elements.sam3dProportionsMeasurements.append(empty);
+    target.append(empty);
     return;
   }
   const fragment = document.createDocumentFragment();
-  for (const measurement of analysis.measurements) {
+  for (const measurement of measurements) {
     const item = createElement("article", "sam3d-measurement-item");
     const heading = createElement("div", "sam3d-measurement-heading");
     const name = document.createElement("strong");
@@ -10823,23 +11070,42 @@ function renderSam3dBodyMeasurements(analysis) {
     item.append(heading, values, meta);
     fragment.append(item);
   }
-  elements.sam3dProportionsMeasurements.append(fragment);
+  target.append(fragment);
 }
 
-function renderSam3dMorphChanges(analysis) {
-  elements.sam3dProportionsMorphs.replaceChildren();
-  const unavailable = asArray(analysis.unavailable);
-  if (!analysis.morphs.length && !unavailable.length) {
+function renderSam3dBodyMeasurements(analysis) {
+  renderSam3dMeasurementList(
+    elements.sam3dProportionsMeasurements,
+    analysis.measurements,
+    "No Structure measurements were returned.",
+  );
+}
+
+function renderSam3dShapeMeasurements(analysis) {
+  renderSam3dMeasurementList(
+    elements.sam3dShapeMeasurements,
+    asArray(analysis.shapeMeasurements),
+    "No Body Shape measurements were returned for the selected regions.",
+  );
+}
+
+function renderSam3dMorphChangeList(
+  target,
+  morphs,
+  unavailable,
+  emptyMessage,
+) {
+  target.replaceChildren();
+  if (!morphs.length && !unavailable.length) {
     const empty = createElement("div", "inline-empty");
     const message = document.createElement("p");
-    message.textContent =
-      "No safe VaM morph changes are available for this fit.";
+    message.textContent = emptyMessage;
     empty.append(message);
-    elements.sam3dProportionsMorphs.append(empty);
+    target.append(empty);
     return;
   }
   const fragment = document.createDocumentFragment();
-  for (const morph of analysis.morphs) {
+  for (const morph of morphs) {
     const item = createElement(
       "article",
       `sam3d-morph-change${morph.available ? "" : " is-unavailable"}`,
@@ -10887,7 +11153,25 @@ function renderSam3dMorphChanges(analysis) {
     item.append(copy, values);
     fragment.append(item);
   }
-  elements.sam3dProportionsMorphs.append(fragment);
+  target.append(fragment);
+}
+
+function renderSam3dMorphChanges(analysis) {
+  renderSam3dMorphChangeList(
+    elements.sam3dProportionsMorphs,
+    analysis.morphs,
+    asArray(analysis.unavailable),
+    "No safe VaM Structure changes are available for this fit.",
+  );
+}
+
+function renderSam3dShapeMorphChanges(analysis) {
+  renderSam3dMorphChangeList(
+    elements.sam3dShapeMorphs,
+    asArray(analysis.shapeMorphs),
+    asArray(analysis.shapeUnavailable),
+    "No safe VaM Body Shape changes are available for the selected regions.",
+  );
 }
 
 function renderSam3dBodyProportions() {
@@ -10914,12 +11198,20 @@ function renderSam3dBodyProportions() {
   const referencesReady = sam3dBodyReferencesReady(settings.references);
   const referenceCombinationIssue = sam3dBodyReferenceSetIssue(
     settings.references,
+    settings.regions,
   );
   const revisionReady = Boolean(
     job && SAM3D_JOB_ID_PATTERN.test(job.revision),
   );
   const targetReady = Boolean(settings.targetUid);
-  const regionsReady = settings.regions.length > 0;
+  const regionsReady =
+    settings.regions.length > 0 || settings.shapeRegions.length > 0;
+  const bodyShapeCalibration =
+    sam3dBodyShapeCalibrationState(settings);
+  const bodyShapeAnalyzeBlocked =
+    bodyShapeCalibration.analyzeBlocked;
+  const bodyShapeApplyBlocked =
+    bodyShapeCalibration.applyBlocked;
   const unavailable = analysis?.available === false;
   const analyzed = Boolean(analysis?.ready);
   const poseApplied =
@@ -10939,17 +11231,23 @@ function renderSam3dBodyProportions() {
         serializeSam3dBodyReferences(settings.references)
       : Number.isFinite(analysis.personIndex) &&
         analysis.personIndex !== settings.personIndex);
+  const bodyShapeReadinessChanged =
+    analyzed &&
+    analysis.bodyShapeReady !== bodyShapeCalibration.ready;
   const dirty =
     analyzed &&
     (app.sam3dBodyProportionsDirty ||
       targetChanged ||
-      referenceChanged);
+      referenceChanged ||
+      bodyShapeReadinessChanged);
 
   elements.sam3dFitStrengthValue.value = `${settings.strength}%`;
+  elements.sam3dShapeStrengthValue.value = `${settings.shapeStrength}%`;
   elements.sam3dProportionsState.className =
     `sam3d-proportions-state${
       app.sam3dBodyProportionsInFlight ||
-      app.sam3dBodyProportionsPendingAction
+      app.sam3dBodyProportionsPendingAction ||
+      bodyShapeAnalyzeBlocked
         ? " is-running"
         : error
           ? " is-error"
@@ -10967,12 +11265,17 @@ function renderSam3dBodyProportions() {
     Boolean(referenceCombinationIssue) ||
     !revisionReady ||
     !targetReady ||
-    !regionsReady;
+    !regionsReady ||
+    bodyShapeAnalyzeBlocked;
 
   for (const region of SAM3D_BODY_PROPORTION_REGIONS) {
     sam3dBodyProportionRegionControl(region).disabled = busy;
   }
+  for (const region of SAM3D_BODY_SHAPE_REGIONS) {
+    sam3dBodyShapeRegionControl(region).disabled = busy;
+  }
   elements.sam3dFitStrength.disabled = busy;
+  elements.sam3dShapeStrength.disabled = busy;
   for (const card of Array.from(
     elements.sam3dMorphReferenceGallery.querySelectorAll?.(
       "[data-sam3d-body-reference]",
@@ -11000,12 +11303,12 @@ function renderSam3dBodyProportions() {
       SAM3D_BODY_PROPORTION_ACTIONS.undo;
     elements.sam3dProportionsStateTitle.textContent = undoing
       ? "Restoring the previous body…"
-      : "Applying bounded morph changes…";
+      : "Applying the combined body fit…";
     elements.sam3dProportionsStateMessage.textContent =
       "Waiting for VaM to publish the exact post-change morph revision.";
   } else if (app.sam3dBodyProportionsInFlight) {
     elements.sam3dProportionsStateTitle.textContent =
-      "Analyzing neutral body proportions…";
+      "Analyzing Structure and Body Shape…";
     elements.sam3dProportionsStateMessage.textContent =
       "Reading the selected Person and comparing it with the canonical SAM 3D body. VaM is not being changed.";
   } else if (error) {
@@ -11042,7 +11345,19 @@ function renderSam3dBodyProportions() {
     elements.sam3dProportionsStateTitle.textContent =
       "Choose at least one body region";
     elements.sam3dProportionsStateMessage.textContent =
-      "Analysis remains read-only, but it needs a region to measure.";
+      "Select at least one Structure or Body Shape region to measure.";
+  } else if (bodyShapeAnalyzeBlocked) {
+    elements.sam3dProportionsStateTitle.textContent =
+      "Preparing neutral body-shape calibration in VaM…";
+    elements.sam3dProportionsStateMessage.textContent =
+      "VaM is measuring the selected Person’s neutral mesh. Analyze and Apply will unlock automatically when it is ready; clear all Body Shape regions to continue with Structure only.";
+  } else if (bodyShapeReadinessChanged) {
+    elements.sam3dProportionsStateTitle.textContent =
+      bodyShapeCalibration.ready
+        ? "Neutral body-shape calibration ready"
+        : "Neutral body-shape calibration changed";
+    elements.sam3dProportionsStateMessage.textContent =
+      "Run Analyze again to bind the proposal to VaM’s current stable body revision before applying it.";
   } else if (dirty) {
     elements.sam3dProportionsStateTitle.textContent =
       "Analysis settings changed";
@@ -11054,27 +11369,33 @@ function renderSam3dBodyProportions() {
     elements.sam3dProportionsStateMessage.textContent =
       analysis.blockedReason ||
       analysis.message ||
-      "Review every measured ratio and proposed VaM morph before applying.";
+      "Review every Structure and Body Shape change before applying the combined fit.";
   } else {
     elements.sam3dProportionsStateTitle.textContent =
       "Analyze before changing VaM";
     elements.sam3dProportionsStateMessage.textContent =
-      "Compare the neutral SAM 3D body with the selected Person. Analysis is read-only.";
+      "Compare Structure and selected Body Shape regions with the Person. Analysis is read-only.";
   }
 
   elements.sam3dProportionsResults.hidden = !analyzed;
   if (analyzed) {
     elements.sam3dProportionsConfidence.textContent =
       sam3dBodyConfidenceLabel(analysis.confidence);
+    elements.sam3dShapeConfidence.textContent =
+      sam3dBodyConfidenceLabel(analysis.shapeConfidence);
     elements.sam3dProportionsDisagreement.textContent =
       Number.isFinite(analysis.disagreement)
         ? `${Math.round(analysis.disagreement)}%`
         : "Not compared";
     renderSam3dBodyMeasurements(analysis);
     renderSam3dMorphChanges(analysis);
+    renderSam3dShapeMeasurements(analysis);
+    renderSam3dShapeMorphChanges(analysis);
   } else {
     elements.sam3dProportionsMeasurements.replaceChildren();
     elements.sam3dProportionsMorphs.replaceChildren();
+    elements.sam3dShapeMeasurements.replaceChildren();
+    elements.sam3dShapeMorphs.replaceChildren();
   }
 
   elements.sam3dProportionsApply.disabled =
@@ -11087,7 +11408,8 @@ function renderSam3dBodyProportions() {
     !referencesReady ||
     Boolean(referenceCombinationIssue) ||
     !targetReady ||
-    !regionsReady;
+    !regionsReady ||
+    bodyShapeApplyBlocked;
   const undoReady =
     !busy &&
     analyzed &&
@@ -11108,7 +11430,9 @@ function renderSam3dBodyProportions() {
   let note =
     `${settings.references.length} Morph reference${
       settings.references.length === 1 ? "" : "s"
-    } selected. Arms, legs, torso, and widths are geometric fits; soft-body physics is not inferred.`;
+    } selected. Structure and ${settings.shapeRegions.length} Body Shape region${
+      settings.shapeRegions.length === 1 ? "" : "s"
+    } will be fitted together. Face morphs and soft-body physics are excluded.`;
   if (!settings.references.length) {
     note = "Select one to eight completed bodies before analyzing.";
     elements.sam3dProportionsNote.classList.add("is-error");
@@ -11125,6 +11449,19 @@ function renderSam3dBodyProportions() {
   } else if (error) {
     note = "No VaM changes were made. Retry the read-only analysis.";
     elements.sam3dProportionsNote.classList.add("is-error");
+  } else if (bodyShapeCalibration.preparing) {
+    note = settings.shapeRegions.length
+      ? "Preparing neutral body-shape calibration in VaM… Structure-only analysis remains available when all Body Shape regions are cleared."
+      : "VaM is preparing its neutral body-shape calibration. Structure analysis and review are available now; Apply will unlock when the stable cache is ready.";
+  } else if (bodyShapeApplyBlocked) {
+    note =
+      "Apply requires a valid neutral body-shape calibration from VaM." +
+      (bodyShapeCalibration.reason
+        ? ` ${bodyShapeCalibration.reason}`
+        : "");
+  } else if (bodyShapeReadinessChanged) {
+    note =
+      "VaM’s neutral body-shape calibration changed after this proposal was analyzed. Run Analyze again before applying.";
   } else if (dirty) {
     note =
       "This proposal is stale because a region or fit strength changed.";
@@ -11133,7 +11470,11 @@ function renderSam3dBodyProportions() {
       "Undo pose + camera in step 5 before restoring the previous body morphs.";
   } else if (analysis?.blockedReason) {
     note = analysis.blockedReason;
-  } else if (analyzed && !analysis.morphs.length) {
+  } else if (
+    analyzed &&
+    !analysis.morphs.length &&
+    !asArray(analysis.shapeMorphs).length
+  ) {
     note =
       "Measurements are available, but no allowlisted morph change can be applied safely.";
   } else if (analysis?.applied) {
@@ -11189,9 +11530,11 @@ async function analyzeSam3dBodyProportions() {
     app.sam3dBodyProportions.personIndex = settings.personIndex;
     app.sam3dBodyProportions.references = settings.references;
     app.sam3dBodyProportionsDirty = false;
+    const proposedCount =
+      analysis.morphs.length + asArray(analysis.shapeMorphs).length;
     toast(
       "Body analysis ready",
-      `${analysis.measurements.length} measurements and ${analysis.morphs.length} bounded morph changes were proposed for ${settings.targetUid}.`,
+      `${analysis.measurements.length + asArray(analysis.shapeMeasurements).length} measurements and ${proposedCount} bounded changes were proposed for ${settings.targetUid}.`,
     );
   } catch (error) {
     app.sam3dBodyProportionsError = error;
@@ -11209,17 +11552,31 @@ async function applySam3dBodyProportions() {
   const analysis = app.sam3dBodyProportions;
   if (!job || !analysis || elements.sam3dProportionsApply.disabled) return;
   const confirmed = await showDialog({
-    eyebrow: "Apply body-proportion fit",
-    title: "Change this Person’s body proportions?",
+    eyebrow: "Apply combined body fit",
+    title: "Apply Structure and Body Shape to this Person?",
     message:
-      "Only the reviewed, allowlisted morph changes will be applied. After VaM confirms the new morph revision, apply pose + camera in step 5 to refit the controllers.",
-    confirmLabel: "Apply morphs",
+      "The reviewed Structure and Body Shape morphs are applied atomically with one exact undo. Face morphs and breast/glute physics settings stay untouched. After VaM confirms the revision, apply pose + camera in step 5.",
+    confirmLabel: "Apply body fit",
     icon: "warning",
     plan: [
       ["Person", settings.targetUid],
       ["Morph references", String(settings.references.length)],
-      ["Regions", settings.regions.join(", ")],
-      ["Fit strength", `${settings.strength}%`],
+      [
+        "Structure",
+        settings.regions.length
+          ? `${settings.regions.join(", ")} · ${settings.strength}%`
+          : "Not selected",
+      ],
+      [
+        "Body Shape",
+        settings.shapeRegions.length
+          ? `${settings.shapeRegions.join(", ")} · ${settings.shapeStrength}%`
+          : "Not selected",
+      ],
+      [
+        "Reviewed changes",
+        String(analysis.morphs.length + asArray(analysis.shapeMorphs).length),
+      ],
       ["Scale", "Body Scale unchanged; final height may change"],
     ],
   });
@@ -11257,7 +11614,7 @@ async function applySam3dBodyProportions() {
     toast(
       "Body fit queued",
       payload.message ||
-        "The bridge is applying the bounded morph changes.",
+        "The bridge is applying the combined bounded body fit.",
     );
     await loadPersons({ quiet: true });
     app.sam3dBodyProportionsInFlight = false;

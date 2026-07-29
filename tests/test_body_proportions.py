@@ -58,6 +58,8 @@ def _live_status() -> dict[str, object]:
             "shoulderSpan": 0.35,
             "hipSpan": 0.30,
         },
+        "bodyShapeReady": True,
+        "bodyShapePreparing": False,
         "morphs": [
             {
                 "key": "1" * 32,

@@ -143,9 +143,7 @@ class WebSecurityTests(unittest.TestCase):
         }
         control_result = {"bridge_request": "timeline-request"}
         self.server.service.timeline = mock.Mock(return_value=timeline)
-        self.server.service.control_timeline = mock.Mock(
-            return_value=control_result
-        )
+        self.server.service.control_timeline = mock.Mock(return_value=control_result)
 
         self.connection.request("GET", "/api/vam/timeline")
         unauthorized = self.connection.getresponse()
@@ -249,8 +247,8 @@ class WebSecurityTests(unittest.TestCase):
             "frame-ancestors 'none'", response.getheader("Content-Security-Policy")
         )
         document = response.read().decode("utf-8")
-        self.assertIn("/styles.css?v=0.17.0", document)
-        self.assertIn("/app.js?v=0.17.0", document)
+        self.assertIn("/styles.css?v=0.18.0", document)
+        self.assertIn("/app.js?v=0.18.0", document)
 
     def test_session_plugin_endpoints_report_and_import_defaults(self) -> None:
         preset_path = write_web_session_defaults(self.vam_root)
@@ -811,10 +809,7 @@ class WebSecurityTests(unittest.TestCase):
             f"/api/resources/73/thumbnail?token={encoded_token}",
         )
         self.assertTrue(
-            all(
-                "thumbnail_url" not in variant
-                for variant in item["variants"][1:]
-            )
+            all("thumbnail_url" not in variant for variant in item["variants"][1:])
         )
         self.assertIsNone(document["items"][1]["variants"])
         self.assertNotIn("thumbnail_url", document["items"][2]["variants"])
@@ -874,9 +869,7 @@ class WebSecurityTests(unittest.TestCase):
             "limit": 12,
             "offset": 0,
         }
-        self.server.service.package_resources = mock.Mock(
-            return_value=package_result
-        )
+        self.server.service.package_resources = mock.Mock(return_value=package_result)
         self.connection.request(
             "GET",
             "/api/packages/Creator.Look%20Set.4/resources"
@@ -914,8 +907,7 @@ class WebSecurityTests(unittest.TestCase):
             "/api/packages/Creator.Package.1/resources?q=" + ("x" * 501),
             "/api/packages/Creator.Package.1/resources?"
             + "&".join("type=Scene" for _ in range(65)),
-            "/api/packages/Creator.Package.1/resources?type="
-            + ("x" * 201),
+            "/api/packages/Creator.Package.1/resources?type=" + ("x" * 201),
             "/api/packages/Creator.Package.1/resources?q=bad%0Aquery",
         )
         for path in paths:
@@ -1034,9 +1026,7 @@ class WebSecurityTests(unittest.TestCase):
             "dependencies": [],
             "conflicts": [],
         }
-        self.server.service.resource_details = mock.Mock(
-            return_value=details_result
-        )
+        self.server.service.resource_details = mock.Mock(return_value=details_result)
         self.connection.request(
             "GET",
             "/api/resources/42/details?package_version=4",

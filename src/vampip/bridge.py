@@ -456,10 +456,9 @@ def _validate_allowlisted_resource_ref(
         raise ValueError("resource_ref must not be an absolute path or URI")
     if not resource_ref.casefold().endswith(extension.casefold()):
         raise ValueError(f"resource_ref must name a {extension} resource")
-    if (
-        require_preset_basename
-        and not resource_ref.rsplit("/", 1)[-1].casefold().startswith("preset_")
-    ):
+    if require_preset_basename and not resource_ref.rsplit("/", 1)[
+        -1
+    ].casefold().startswith("preset_"):
         raise ValueError("resource_ref basename must begin with Preset_")
     if any(segment in {"", ".", ".."} for segment in resource_ref.split("/")):
         raise ValueError("resource_ref must not contain empty, '.' or '..' segments")
@@ -609,15 +608,13 @@ def request_person_body_proportions(
 ) -> str:
     if not isinstance(changes, list):
         raise TypeError("changes must be a list")
-    if not 1 <= len(changes) <= 8:
-        raise ValueError("changes must contain between 1 and 8 morph updates")
+    if not 1 <= len(changes) <= 16:
+        raise ValueError("changes must contain between 1 and 16 morph updates")
     normalized: list[dict[str, object]] = []
     seen: set[str] = set()
     for index, change in enumerate(changes):
         if not isinstance(change, dict) or set(change) != {"key", "value"}:
-            raise ValueError(
-                f"changes[{index}] must contain only key and value"
-            )
+            raise ValueError(f"changes[{index}] must contain only key and value")
         key = _validate_opaque_token(
             change["key"],
             label=f"changes[{index}].key",
@@ -631,9 +628,7 @@ def request_person_body_proportions(
             or not math.isfinite(float(value))
             or abs(float(value)) > 1.0
         ):
-            raise ValueError(
-                f"changes[{index}].value must be a bounded finite number"
-            )
+            raise ValueError(f"changes[{index}].value must be a bounded finite number")
         seen.add(key)
         normalized.append({"key": key, "value": float(value)})
     return _write_request(
@@ -772,9 +767,7 @@ def _validate_custom_unity_asset_resource_ref(resource_ref: str) -> None:
     elif folded.endswith(".scene"):
         extension = ".scene"
     else:
-        raise ValueError(
-            "resource_ref must name a .assetbundle or .scene resource"
-        )
+        raise ValueError("resource_ref must name a .assetbundle or .scene resource")
     _validate_allowlisted_resource_ref(
         resource_ref,
         required_prefix=CUSTOM_UNITY_ASSET_RESOURCE_PREFIX,
@@ -1031,7 +1024,10 @@ def read_scene_status(vam_root: Path) -> dict[str, object] | None:
                         "ready",
                         "selectedOnly",
                         "undoAvailable",
+                        "undoPending",
                         "blockedBySam3d",
+                        "bodyShapeReady",
+                        "bodyShapePreparing",
                     ):
                         _normalize_bool(body_proportions, key)
                     measurements = body_proportions.get("measurements")
@@ -1066,9 +1062,7 @@ def read_scene_status(vam_root: Path) -> dict[str, object] | None:
 def read_timeline_status(vam_root: Path) -> dict[str, object] | None:
     """Read the bridge's independently refreshed, bounded Timeline roster."""
 
-    document = _read_bridge_document(
-        bridge_directory(vam_root) / "timeline.json"
-    )
+    document = _read_bridge_document(bridge_directory(vam_root) / "timeline.json")
     if document is None:
         return None
     _normalize_nonnegative_int(document, "timelineProtocol")
@@ -1190,27 +1184,15 @@ def install_bridge(vam_root: Path, *, force: bool = False) -> list[Path]:
         planned.append((destination / name, source_root.joinpath(name).read_bytes()))
 
     preset_target = (
-        resolved_root
-        / "Custom"
-        / "Atom"
-        / "Empty"
-        / "Preset_VAMPipSAM3DCamera.vap"
+        resolved_root / "Custom" / "Atom" / "Empty" / "Preset_VAMPipSAM3DCamera.vap"
     )
     preset_payload = source_root.joinpath("Preset_VAMPipSAM3DCamera.vap").read_bytes()
     planned.append((preset_target, preset_payload))
 
     renderer_source = (
-        resources.files("vampip")
-        .joinpath("renderer_assets")
-        .joinpath("VRRendererX")
+        resources.files("vampip").joinpath("renderer_assets").joinpath("VRRendererX")
     )
-    renderer_target = (
-        resolved_root
-        / "Custom"
-        / "Scripts"
-        / "VAMPip"
-        / "VRRendererX"
-    )
+    renderer_target = resolved_root / "Custom" / "Scripts" / "VAMPip" / "VRRendererX"
 
     def plan_renderer_tree(source: object, renderer_destination: Path) -> None:
         for child in sorted(  # type: ignore[attr-defined]

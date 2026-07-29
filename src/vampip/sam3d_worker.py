@@ -19,8 +19,10 @@ from typing import Any
 
 if __package__:
     from .sam3d_body_signature import derive_body_proportions
+    from .sam3d_shape_geometry import derive_body_shape
 else:
     from sam3d_body_signature import derive_body_proportions
+    from sam3d_shape_geometry import derive_body_shape
 
 
 MHR70_NAMES = (
@@ -269,8 +271,7 @@ def _validated_person_arrays(
     missing = set(NUMERIC_ARRAY_SHAPES) - set(output)
     if missing:
         raise ValueError(
-            "SAM 3D Body numeric output is incomplete: "
-            + ", ".join(sorted(missing))
+            "SAM 3D Body numeric output is incomplete: " + ", ".join(sorted(missing))
         )
     return {
         f"person_{person_index}_{name}": _validated_numeric_array(
@@ -304,9 +305,7 @@ def _validate_stored_numeric_arrays(
                     or array.dtype != np.dtype(np.float32)
                     or not bool(np.isfinite(array).all())
                 ):
-                    raise ValueError(
-                        f"stored SAM 3D Body array {name} is invalid"
-                    )
+                    raise ValueError(f"stored SAM 3D Body array {name} is invalid")
     except (OSError, ValueError) as error:
         if isinstance(error, ValueError) and str(error).startswith(
             "stored SAM 3D Body"
@@ -323,13 +322,13 @@ def _file_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _neutral_body_proportions(
+def _neutral_body_identity(
     model: Any,
     output: dict[str, Any],
     *,
     np: Any,
     torch: Any,
-) -> dict[str, object]:
+) -> dict[str, dict[str, object]]:
     """Regenerate the inferred identity in the neutral MHR bind pose."""
 
     head = getattr(model, "head_pose", None)
@@ -383,10 +382,36 @@ def _neutral_body_proportions(
     longitudinal_axis = longitudinal_axis / axis_length
     projections = vertices @ longitudinal_axis
     stature = float(np.max(projections) - np.min(projections))
-    return derive_body_proportions(
-        keypoints.tolist(),
-        stature_m=stature,
-    )
+    return {
+        "bodyProportions": derive_body_proportions(
+            keypoints.tolist(),
+            stature_m=stature,
+        ),
+        "bodyShape": derive_body_shape(
+            vertices,
+            keypoints,
+            head.faces.detach().cpu().numpy(),
+            posed_keypoints=np.asarray(output["pred_keypoints_3d"]),
+            np=np,
+        ),
+    }
+
+
+def _neutral_body_proportions(
+    model: Any,
+    output: dict[str, Any],
+    *,
+    np: Any,
+    torch: Any,
+) -> dict[str, object]:
+    """Compatibility wrapper for callers that only need skeletal proportions."""
+
+    return _neutral_body_identity(
+        model,
+        output,
+        np=np,
+        torch=torch,
+    )["bodyProportions"]
 
 
 def _camera_intrinsics(
@@ -512,10 +537,7 @@ def run(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     request = json.loads(request_path.read_text(encoding="utf-8"))
-    if (
-        not isinstance(request, dict)
-        or request.get("schema") not in {1, 2}
-    ):
+    if not isinstance(request, dict) or request.get("schema") not in {1, 2}:
         raise ValueError("worker request schema is unsupported")
     if request.get("schema") == 2 and request.get("modelId") != model_id:
         raise ValueError("worker request model does not match the checkpoint")
@@ -604,6 +626,12 @@ def run(
         keypoints2d = _nested_finite(output["pred_keypoints_2d"])
         if len(keypoints3d) != 70 or len(keypoints2d) != 70:
             raise RuntimeError("SAM 3D Body returned an unexpected keypoint layout")
+        neutral_identity = _neutral_body_identity(
+            model,
+            output,
+            np=np,
+            torch=torch,
+        )
         person = {
             "index": index,
             "bbox": _finite_list(output["bbox"], expected=4),
@@ -615,12 +643,7 @@ def run(
             "keypointNames": list(MHR70_NAMES),
             "keypoints3d": keypoints3d,
             "keypoints2d": keypoints2d,
-            "bodyProportions": _neutral_body_proportions(
-                model,
-                output,
-                np=np,
-                torch=torch,
-            ),
+            **neutral_identity,
         }
         people.append(person)
         arrays.update(

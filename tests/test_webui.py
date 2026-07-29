@@ -61,9 +61,7 @@ class WorkspaceWebUITests(unittest.TestCase):
 
     @unittest.skipUnless(shutil.which("node"), "Node.js is not installed")
     def test_library_pagination_state_clamps_boundaries(self) -> None:
-        pagination_start = self.javascript.index(
-            "function libraryPaginationState("
-        )
+        pagination_start = self.javascript.index("function libraryPaginationState(")
         pagination_end = self.javascript.index(
             "function libraryPageCount(", pagination_start
         )
@@ -754,9 +752,7 @@ process.stdout.write(JSON.stringify(output));
         self.assertIn('mode === "hair"', dispatch)
         self.assertIn("renderCharacterRecipe(category)", dispatch)
 
-        render_start = self.javascript.index(
-            "function renderWardrobeCharacterSheet("
-        )
+        render_start = self.javascript.index("function renderWardrobeCharacterSheet(")
         render_end = self.javascript.index(
             "function createHairLayerCard(", render_start
         )
@@ -881,12 +877,14 @@ process.stdout.write(JSON.stringify(output));
         self.assertIn("slot.tags.some((tag) => terms.has(tag))", slot)
         self.assertNotIn(".includes(tag)", slot)
         self.assertLess(
-            self.javascript.index('"high-heels",', self.javascript.index(
-                "const CHARACTER_SLOT_CLASSIFICATION_ORDER"
-            )),
-            self.javascript.index('"shoes-boots",', self.javascript.index(
-                "const CHARACTER_SLOT_CLASSIFICATION_ORDER"
-            )),
+            self.javascript.index(
+                '"high-heels",',
+                self.javascript.index("const CHARACTER_SLOT_CLASSIFICATION_ORDER"),
+            ),
+            self.javascript.index(
+                '"shoes-boots",',
+                self.javascript.index("const CHARACTER_SLOT_CLASSIFICATION_ORDER"),
+            ),
         )
 
     def test_unresolved_equipment_stays_visible_but_never_actionable(self) -> None:
@@ -906,12 +904,14 @@ process.stdout.write(JSON.stringify(output));
         self.assertIn("item.actionable !== false", row)
         self.assertIn('createElement("span", "equipment-in-game-badge")', row)
         self.assertIn('inGame.textContent = "In-game item"', row)
-        self.assertLess(row.index("if (!actionable)"), row.index(
-            "const category = clothingCategoryForItem(item)"
-        ))
-        self.assertLess(row.index("return row;"), row.index(
-            "const category = clothingCategoryForItem(item)"
-        ))
+        self.assertLess(
+            row.index("if (!actionable)"),
+            row.index("const category = clothingCategoryForItem(item)"),
+        )
+        self.assertLess(
+            row.index("return row;"),
+            row.index("const category = clothingCategoryForItem(item)"),
+        )
 
         remove_start = self.javascript.index("async function removeEquippedItem(")
         remove_end = self.javascript.index("async function loadPersons(", remove_start)
@@ -970,7 +970,9 @@ process.stdout.write(JSON.stringify(output));
         self.assertNotIn("characterSheetMode()", current)
 
         render_start = self.javascript.index("function renderHairStudio(")
-        render_end = self.javascript.index("function renderCharacterRecipe(", render_start)
+        render_end = self.javascript.index(
+            "function renderCharacterRecipe(", render_start
+        )
         render = self.javascript[render_start:render_end]
         self.assertIn("hair?.items || []", render)
         self.assertIn("createHairLayerCard(item, index, hair)", render)
@@ -978,8 +980,8 @@ process.stdout.write(JSON.stringify(output));
         self.assertIn("item.actionable", render)
         self.assertIn("lockedCount", render)
         self.assertIn("VAM-PIP will not guess the current preset", render)
-        self.assertNotIn("type = \"range\"", render)
-        self.assertNotIn("createElement(\"input\"", render)
+        self.assertNotIn('type = "range"', render)
+        self.assertNotIn('createElement("input"', render)
 
         hair_html_start = self.html.index('class="hair-studio"')
         hair_html_end = self.html.index('class="character-recipe"', hair_html_start)
@@ -1011,7 +1013,7 @@ process.stdout.write(JSON.stringify(output));
         self.assertIn('locked.textContent = "Locked"', card)
         self.assertIn("else if (item.actionable !== true)", card)
         self.assertIn('presentation.textContent = "In-game only"', card)
-        self.assertIn('button(', card)
+        self.assertIn("button(", card)
         self.assertIn('"Disable"', card)
         self.assertIn("disable.dataset.hairDisable = item.key", card)
         self.assertLess(
@@ -1043,9 +1045,7 @@ process.stdout.write(JSON.stringify(output));
             with self.subTest(forbidden=forbidden):
                 self.assertNotIn(forbidden, action)
 
-        availability_start = self.javascript.index(
-            "function hairActionAvailability("
-        )
+        availability_start = self.javascript.index("function hairActionAvailability(")
         availability_end = self.javascript.index(
             "function pendingHairMutationFor(", availability_start
         )
@@ -1062,9 +1062,7 @@ process.stdout.write(JSON.stringify(output));
             with self.subTest(guard=guard):
                 self.assertIn(guard, availability)
 
-        workspace_start = self.javascript.index(
-            "function workspaceApplyAvailability("
-        )
+        workspace_start = self.javascript.index("function workspaceApplyAvailability(")
         workspace_end = self.javascript.index(
             "async function confirmSceneLoad(", workspace_start
         )
@@ -1223,8 +1221,8 @@ process.stdout.write(JSON.stringify(output));
             "source.display_name",
             "source.label",
             "source.favorite",
-            "source.resource_type = \"Clothing Item Presets\"",
-            "source.relationship_kind = \"item-style\"",
+            'source.resource_type = "Clothing Item Presets"',
+            'source.relationship_kind = "item-style"',
             "source.relationship_confidence",
             "source.relationship_reason",
             "equipmentPackageVersion(source)",
@@ -1261,9 +1259,7 @@ process.stdout.write(JSON.stringify(output));
             block,
         )
         self.assertIn(
-            "renderResourceDetailDependencies(\n"
-            "    catalogue,\n"
-            "    item,",
+            "renderResourceDetailDependencies(\n    catalogue,\n    item,",
             block,
         )
         self.assertIn("reusableDependencyReport", block)
@@ -1327,9 +1323,7 @@ process.stdout.write(JSON.stringify(output));
             block,
         )
         self.assertNotIn('"Applied"', block)
-        tile_start = self.javascript.index(
-            "function createRelatedResourceTile("
-        )
+        tile_start = self.javascript.index("function createRelatedResourceTile(")
         tile_end = self.javascript.index(
             "function renderResourceDetailVariants(", tile_start
         )
@@ -1372,9 +1366,7 @@ process.stdout.write(JSON.stringify(output));
         self.assertIn("width: 100vw", self.styles)
         self.assertIn("body.resource-detail-open", self.styles)
         render_start = self.javascript.index("function renderLibrary()")
-        render_end = self.javascript.index(
-            "function showLoadingState()", render_start
-        )
+        render_end = self.javascript.index("function showLoadingState()", render_start)
         render = self.javascript[render_start:render_end]
         self.assertIn("const detailResourceId = detailWasOpen", render)
         self.assertIn("app.items.find(", render)
@@ -1395,9 +1387,7 @@ process.stdout.write(JSON.stringify(output));
         self,
     ) -> None:
         start = self.javascript.index("function boundedDependencyText(")
-        end = self.javascript.index(
-            "function renderResourceDetailVariants(", start
-        )
+        end = self.javascript.index("function renderResourceDetailVariants(", start)
         block = self.javascript[start:end]
         self.assertIn("const DEPENDENCY_PAGE_SIZE = 8;", self.javascript)
         self.assertIn("const MAX_RENDERED_DEPENDENCIES = 2_048;", self.javascript)
@@ -1452,9 +1442,7 @@ process.stdout.write(JSON.stringify(output));
         details_version_end = self.javascript.index(
             "function equipmentItemKey(", details_version_start
         )
-        details_version = self.javascript[
-            details_version_start:details_version_end
-        ]
+        details_version = self.javascript[details_version_start:details_version_end]
         self.assertIn('return "latest";', details_version)
         self.assertIn("item?.package_ref", details_version)
         self.assertIn("/\\.latest$/i.test(packageRef)", details_version)
@@ -1494,9 +1482,7 @@ process.stdout.write(JSON.stringify(output));
         )
         self.assertIn('aria-label="Dismiss return link"', self.html)
 
-        browse_start = self.javascript.index(
-            "function browseDependencyPackage("
-        )
+        browse_start = self.javascript.index("function browseDependencyPackage(")
         browse_end = self.javascript.index(
             "function dependencyCopyFingerprint(", browse_start
         )
@@ -1510,9 +1496,7 @@ process.stdout.write(JSON.stringify(output));
             browse,
         )
 
-        return_start = self.javascript.index(
-            "function resourceReturnLocationLabel("
-        )
+        return_start = self.javascript.index("function resourceReturnLocationLabel(")
         return_end = self.javascript.index(
             "function browseDependencyPackage(", return_start
         )
@@ -1529,9 +1513,7 @@ process.stdout.write(JSON.stringify(output));
         ):
             with self.subTest(saved_state=saved_state):
                 self.assertIn(saved_state, navigation)
-        capture_start = navigation.index(
-            "function captureResourceReturnContext()"
-        )
+        capture_start = navigation.index("function captureResourceReturnContext()")
         capture_end = navigation.index(
             "function resourceReturnStateMatches(", capture_start
         )
@@ -1563,9 +1545,7 @@ process.stdout.write(JSON.stringify(output));
             navigation,
         )
         missing_start = navigation.index("if (!freshItem)")
-        missing_end = navigation.index(
-            "const freshOpener", missing_start
-        )
+        missing_end = navigation.index("const freshOpener", missing_start)
         self.assertIn(
             "clearResourceReturnContext();",
             navigation[missing_start:missing_end],
@@ -1595,12 +1575,8 @@ process.stdout.write(JSON.stringify(output));
     def test_packages_surface_their_indexed_resources_and_exact_contents(
         self,
     ) -> None:
-        package_start = self.javascript.index(
-            "function normalizePackageResourceTypes("
-        )
-        package_end = self.javascript.index(
-            "function renderAccess()", package_start
-        )
+        package_start = self.javascript.index("function normalizePackageResourceTypes(")
+        package_end = self.javascript.index("function renderAccess()", package_start)
         package = self.javascript[package_start:package_end]
         for contract_field in (
             "item?.resource_count",
@@ -1633,14 +1609,12 @@ process.stdout.write(JSON.stringify(output));
         self.assertIn("verify the exact contents", package)
         self.assertIn(
             "model.thumbnail ||\n"
-            "          (model.id !== null ? resourceThumbnailUrl(model.id) : \"\")",
+            '          (model.id !== null ? resourceThumbnailUrl(model.id) : "")',
             package,
         )
 
         load_start = self.javascript.index("async function loadLibrary(")
-        load_end = self.javascript.index(
-            "function renderStatus()", load_start
-        )
+        load_end = self.javascript.index("function renderStatus()", load_start)
         load = self.javascript[load_start:load_end]
         self.assertIn(
             "`/api/packages/${encodeURIComponent(packageContentsId)}/resources`",
@@ -1654,8 +1628,8 @@ process.stdout.write(JSON.stringify(output));
             'params.set("q", app.query)',
             'params.append("type", resourceType)',
             'params.set("state", app.packageState)',
-            'limit: String(PAGE_SIZE)',
-            'offset: String(offset)',
+            "limit: String(PAGE_SIZE)",
+            "offset: String(offset)",
         ):
             with self.subTest(query_contract=query_contract):
                 self.assertIn(query_contract, load)
@@ -1681,12 +1655,8 @@ process.stdout.write(JSON.stringify(output));
     def test_package_scope_copy_conflicts_have_a_truthful_return_state(
         self,
     ) -> None:
-        error_start = self.javascript.index(
-            "function packageScopeCopyConflictCode("
-        )
-        error_end = self.javascript.index(
-            "function renderEmptyLibrary()", error_start
-        )
+        error_start = self.javascript.index("function packageScopeCopyConflictCode(")
+        error_end = self.javascript.index("function renderEmptyLibrary()", error_start)
         error_state = self.javascript[error_start:error_end]
         self.assertIn('"package_copy_conflict"', error_state)
         self.assertIn('"package_copy_choice_stale"', error_state)
@@ -1705,24 +1675,19 @@ process.stdout.write(JSON.stringify(output));
         self.assertIn('"Could not open package contents"', error_state)
         self.assertLess(
             error_state.index("if (packageCopyConflict)"),
-            error_state.index(
-                'if (app.view === "resources" && app.packageContentsId)'
-            ),
+            error_state.index('if (app.view === "resources" && app.packageContentsId)'),
         )
         self.assertNotIn(
             '"The local manager did not respond"',
             error_state[
-                error_state.index("if (packageCopyConflict)") :
-                error_state.index(
+                error_state.index("if (packageCopyConflict)") : error_state.index(
                     'elements.emptyTitle.textContent = "The local manager did not respond"'
                 )
             ],
         )
 
         action_start = self.javascript.index("function handleEmptyAction()")
-        action_end = self.javascript.index(
-            "function setConnection(", action_start
-        )
+        action_end = self.javascript.index("function setConnection(", action_start)
         action = self.javascript[action_start:action_end]
         self.assertIn('action === "return-package"', action)
         self.assertIn("returnToResourceContext();", action)
@@ -1778,9 +1743,7 @@ process.stdout.write(JSON.stringify(output));
         self.assertIn("loadLibrary();", exit_scope)
 
         clear_start = self.javascript.index("function clearFilters()")
-        clear_end = self.javascript.index(
-            "function updateClearFilters()", clear_start
-        )
+        clear_end = self.javascript.index("function updateClearFilters()", clear_start)
         clear = self.javascript[clear_start:clear_end]
         self.assertNotIn("packageContentsId", clear)
         self.assertNotIn("clearResourceReturnContext", clear)
@@ -1800,13 +1763,11 @@ process.stdout.write(JSON.stringify(output));
         self.assertIn("exitPackageContentsScope();", bind)
 
         card_start = self.javascript.index("function createResourceCard(")
-        card_end = self.javascript.index(
-            "function appendResourceActions(", card_start
-        )
+        card_end = self.javascript.index("function appendResourceActions(", card_start)
         card = self.javascript[card_start:card_end]
         self.assertIn(
             "model.thumbnail ||\n"
-            "    (model.id !== null ? resourceThumbnailUrl(model.id) : \"\")",
+            '    (model.id !== null ? resourceThumbnailUrl(model.id) : "")',
             card,
         )
 
@@ -1814,12 +1775,8 @@ process.stdout.write(JSON.stringify(output));
     def test_package_resource_summary_normalizer_tolerates_contract_aliases(
         self,
     ) -> None:
-        start = self.javascript.index(
-            "function normalizePackageResourceTypes("
-        )
-        end = self.javascript.index(
-            "function createPackageCard(", start
-        )
+        start = self.javascript.index("function normalizePackageResourceTypes(")
+        end = self.javascript.index("function createPackageCard(", start)
         helper = self.javascript[start:end]
         script = f"""
 "use strict";
@@ -1957,12 +1914,8 @@ async function api(path) {{
     def test_dependency_conflicts_offer_only_server_issued_copy_choices(
         self,
     ) -> None:
-        start = self.javascript.index(
-            "async function chooseDependencyPackageCopy("
-        )
-        end = self.javascript.index(
-            "function createDependencyRow(", start
-        )
+        start = self.javascript.index("async function chooseDependencyPackageCopy(")
+        end = self.javascript.index("function createDependencyRow(", start)
         block = self.javascript[start:end]
         self.assertIn('api("/api/package-copy-choice"', block)
         self.assertIn("package_id: conflict.packageId", block)
@@ -1980,8 +1933,10 @@ async function api(path) {{
             with self.subTest(path_field=path_field):
                 self.assertIn(path_field, self.javascript)
         request = block[
-            block.index('api("/api/package-copy-choice"') :
-            block.index("});", block.index('api("/api/package-copy-choice"')) + 3
+            block.index('api("/api/package-copy-choice"') : block.index(
+                "});", block.index('api("/api/package-copy-choice"')
+            )
+            + 3
         ]
         self.assertNotIn("relative_path:", request)
         self.assertNotIn("path:", request)
@@ -1989,9 +1944,7 @@ async function api(path) {{
     def test_package_conflict_errors_open_an_actionable_persistent_resolver(
         self,
     ) -> None:
-        conflict_start = self.javascript.index(
-            "function isPackageCopyConflictError("
-        )
+        conflict_start = self.javascript.index("function isPackageCopyConflictError(")
         conflict_end = self.javascript.index(
             "async function applyWorkspaceResource(", conflict_start
         )
@@ -2003,12 +1956,8 @@ async function api(path) {{
         self.assertIn("openResourceDetailDialog(item, opener)", conflict)
         self.assertIn("persistent: true", conflict)
         self.assertIn('actionLabel: "Review choices"', conflict)
-        apply_start = self.javascript.index(
-            "async function applyWorkspaceResource("
-        )
-        apply_end = self.javascript.index(
-            "function createPackageCard(", apply_start
-        )
+        apply_start = self.javascript.index("async function applyWorkspaceResource(")
+        apply_end = self.javascript.index("function createPackageCard(", apply_start)
         apply = self.javascript[apply_start:apply_end]
         self.assertIn("isPackageCopyConflictError(error)", apply)
         self.assertIn(
@@ -2115,9 +2064,7 @@ process.stdout.write(JSON.stringify({{
             "copy-a",
         )
         self.assertEqual(
-            result["renormalized"]["conflicts"][0]["copies"][0][
-                "contentSha256"
-            ],
+            result["renormalized"]["conflicts"][0]["copies"][0]["contentSha256"],
             "1:abc",
         )
         self.assertEqual(
@@ -2195,9 +2142,7 @@ process.stdout.write(JSON.stringify({{
         self.assertNotIn("new Set(", load)
 
     def test_missing_resource_reason_is_reused_by_disabled_actions(self) -> None:
-        access_start = self.javascript.index(
-            "function appendPackageAccessActions("
-        )
+        access_start = self.javascript.index("function appendPackageAccessActions(")
         access_end = self.javascript.index(
             "function resourceUpdateVersion(",
             access_start,
@@ -2207,9 +2152,7 @@ process.stdout.write(JSON.stringify({{
         self.assertIn("leaseButton.textContent = missingStatus.label", access)
         self.assertIn("leaseButton.title = missingStatus.detail", access)
 
-        clothing_start = self.javascript.index(
-            "function clothingActionAvailability("
-        )
+        clothing_start = self.javascript.index("function clothingActionAvailability(")
         clothing_end = self.javascript.index(
             "async function setPersonClothing(",
             clothing_start,
@@ -2222,9 +2165,7 @@ process.stdout.write(JSON.stringify({{
         self.assertIn("reason = missingStatus.detail", clothing)
         self.assertIn("label = missingStatus.label", clothing)
 
-        workspace_start = self.javascript.index(
-            "function workspaceApplyAvailability("
-        )
+        workspace_start = self.javascript.index("function workspaceApplyAvailability(")
         workspace_end = self.javascript.index(
             "async function applyWorkspaceResource(",
             workspace_start,
@@ -2522,9 +2463,7 @@ process.stdout.write(JSON.stringify(output));
             self.javascript,
         )
         client_start = self.javascript.index("const TimelineClient")
-        client_end = self.javascript.index(
-            "function timelineProperty(", client_start
-        )
+        client_end = self.javascript.index("function timelineProperty(", client_start)
         client = self.javascript[client_start:client_end]
         for field in (
             "timeline_id:",
@@ -2785,9 +2724,7 @@ process.stdout.write(JSON.stringify({{
                 "layerId": "",
                 "clipId": "",
                 "trackId": "",
-                "qualified": (
-                    "Overflow Segment::Overflow Layer::Overflow Clip"
-                ),
+                "qualified": ("Overflow Segment::Overflow Layer::Overflow Clip"),
                 "name": "Overflow Clip",
                 "segment": "Overflow Segment",
                 "layer": "Overflow Layer",
@@ -3043,9 +2980,7 @@ process.stdout.write(JSON.stringify({{
 
     @unittest.skipUnless(shutil.which("node"), "Node.js is not installed")
     def test_sam3d_pending_capture_does_not_alias_an_older_image(self) -> None:
-        selection_start = self.javascript.index(
-            "function sam3dSelectedCapture("
-        )
+        selection_start = self.javascript.index("function sam3dSelectedCapture(")
         selection_end = self.javascript.index(
             "function sam3dArtifactCandidate(", selection_start
         )
@@ -3125,9 +3060,7 @@ process.stdout.write(JSON.stringify(output));
         self.assertEqual(result["renders"], 1)
 
     def test_sam3d_apply_is_capability_and_revision_guarded(self) -> None:
-        apply_start = self.javascript.index(
-            "function renderSam3dApplyState("
-        )
+        apply_start = self.javascript.index("function renderSam3dApplyState(")
         apply_end = self.javascript.index(
             "async function applySam3dResult(", apply_start
         )
@@ -3169,12 +3102,8 @@ process.stdout.write(JSON.stringify(output));
             "expected_revision: solutionRevision",
             self.javascript,
         )
-        capture_start = self.javascript.index(
-            "async function captureSam3dResult("
-        )
-        capture_end = self.javascript.index(
-            "const TimelineClient", capture_start
-        )
+        capture_start = self.javascript.index("async function captureSam3dResult(")
+        capture_end = self.javascript.index("const TimelineClient", capture_start)
         capture = self.javascript[capture_start:capture_end]
         self.assertIn(
             'const cameraUid = String(job.cameraUid || "").trim();',
@@ -3184,9 +3113,7 @@ process.stdout.write(JSON.stringify(output));
             "elements.sam3dCameraTarget.value",
             capture,
         )
-        targets_start = self.javascript.index(
-            "function renderSam3dTargets("
-        )
+        targets_start = self.javascript.index("function renderSam3dTargets(")
         targets_end = self.javascript.index(
             "function sam3dApplyCapabilityAvailable(", targets_start
         )
@@ -3213,8 +3140,8 @@ process.stdout.write(JSON.stringify(output));
         self.assertIn("@media (max-width: 500px)", self.styles)
 
     def test_static_assets_use_the_current_cache_version(self) -> None:
-        self.assertIn("/styles.css?v=0.17.0", self.html)
-        self.assertIn("/app.js?v=0.17.0", self.html)
+        self.assertIn("/styles.css?v=0.18.0", self.html)
+        self.assertIn("/app.js?v=0.18.0", self.html)
 
 
 if __name__ == "__main__":

@@ -5145,6 +5145,77 @@ body.resource-detail-open {
   line-height: 1.35;
 }
 
+.sam3d-shape-controls {
+  display: grid;
+  gap: 12px;
+  padding: 13px;
+  background:
+    linear-gradient(145deg, rgba(190, 137, 255, 0.08), transparent 58%),
+    var(--surface);
+  border: 1px solid rgba(190, 137, 255, 0.25);
+  border-radius: 11px;
+}
+
+.sam3d-shape-controls > header,
+.sam3d-shape-results-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.sam3d-shape-controls > header span,
+.sam3d-shape-controls > header strong,
+.sam3d-shape-results-heading span,
+.sam3d-shape-results-heading strong {
+  display: block;
+}
+
+.sam3d-shape-controls > header span,
+.sam3d-shape-results-heading span {
+  color: #caa6ff;
+  font-size: 8px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.sam3d-shape-controls > header strong,
+.sam3d-shape-results-heading strong {
+  margin-top: 2px;
+  color: var(--text);
+  font-size: 12px;
+}
+
+.sam3d-shape-controls > header > small,
+.sam3d-shape-results-heading > small {
+  color: var(--text-faint);
+  font-size: 8px;
+}
+
+.sam3d-shape-region-grid > label:has(input:checked) {
+  background: rgba(190, 137, 255, 0.1);
+  border-color: rgba(190, 137, 255, 0.36);
+}
+
+.sam3d-shape-region-grid input,
+.sam3d-shape-strength input {
+  accent-color: #b989ff;
+}
+
+.sam3d-shape-strength output {
+  color: #caa6ff;
+}
+
+.sam3d-shape-controls > p {
+  margin: 0;
+  padding-top: 10px;
+  color: var(--text-faint);
+  border-top: 1px solid var(--border-soft);
+  font-size: 8px;
+  line-height: 1.5;
+}
+
 .sam3d-scale-note {
   margin: 0;
   padding: 12px;
@@ -5235,7 +5306,7 @@ body.resource-detail-open {
 
 .sam3d-proportions-summary {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 9px;
   margin-top: 12px;
 }
@@ -5265,6 +5336,20 @@ body.resource-detail-open {
 
 .sam3d-proportions-section {
   margin-top: 15px;
+}
+
+.sam3d-shape-results {
+  margin-top: 18px;
+  padding: 14px;
+  background:
+    linear-gradient(145deg, rgba(190, 137, 255, 0.055), transparent 62%),
+    var(--surface-raised);
+  border: 1px solid rgba(190, 137, 255, 0.2);
+  border-radius: 11px;
+}
+
+.sam3d-shape-results[hidden] {
+  display: none;
 }
 
 .sam3d-proportions-section-heading {

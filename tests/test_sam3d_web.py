@@ -293,6 +293,7 @@ class Sam3dWebTests(unittest.TestCase):
                     f"/api/sam3d/jobs/{job_id}/body-proportions"
                     "?target_uid=Person&person_index=1&fit_strength=0.6"
                     "&regions=arms,legs"
+                    "&shape_strength=0.7&shape_regions=breasts,glutes"
                 ),
                 headers={"X-VAMPIP-Token": self.token},
             )
@@ -306,6 +307,8 @@ class Sam3dWebTests(unittest.TestCase):
             references=None,
             strength=0.6,
             regions=["arms", "legs"],
+            shape_strength=0.7,
+            shape_regions=["breasts", "glutes"],
         )
 
     def test_body_proportion_get_propagates_ordered_references(self) -> None:
@@ -368,6 +371,8 @@ class Sam3dWebTests(unittest.TestCase):
                 "person_index": 0,
                 "regions": ["legs", "torso"],
                 "fit_strength": 0.5,
+                "shape_regions": ["breasts", "waist"],
+                "shape_strength": 0.7,
                 "references": references,
             }
         ).encode("utf-8")
@@ -403,6 +408,8 @@ class Sam3dWebTests(unittest.TestCase):
             references=references,
             strength=0.5,
             regions=["legs", "torso"],
+            shape_strength=0.7,
+            shape_regions=["breasts", "waist"],
         )
         apply.assert_called_once_with(
             job_id,
@@ -413,7 +420,41 @@ class Sam3dWebTests(unittest.TestCase):
             references=references,
             strength=0.5,
             regions=["legs", "torso"],
+            shape_strength=0.7,
+            shape_regions=["breasts", "waist"],
         )
+
+    def test_body_proportion_post_rejects_null_shape_regions(self) -> None:
+        job_id = "c" * 32
+        body = json.dumps(
+            {
+                "action": "analyze",
+                "expected_job_revision": "d" * 32,
+                "target_uid": "Person",
+                "shape_regions": None,
+            }
+        ).encode("utf-8")
+        with mock.patch.object(
+            self.service,
+            "sam3d_body_proportions",
+        ) as analyze:
+            self.connection.request(
+                "POST",
+                f"/api/sam3d/jobs/{job_id}/body-proportions",
+                body=body,
+                headers={
+                    "X-VAMPIP-Token": self.token,
+                    "Content-Type": "application/json",
+                    "Content-Length": str(len(body)),
+                },
+            )
+            response = self.connection.getresponse()
+            self.assertEqual(response.status, 400)
+            self.assertIn(
+                "shape_regions must be a list",
+                json.dumps(self.json(response)),
+            )
+        analyze.assert_not_called()
 
     def test_body_proportion_apply_rejects_combined_pose_or_height_claims(
         self,

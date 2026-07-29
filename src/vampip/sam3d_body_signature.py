@@ -8,7 +8,7 @@ does not depend on NumPy, Torch, or the SAM 3D Body environment.
 from __future__ import annotations
 
 import math
-from typing import Any, Iterable, Sequence
+from typing import Iterable, Sequence
 
 
 BODY_PROPORTION_MEASUREMENTS = (

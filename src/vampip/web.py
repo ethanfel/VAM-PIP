@@ -254,12 +254,8 @@ class ManagerRequestHandler(BaseHTTPRequestHandler):
                 }
             )
         last_action = document.get("last_vam_action")
-        if (
-            isinstance(document.get("last_capture"), dict)
-            or (
-                isinstance(last_action, dict)
-                and last_action.get("action") == "capture"
-            )
+        if isinstance(document.get("last_capture"), dict) or (
+            isinstance(last_action, dict) and last_action.get("action") == "capture"
         ):
             artifacts["capture"] = f"{base}/capture?token={token}"
         document["artifact_urls"] = artifacts
@@ -367,9 +363,7 @@ class ManagerRequestHandler(BaseHTTPRequestHandler):
                 self._json(HTTPStatus.OK, self.server.service.sam3d_status())
                 return
             if parsed.path == "/api/sam3d/jobs":
-                unexpected_fields = sorted(
-                    set(query) - {"limit", "offset", "token"}
-                )
+                unexpected_fields = sorted(set(query) - {"limit", "offset", "token"})
                 if unexpected_fields:
                     raise ValueError(
                         "unsupported SAM3D jobs query field(s): "
@@ -395,6 +389,8 @@ class ManagerRequestHandler(BaseHTTPRequestHandler):
                         "person_index",
                         "fit_strength",
                         "regions",
+                        "shape_strength",
+                        "shape_regions",
                         "references",
                         "token",
                     }
@@ -410,34 +406,47 @@ class ManagerRequestHandler(BaseHTTPRequestHandler):
                 person_values = query.get("person_index", ["0"])
                 strength_values = query.get("fit_strength", ["0.5"])
                 region_values = query.get("regions", [])
+                shape_strength_values = query.get("shape_strength", ["0.5"])
+                shape_region_values = query.get("shape_regions", [])
                 reference_values = query.get("references", [])
                 if (
                     len(person_values) != 1
                     or len(strength_values) != 1
                     or len(region_values) > 1
+                    or len(shape_strength_values) != 1
+                    or len(shape_region_values) > 1
                     or len(reference_values) > 1
                 ):
                     raise ValueError(
                         "body-proportion query fields may be supplied only once"
                     )
                 regions = (
-                    [
-                        value
-                        for value in region_values[0].split(",")
-                        if value
-                    ]
+                    [value for value in region_values[0].split(",") if value]
                     if region_values
                     else None
                 )
+                shape_regions = (
+                    [value for value in shape_region_values[0].split(",") if value]
+                    if shape_region_values
+                    else []
+                )
+                body_options: dict[str, object] = {
+                    "target_uid": target_values[0],
+                    "person_index": int(person_values[0]),
+                    "references": (reference_values[0] if reference_values else None),
+                    "strength": float(strength_values[0]),
+                    "regions": regions,
+                }
+                if "shape_strength" in query or "shape_regions" in query:
+                    body_options.update(
+                        {
+                            "shape_strength": float(shape_strength_values[0]),
+                            "shape_regions": shape_regions,
+                        }
+                    )
                 result = self.server.service.sam3d_body_proportions(
                     sam3d_body.group(1),
-                    target_uid=target_values[0],
-                    person_index=int(person_values[0]),
-                    references=(
-                        reference_values[0] if reference_values else None
-                    ),
-                    strength=float(strength_values[0]),
-                    regions=regions,
+                    **body_options,
                 )
                 self._json(HTTPStatus.OK, result)
                 return
@@ -476,9 +485,7 @@ class ManagerRequestHandler(BaseHTTPRequestHandler):
                     ),
                 )
                 return
-            sam3d_capture_artifact = _SAM3D_CAPTURE_ARTIFACT.fullmatch(
-                parsed.path
-            )
+            sam3d_capture_artifact = _SAM3D_CAPTURE_ARTIFACT.fullmatch(parsed.path)
             if sam3d_capture_artifact:
                 unexpected_fields = sorted(set(query) - {"token"})
                 if unexpected_fields:
@@ -621,11 +628,7 @@ class ManagerRequestHandler(BaseHTTPRequestHandler):
                     offset=int(query.get("offset", ["0"])[0]),
                 )
                 package = result.get("package")
-                version = (
-                    package.get("version")
-                    if isinstance(package, dict)
-                    else None
-                )
+                version = package.get("version") if isinstance(package, dict) else None
                 thumbnail_token = quote(self.server.api_token, safe="")
                 for item in result.get("items", []):
                     if not isinstance(item, dict):
@@ -715,9 +718,7 @@ class ManagerRequestHandler(BaseHTTPRequestHandler):
                 return
             details = _RESOURCE_DETAILS.fullmatch(parsed.path)
             if details:
-                unexpected_fields = sorted(
-                    set(query) - {"package_version", "token"}
-                )
+                unexpected_fields = sorted(set(query) - {"package_version", "token"})
                 if unexpected_fields:
                     raise ValueError(
                         "unsupported resource-details query field(s): "
@@ -750,9 +751,7 @@ class ManagerRequestHandler(BaseHTTPRequestHandler):
                 return
             thumbnail = _RESOURCE_THUMBNAIL.fullmatch(parsed.path)
             if thumbnail:
-                unexpected_fields = sorted(
-                    set(query) - {"package_version", "token"}
-                )
+                unexpected_fields = sorted(set(query) - {"package_version", "token"})
                 if unexpected_fields:
                     raise ValueError(
                         "unsupported resource-thumbnail query field(s): "
@@ -867,9 +866,7 @@ class ManagerRequestHandler(BaseHTTPRequestHandler):
                 vertical_fov: float | None = None
                 if raw_fov:
                     if len(raw_fov) != 1:
-                        raise ValueError(
-                            "vertical_fov must be supplied at most once"
-                        )
+                        raise ValueError("vertical_fov must be supplied at most once")
                     try:
                         vertical_fov = float(raw_fov[0])
                     except ValueError as error:
@@ -882,14 +879,8 @@ class ManagerRequestHandler(BaseHTTPRequestHandler):
                 model_id = raw_model_id[0] if raw_model_id else None
                 raw_comparison_id = query.get("comparison_id", [])
                 if len(raw_comparison_id) > 1:
-                    raise ValueError(
-                        "comparison_id must be supplied at most once"
-                    )
-                comparison_id = (
-                    raw_comparison_id[0]
-                    if raw_comparison_id
-                    else None
-                )
+                    raise ValueError("comparison_id must be supplied at most once")
+                comparison_id = raw_comparison_id[0] if raw_comparison_id else None
                 image_data, content_type = self._read_image()
                 result = service.create_sam3d_job(
                     image_data,
@@ -918,6 +909,8 @@ class ManagerRequestHandler(BaseHTTPRequestHandler):
                     "person_index",
                     "regions",
                     "fit_strength",
+                    "shape_regions",
+                    "shape_strength",
                     "references",
                 }
                 action_fields = {
@@ -948,9 +941,7 @@ class ManagerRequestHandler(BaseHTTPRequestHandler):
                     result = service.undo_sam3d_body_proportions(
                         sam3d_body.group(1),
                         target_uid=document["target_uid"],
-                        expected_apply_revision=document[
-                            "expected_apply_revision"
-                        ],
+                        expected_apply_revision=document["expected_apply_revision"],
                     )
                     self._json(HTTPStatus.ACCEPTED, result)
                     return
@@ -967,41 +958,47 @@ class ManagerRequestHandler(BaseHTTPRequestHandler):
                 person_index = document.get("person_index", 0)
                 strength = document.get("fit_strength", 0.5)
                 regions = document.get("regions")
+                shape_strength = document.get("shape_strength", 0.5)
+                shape_regions = document.get("shape_regions", [])
+                if "shape_regions" in document and not isinstance(shape_regions, list):
+                    raise ValueError("shape_regions must be a list")
+                body_options = {
+                    "target_uid": document["target_uid"],
+                    "person_index": person_index,
+                    "references": document.get("references"),
+                    "strength": strength,
+                    "regions": regions,
+                }
+                if "shape_strength" in document or "shape_regions" in document:
+                    body_options.update(
+                        {
+                            "shape_strength": shape_strength,
+                            "shape_regions": shape_regions,
+                        }
+                    )
                 result = service.sam3d_body_proportions(
                     sam3d_body.group(1),
-                    target_uid=document["target_uid"],
-                    person_index=person_index,
-                    references=document.get("references"),
-                    strength=strength,
-                    regions=regions,
+                    **body_options,
                 )
-                if result.get("job_revision") != document[
-                    "expected_job_revision"
-                ]:
-                    raise ValueError(
-                        "SAM3D job revision has changed; analyze again"
-                    )
+                if result.get("job_revision") != document["expected_job_revision"]:
+                    raise ValueError("SAM3D job revision has changed; analyze again")
                 if action == "analyze":
                     self._json(HTTPStatus.OK, result)
                     return
                 if "expected_analysis_revision" not in document:
                     raise ValueError(
-                        "missing body-proportion field: "
-                        "expected_analysis_revision"
+                        "missing body-proportion field: expected_analysis_revision"
                     )
+                apply_options = {
+                    "expected_job_revision": document["expected_job_revision"],
+                    "expected_analysis_revision": document[
+                        "expected_analysis_revision"
+                    ],
+                    **body_options,
+                }
                 result = service.apply_sam3d_body_proportions(
                     sam3d_body.group(1),
-                    expected_job_revision=document[
-                        "expected_job_revision"
-                    ],
-                    expected_analysis_revision=document[
-                        "expected_analysis_revision"
-                    ],
-                    target_uid=document["target_uid"],
-                    person_index=person_index,
-                    references=document.get("references"),
-                    strength=strength,
-                    regions=regions,
+                    **apply_options,
                 )
                 self._json(HTTPStatus.ACCEPTED, result)
                 return
@@ -1024,9 +1021,7 @@ class ManagerRequestHandler(BaseHTTPRequestHandler):
                         "unsupported SAM3D select field(s): "
                         + ", ".join(unexpected_fields)
                     )
-                missing = sorted(
-                    {"expected_revision", "person_index"} - set(document)
-                )
+                missing = sorted({"expected_revision", "person_index"} - set(document))
                 if missing:
                     raise ValueError(
                         "missing SAM3D select field(s): " + ", ".join(missing)
@@ -1092,9 +1087,7 @@ class ManagerRequestHandler(BaseHTTPRequestHandler):
                 return
             sam3d_undo = _SAM3D_UNDO.fullmatch(parsed.path)
             if method == "POST" and sam3d_undo:
-                unexpected_fields = sorted(
-                    set(document) - {"expected_revision"}
-                )
+                unexpected_fields = sorted(set(document) - {"expected_revision"})
                 if unexpected_fields:
                     raise ValueError(
                         "unsupported SAM3D undo field(s): "
@@ -1120,9 +1113,7 @@ class ManagerRequestHandler(BaseHTTPRequestHandler):
                         "unsupported SAM3D capture field(s): "
                         + ", ".join(unexpected_fields)
                     )
-                missing = sorted(
-                    {"expected_revision", "camera_uid"} - set(document)
-                )
+                missing = sorted({"expected_revision", "camera_uid"} - set(document))
                 if missing:
                     raise ValueError(
                         "missing SAM3D capture field(s): " + ", ".join(missing)
@@ -1148,8 +1139,7 @@ class ManagerRequestHandler(BaseHTTPRequestHandler):
                 return
             if method == "POST" and parsed.path == "/api/package-copy-choice":
                 unexpected_fields = sorted(
-                    set(document)
-                    - {"package_id", "copy_id", "report_revision"}
+                    set(document) - {"package_id", "copy_id", "report_revision"}
                 )
                 if unexpected_fields:
                     raise ValueError(

@@ -21,6 +21,10 @@ import uuid
 
 from vampip.database import connect
 from vampip.runtime import atomic_write_text
+from vampip.sam3d_body_shape import (
+    validate_body_shape,
+    validate_body_shape_sidecar,
+)
 from vampip.sam3d_body_signature import validate_body_proportions
 from vampip.sam3d_vam import MHR70_NAMES
 
@@ -35,13 +39,9 @@ SAM3D_CAPTURE_FILE_LIMIT = 256 * 1024 * 1024
 SAM3D_ARRAYS_FILE_LIMIT = 512 * 1024 * 1024
 SAM3D_JOB_ID = re.compile(r"^[0-9a-f]{32}$")
 SAM3D_MODEL_ID = re.compile(r"^[a-z0-9][a-z0-9_.+-]{0,63}$")
-SAM3D_COMPARISON_MODEL_IDS = frozenset(
-    {"dinov3_vith16plus", "vit_hmr_512_384"}
-)
+SAM3D_COMPARISON_MODEL_IDS = frozenset({"dinov3_vith16plus", "vit_hmr_512_384"})
 SAM3D_ARTIFACTS = frozenset({"source", "manifest", "overlay"})
-_TERMINAL_STATES = frozenset(
-    {"succeeded", "failed", "interrupted", "cancelled"}
-)
+_TERMINAL_STATES = frozenset({"succeeded", "failed", "interrupted", "cancelled"})
 _CONTENT_TYPE_EXTENSIONS = {
     "image/jpeg": "jpg",
     "image/png": "png",
@@ -231,11 +231,7 @@ def _capture_history_from_result(
 
 
 def _png_dimensions(data: bytes) -> tuple[int, int] | None:
-    if (
-        len(data) < 24
-        or data[:8] != b"\x89PNG\r\n\x1a\n"
-        or data[12:16] != b"IHDR"
-    ):
+    if len(data) < 24 or data[:8] != b"\x89PNG\r\n\x1a\n" or data[12:16] != b"IHDR":
         return None
     return (
         int.from_bytes(data[16:20], "big"),
@@ -289,11 +285,7 @@ def _jpeg_dimensions(data: bytes) -> tuple[int, int] | None:
 
 
 def _webp_dimensions(data: bytes) -> tuple[int, int] | None:
-    if (
-        len(data) < 30
-        or data[:4] != b"RIFF"
-        or data[8:12] != b"WEBP"
-    ):
+    if len(data) < 30 or data[:4] != b"RIFF" or data[8:12] != b"WEBP":
         return None
     chunk = data[12:16]
     if chunk == b"VP8X":
@@ -455,9 +447,7 @@ class Sam3dWorkerConfig:
 
         return cls(
             python=(
-                Path(python_value).expanduser().resolve()
-                if python_value
-                else None
+                Path(python_value).expanduser().resolve() if python_value else None
             ),
             conda_executable=conda_executable,
             conda_env=conda_env,
@@ -472,8 +462,7 @@ class Sam3dWorkerConfig:
         errors: list[str] = []
         if bool(self.python) == bool(self.conda_env):
             errors.append(
-                "configure exactly one of VAMPIP_SAM3D_PYTHON or "
-                "VAMPIP_SAM3D_CONDA_ENV"
+                "configure exactly one of VAMPIP_SAM3D_PYTHON or VAMPIP_SAM3D_CONDA_ENV"
             )
         if self.python is not None:
             if not self.python.is_file():
@@ -609,8 +598,7 @@ class Sam3dWorkerConfig:
         }
 
 
-def _environment_model_configs(
-) -> tuple[str, dict[str, Sam3dWorkerConfig]]:
+def _environment_model_configs() -> tuple[str, dict[str, Sam3dWorkerConfig]]:
     primary = Sam3dWorkerConfig.from_environment()
     primary_id = _checkpoint_model_id(primary.checkpoint)
     configs = {primary_id: primary}
@@ -632,9 +620,7 @@ def _environment_model_configs(
             checkpoint=checkpoint,
             mhr=mhr,
             dinov3_repo=(
-                primary.dinov3_repo
-                if model_id == "dinov3_vith16plus"
-                else None
+                primary.dinov3_repo if model_id == "dinov3_vith16plus" else None
             ),
         )
 
@@ -647,11 +633,7 @@ def _environment_model_configs(
             requested_default = validate_model_id(requested_default)
         except ValueError:
             requested_default = ""
-    default_model_id = (
-        requested_default
-        if requested_default in configs
-        else primary_id
-    )
+    default_model_id = requested_default if requested_default in configs else primary_id
     return default_model_id, configs
 
 
@@ -853,9 +835,7 @@ class Sam3dJobManager:
                 configured_default = inferred_id
                 model_configs = {inferred_id: config}
             else:
-                configured_default, model_configs = (
-                    _environment_model_configs()
-                )
+                configured_default, model_configs = _environment_model_configs()
         else:
             configured_default = next(iter(model_configs), "")
         if not 1 <= len(model_configs) <= 8:
@@ -1070,9 +1050,7 @@ class Sam3dJobManager:
             model_id = self.default_model_id
         model_id = validate_model_id(model_id)
         if model_id not in self.model_configs:
-            raise Sam3dConfigurationError(
-                f"SAM3D model is not configured: {model_id}"
-            )
+            raise Sam3dConfigurationError(f"SAM3D model is not configured: {model_id}")
         if comparison_id is not None:
             if (
                 not isinstance(comparison_id, str)
@@ -1082,9 +1060,7 @@ class Sam3dJobManager:
                     "SAM3D comparison ID must be a lowercase 32-character token"
                 )
             if model_id not in SAM3D_COMPARISON_MODEL_IDS:
-                raise ValueError(
-                    "SAM3D comparisons support only DINOv3-H+ and ViT-H"
-                )
+                raise ValueError("SAM3D comparisons support only DINOv3-H+ and ViT-H")
         job_id = uuid.uuid4().hex
         paths = self._paths(job_id, image.content_type)
         paths.directory.mkdir(mode=0o700, parents=False, exist_ok=False)
@@ -1208,9 +1184,7 @@ class Sam3dJobManager:
                 "existing SAM3D comparison member is not an official model"
             )
         if existing_model_id == model_id:
-            raise ValueError(
-                "SAM3D comparison must use distinct model IDs"
-            )
+            raise ValueError("SAM3D comparison must use distinct model IDs")
         if (
             row["source_type"] != image.content_type
             or row["source_width"] != image.width
@@ -1242,17 +1216,13 @@ class Sam3dJobManager:
             or hashlib.sha256(existing_data).digest()
             != hashlib.sha256(image_data).digest()
         ):
-            raise ValueError(
-                "SAM3D comparison jobs must use identical source bytes"
-            )
+            raise ValueError("SAM3D comparison jobs must use identical source bytes")
 
     def _public_model(self, model_id: str) -> dict[str, object]:
         config = self.model_configs.get(model_id)
         status = config.public_status() if config is not None else None
         backbone: object = (
-            model_id
-            if model_id != "default"
-            else (status or {}).get("backbone")
+            model_id if model_id != "default" else (status or {}).get("backbone")
         )
         name = _OFFICIAL_MODEL_NAMES.get(model_id)
         if name is None and status is not None:
@@ -1444,11 +1414,7 @@ class Sam3dJobManager:
             )
         )
         worker = dict(
-            next(
-                model
-                for model in models
-                if model["id"] == self.default_model_id
-            )
+            next(model for model in models if model["id"] == self.default_model_id)
         )
         worker["models"] = models
         worker["default_model_id"] = self.default_model_id
@@ -1577,11 +1543,7 @@ class Sam3dJobManager:
                         )
                 except Exception as error:
                     message = str(error).strip() or error.__class__.__name__
-                    state = (
-                        "interrupted"
-                        if self._closed.is_set()
-                        else "failed"
-                    )
+                    state = "interrupted" if self._closed.is_set() else "failed"
                     with connect(self.state_dir) as connection:
                         connection.execute(
                             """
@@ -1667,9 +1629,7 @@ class Sam3dJobManager:
         try:
             persisted_request = json.loads(request_row["request_json"])
         except (TypeError, json.JSONDecodeError) as error:
-            raise RuntimeError(
-                "SAM 3D Body persisted request is unreadable"
-            ) from error
+            raise RuntimeError("SAM 3D Body persisted request is unreadable") from error
         legacy_request_keys = {
             "schema",
             "jobId",
@@ -1681,19 +1641,12 @@ class Sam3dJobManager:
         }
         model_request_keys = legacy_request_keys | {"modelId"}
         comparison_request_keys = model_request_keys | {"comparisonId"}
-        request_schema = (
-            request.get("schema")
-            if isinstance(request, dict)
-            else None
-        )
+        request_schema = request.get("schema") if isinstance(request, dict) else None
         request_key_set = (
-            frozenset(request)
-            if isinstance(request, dict)
-            else frozenset()
+            frozenset(request) if isinstance(request, dict) else frozenset()
         )
         request_shape_valid = (
-            request_schema == 1
-            and request_key_set == legacy_request_keys
+            request_schema == 1 and request_key_set == legacy_request_keys
         ) or (
             request_schema == 2
             and request_key_set
@@ -1709,9 +1662,7 @@ class Sam3dJobManager:
             or request.get("sourceWidth") != request_row["source_width"]
             or request.get("sourceHeight") != request_row["source_height"]
         ):
-            raise RuntimeError(
-                "SAM 3D Body request identity/content is invalid"
-            )
+            raise RuntimeError("SAM 3D Body request identity/content is invalid")
         expected_engine: dict[str, object] = {
             "name": "facebookresearch/sam-3d-body",
             "mode": "native-standalone",
@@ -1720,9 +1671,7 @@ class Sam3dJobManager:
             try:
                 request_model_id = validate_model_id(request.get("modelId"))
             except ValueError as error:
-                raise RuntimeError(
-                    "SAM 3D Body request model is invalid"
-                ) from error
+                raise RuntimeError("SAM 3D Body request model is invalid") from error
             if request_model_id == "default":
                 request_config = self.model_configs.get(request_model_id)
                 backbone = (
@@ -1733,17 +1682,13 @@ class Sam3dJobManager:
             else:
                 backbone = request_model_id
             if backbone is None:
-                raise RuntimeError(
-                    "SAM 3D Body request model backbone is invalid"
-                )
+                raise RuntimeError("SAM 3D Body request model backbone is invalid")
             comparison_id = request.get("comparisonId")
             if comparison_id is not None and (
                 not isinstance(comparison_id, str)
                 or SAM3D_JOB_ID.fullmatch(comparison_id) is None
             ):
-                raise RuntimeError(
-                    "SAM 3D Body comparison identity is invalid"
-                )
+                raise RuntimeError("SAM 3D Body comparison identity is invalid")
             expected_engine.update(
                 {
                     "modelId": request_model_id,
@@ -1751,9 +1696,7 @@ class Sam3dJobManager:
                 }
             )
         if manifest.get("schema") != request_schema:
-            raise RuntimeError(
-                "SAM 3D Body manifest/request schema is invalid"
-            )
+            raise RuntimeError("SAM 3D Body manifest/request schema is invalid")
         request_width = request.get("sourceWidth")
         request_height = request.get("sourceHeight")
         request_type = request.get("sourceType")
@@ -1765,9 +1708,7 @@ class Sam3dJobManager:
             or not isinstance(request_type, str)
             or request_type not in _CONTENT_TYPE_EXTENSIONS
         ):
-            raise RuntimeError(
-                "SAM 3D Body request source is invalid"
-            )
+            raise RuntimeError("SAM 3D Body request source is invalid")
         try:
             request_bbox, request_vertical_fov = self._request_values(
                 image=ImageInfo(
@@ -1793,7 +1734,8 @@ class Sam3dJobManager:
         arrays_metadata: object = None
         if (
             isinstance(artifacts, dict)
-            and set(artifacts) == {
+            and set(artifacts)
+            == {
                 "arrays",
                 "arraysMetadata",
                 "overlay",
@@ -1808,7 +1750,8 @@ class Sam3dJobManager:
             )
         if (
             not isinstance(source, dict)
-            or set(source) != {
+            or set(source)
+            != {
                 "width",
                 "height",
                 "contentType",
@@ -1883,6 +1826,12 @@ class Sam3dJobManager:
                     raise RuntimeError(
                         "SAM 3D Body body proportions are invalid"
                     ) from error
+            body_shape = person.get("bodyShape")
+            if body_shape is not None:
+                try:
+                    validate_body_shape(body_shape)
+                except ValueError as error:
+                    raise RuntimeError("SAM 3D Body body shape is invalid") from error
         if arrays_metadata is not None:
             actual_metadata = _arrays_artifact_metadata(
                 paths.arrays,
@@ -1909,7 +1858,10 @@ class Sam3dJobManager:
         paths: Sam3dJobPaths,
     ) -> tuple[dict[str, object], str]:
         manifest, revision = self._read_validated_manifest(job_id, paths)
-        if not paths.overlay.is_file() or paths.overlay.stat().st_size > 32 * 1024 * 1024:
+        if (
+            not paths.overlay.is_file()
+            or paths.overlay.stat().st_size > 32 * 1024 * 1024
+        ):
             raise RuntimeError("SAM 3D Body overlay is missing or too large")
         artifacts = manifest["artifacts"]
         if "arraysMetadata" not in artifacts:
@@ -1951,9 +1903,7 @@ class Sam3dJobManager:
                 paths,
             )
         except RuntimeError as error:
-            raise Sam3dJobError(
-                "persisted SAM3D manifest failed validation"
-            ) from error
+            raise Sam3dJobError("persisted SAM3D manifest failed validation") from error
         manifest_revision = manifest.get("revision")
         database_revision = job.get("revision")
         if (
@@ -1969,6 +1919,146 @@ class Sam3dJobManager:
             )
         return manifest
 
+    @staticmethod
+    def _cached_body_shape(
+        path: Path,
+        *,
+        arrays: Path,
+        person_index: int,
+    ) -> dict[str, object] | None:
+        if (
+            path.is_symlink()
+            or not path.is_file()
+            or not 1 <= path.stat().st_size <= 1024 * 1024
+        ):
+            return None
+        try:
+            document = json.loads(path.read_text(encoding="utf-8"))
+            validate_body_shape_sidecar(document)
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError):
+            return None
+        source = document["source"]
+        if (
+            source["personIndex"] != person_index
+            or source["arraysBytes"] != arrays.stat().st_size
+            or source["arraysSha256"] != _file_sha256(arrays)
+        ):
+            return None
+        body_shape = document["bodyShape"]
+        assert isinstance(body_shape, dict)
+        return body_shape
+
+    def body_shape(
+        self,
+        job_id: str,
+        person_index: int = 0,
+    ) -> dict[str, object]:
+        """Return or derive a neutral body-shape signature for one person.
+
+        New manifests carry ``bodyShape`` directly. Older successful jobs are
+        reconstructed by the isolated CPU-only sidecar worker and cached beside
+        their arrays without changing the signed manifest or job revision.
+        """
+
+        job_id = validate_job_id(job_id)
+        if isinstance(person_index, bool) or not isinstance(person_index, int):
+            raise TypeError("person_index must be an integer")
+        job = self.get(job_id)
+        if job["state"] != "succeeded":
+            raise Sam3dJobError("SAM3D body shape requires a successful job")
+        manifest = self.manifest(job_id)
+        people = manifest["people"]
+        if (
+            not isinstance(people, list)
+            or person_index < 0
+            or person_index >= len(people)
+            or not isinstance(people[person_index], dict)
+        ):
+            raise ValueError("person_index is not available in this SAM3D result")
+        embedded = people[person_index].get("bodyShape")
+        if embedded is not None:
+            validate_body_shape(embedded)
+            assert isinstance(embedded, dict)
+            return embedded
+
+        paths = self._paths(job_id)
+        sidecar = paths.directory / f"body-shape-v1-person-{person_index}.json"
+        cached = self._cached_body_shape(
+            sidecar,
+            arrays=paths.arrays,
+            person_index=person_index,
+        )
+        if cached is not None:
+            return cached
+
+        config = self._config_for_job(job_id)
+        assert config.checkpoint is not None
+        assert config.mhr is not None
+        worker_script = Path(__file__).with_name("sam3d_shape_worker.py").resolve()
+        command = [
+            *config.command_prefix(),
+            str(worker_script),
+            "--checkpoint",
+            str(config.checkpoint),
+            "--mhr",
+            str(config.mhr),
+            "--arrays",
+            str(paths.arrays),
+            "--person-index",
+            str(person_index),
+            "--output",
+            str(sidecar),
+        ]
+        lock_path = self.runtime_dir / "worker.lock"
+        with lock_path.open("a+b") as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            try:
+                # Another request may have populated the cache while waiting.
+                cached = self._cached_body_shape(
+                    sidecar,
+                    arrays=paths.arrays,
+                    person_index=person_index,
+                )
+                if cached is not None:
+                    return cached
+                environment = SubprocessSam3dWorker._environment(self.runtime_dir)
+                with paths.log.open("ab") as log:
+                    process = subprocess.Popen(
+                        command,
+                        cwd=paths.directory,
+                        env=environment,
+                        stdin=subprocess.DEVNULL,
+                        stdout=log,
+                        stderr=subprocess.STDOUT,
+                        start_new_session=True,
+                    )
+                    try:
+                        return_code = process.wait(
+                            timeout=min(config.timeout_seconds, 600)
+                        )
+                    except subprocess.TimeoutExpired as error:
+                        SubprocessSam3dWorker._terminate_process_group(process)
+                        raise Sam3dJobError(
+                            "SAM3D body-shape analysis exceeded 600 seconds"
+                        ) from error
+                if return_code != 0:
+                    raise Sam3dJobError(
+                        f"SAM3D body-shape worker exited with status {return_code}"
+                    )
+            finally:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+        cached = self._cached_body_shape(
+            sidecar,
+            arrays=paths.arrays,
+            person_index=person_index,
+        )
+        if cached is None:
+            raise Sam3dJobError(
+                "SAM3D body-shape worker did not produce a valid sidecar"
+            )
+        return cached
+
     def select_person(
         self,
         job_id: str,
@@ -1981,9 +2071,7 @@ class Sam3dJobManager:
             not isinstance(expected_revision, str)
             or re.fullmatch(r"[0-9a-f]{32}", expected_revision) is None
         ):
-            raise ValueError(
-                "expected_revision must be a lowercase 32-character token"
-            )
+            raise ValueError("expected_revision must be a lowercase 32-character token")
         if isinstance(person_index, bool) or not isinstance(person_index, int):
             raise TypeError("person_index must be an integer")
         with connect(self.state_dir) as connection:
@@ -1997,9 +2085,7 @@ class Sam3dJobManager:
             if row is None:
                 raise FileNotFoundError(f"SAM3D job not found: {job_id}")
             if row["state"] != "succeeded":
-                raise Sam3dJobError(
-                    "SAM3D person selection requires a successful job"
-                )
+                raise Sam3dJobError("SAM3D person selection requires a successful job")
             if row["revision"] != expected_revision:
                 raise ValueError("SAM3D job revision has changed")
             try:
@@ -2069,18 +2155,11 @@ class Sam3dJobManager:
         job_id = validate_job_id(job_id)
         if action == "capture":
             if capture_extension is None or capture_content_type is None:
-                raise ValueError(
-                    "capture extension and content type are required"
-                )
-            if (
-                _CAPTURE_CONTENT_TYPES.get(capture_extension)
-                != capture_content_type
-            ):
+                raise ValueError("capture extension and content type are required")
+            if _CAPTURE_CONTENT_TYPES.get(capture_extension) != capture_content_type:
                 raise ValueError("invalid SAM3D capture content type")
         elif capture_extension is not None or capture_content_type is not None:
-            raise ValueError(
-                "capture metadata is only valid for capture actions"
-            )
+            raise ValueError("capture metadata is only valid for capture actions")
         with connect(self.state_dir) as connection:
             row = connection.execute(
                 "SELECT result_json FROM sam3d_jobs WHERE id = ?",
@@ -2096,13 +2175,9 @@ class Sam3dJobManager:
                 result = {}
             previous = result.get("last_vam_action")
             if isinstance(previous, dict):
-                if target_uid is None and isinstance(
-                    previous.get("target_uid"), str
-                ):
+                if target_uid is None and isinstance(previous.get("target_uid"), str):
                     target_uid = str(previous["target_uid"])
-                if camera_uid is None and isinstance(
-                    previous.get("camera_uid"), str
-                ):
+                if camera_uid is None and isinstance(previous.get("camera_uid"), str):
                     camera_uid = str(previous["camera_uid"])
             action_record: dict[str, object] = {
                 "action": action,
@@ -2159,10 +2234,7 @@ class Sam3dJobManager:
             if not isinstance(result, dict):
                 return
             action = result.get("last_vam_action")
-            if (
-                not isinstance(action, dict)
-                or action.get("request_id") != request_id
-            ):
+            if not isinstance(action, dict) or action.get("request_id") != request_id:
                 return
             if action.get("state") in {"succeeded", "failed", "stale"}:
                 return

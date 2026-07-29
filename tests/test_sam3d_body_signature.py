@@ -4,7 +4,10 @@ import tempfile
 from pathlib import Path
 import unittest
 
-import numpy as np
+try:
+    import numpy as np
+except ModuleNotFoundError:
+    np = None  # type: ignore[assignment]
 
 from tests.test_sam3d import FakeWorker, png_header
 from vampip.sam3d import Sam3dJobError, Sam3dJobManager, Sam3dWorkerConfig
@@ -48,6 +51,7 @@ def numeric_output() -> dict[str, np.ndarray]:
     }
 
 
+@unittest.skipIf(np is None, "NumPy is optional and unavailable")
 class Sam3dBodySignatureTests(unittest.TestCase):
     def test_neutral_signature_has_exact_measurements_and_normalized_ratios(
         self,

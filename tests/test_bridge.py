@@ -21,6 +21,7 @@ from vampip.bridge import (
     request_custom_unity_asset_choice,
     request_custom_unity_asset_load,
     request_person_clothing,
+    request_person_body_proportions,
     request_person_hair_item,
     request_person_preset,
     request_rescan,
@@ -57,6 +58,25 @@ class BridgeProtocolTests(unittest.TestCase):
         self.assertEqual(request["command"], "rescan")
         self.assertEqual(request["browserAssist"], "off")
         self.assertIn("createdAtUtc", request)
+
+    def test_body_proportion_request_allows_one_atomic_sixteen_morph_fit(
+        self,
+    ) -> None:
+        changes = [{"key": f"{index:032x}", "value": 0.1} for index in range(16)]
+        request_person_body_proportions(
+            self.vam_root,
+            target_uid="Person",
+            expected_revision="f" * 32,
+            changes=changes,
+        )
+        self.assertEqual(len(self.read_request()["changes"]), 16)
+        with self.assertRaisesRegex(ValueError, "between 1 and 16"):
+            request_person_body_proportions(
+                self.vam_root,
+                target_uid="Person",
+                expected_revision="f" * 32,
+                changes=changes + [{"key": "f" * 32, "value": 0.1}],
+            )
 
     def test_sam3d_capture_is_bound_to_the_exact_solution_file(self) -> None:
         request_id = request_sam3d_capture(
@@ -240,8 +260,7 @@ class BridgeProtocolTests(unittest.TestCase):
 
     def test_person_hair_request_writes_allowlisted_fields(self) -> None:
         resource_ref = (
-            "Author.HairPack.7:/"
-            "Custom/Atom/Person/Hair/Author/Long/Preset_Long.vap"
+            "Author.HairPack.7:/Custom/Atom/Person/Hair/Author/Long/Preset_Long.vap"
         )
         request_id = request_person_preset(
             self.vam_root,
@@ -387,9 +406,7 @@ class BridgeProtocolTests(unittest.TestCase):
         self,
     ) -> None:
         revision = "A1" * 16
-        local_ref = (
-            "Custom/Clothing/Female/Creator/Evening Dress/Evening Dress.vam"
-        )
+        local_ref = "Custom/Clothing/Female/Creator/Evening Dress/Evening Dress.vam"
         request_id = request_person_clothing(
             self.vam_root,
             "Person #2",
@@ -420,8 +437,7 @@ class BridgeProtocolTests(unittest.TestCase):
         )
 
         packaged_ref = (
-            "Author.Menswear.3:/"
-            "Custom/Clothing/Male/Author/Jacket/Jacket.VAM"
+            "Author.Menswear.3:/Custom/Clothing/Male/Author/Jacket/Jacket.VAM"
         )
         request_person_clothing(
             self.vam_root,
@@ -627,8 +643,7 @@ class BridgeProtocolTests(unittest.TestCase):
         self.assertIs(request["createIfMissing"], True)
 
         package_ref = (
-            "Author.WebTools.4:/"
-            "Custom/Atom/WebBrowser/Author/Preset_Search.vap"
+            "Author.WebTools.4:/Custom/Atom/WebBrowser/Author/Preset_Search.vap"
         )
         request_atom_preset(
             self.vam_root,
@@ -697,9 +712,7 @@ class BridgeProtocolTests(unittest.TestCase):
         self.assertIs(request["rescan"], False)
         self.assertIs(request["createIfMissing"], True)
 
-        package_ref = (
-            "Author.Rooms.2:/Custom/SubScene/Rooms/Apartment.JSON"
-        )
+        package_ref = "Author.Rooms.2:/Custom/SubScene/Rooms/Apartment.JSON"
         request_subscene_load(
             self.vam_root,
             "Apartment",
@@ -736,10 +749,7 @@ class BridgeProtocolTests(unittest.TestCase):
             )
 
     def test_custom_unity_asset_load_accepts_only_asset_resources(self) -> None:
-        local_ref = (
-            f"{CUSTOM_UNITY_ASSET_RESOURCE_PREFIX}"
-            "Creator/Room.assetbundle"
-        )
+        local_ref = f"{CUSTOM_UNITY_ASSET_RESOURCE_PREFIX}Creator/Room.assetbundle"
         request_id = request_custom_unity_asset_load(
             self.vam_root,
             "Room",
@@ -758,9 +768,7 @@ class BridgeProtocolTests(unittest.TestCase):
         self.assertNotIn("assetName", request)
         self.assertNotIn("atomType", request)
 
-        package_ref = (
-            "Author.Rooms.2:/Custom/Assets/Rooms/Apartment.SCENE"
-        )
+        package_ref = "Author.Rooms.2:/Custom/Assets/Rooms/Apartment.SCENE"
         request_custom_unity_asset_load(
             self.vam_root,
             "Apartment",
@@ -821,14 +829,15 @@ class BridgeProtocolTests(unittest.TestCase):
         self.assertEqual(request["choiceIndex"], 7)
         self.assertEqual(request["choiceToken"], token.casefold())
         self.assertEqual(
-            set(request)
-            - {"protocol", "requestId", "createdAtUtc"},
+            set(request) - {"protocol", "requestId", "createdAtUtc"},
             {"command", "targetUid", "choiceIndex", "choiceToken"},
         )
 
         for invalid_index in (True, 0, -1, 2_147_483_648, 1.5, "1"):
             with self.subTest(invalid_index=invalid_index):
-                expected = TypeError if invalid_index in (True, 1.5, "1") else ValueError
+                expected = (
+                    TypeError if invalid_index in (True, 1.5, "1") else ValueError
+                )
                 with self.assertRaises(expected):
                     request_custom_unity_asset_choice(
                         self.vam_root,
@@ -901,10 +910,7 @@ class BridgeProtocolTests(unittest.TestCase):
             "Author.Scene:/Saves/scene/Example.json",
             "Author..1:/Saves/scene/Example.json",
             "Author.Scene.1:/Saves/scene/Bad:Name.json",
-            (
-                "Author.Scene.1:/Saves/scene/"
-                "Other.Scene.2:/Saves/scene/Example.json"
-            ),
+            ("Author.Scene.1:/Saves/scene/Other.Scene.2:/Saves/scene/Example.json"),
         )
         for resource_ref in invalid_refs:
             with self.subTest(resource_ref=resource_ref):
@@ -1007,6 +1013,15 @@ class BridgeProtocolTests(unittest.TestCase):
                                     }
                                 ],
                             },
+                            "bodyProportions": {
+                                "ready": "true",
+                                "selectedOnly": "true",
+                                "undoAvailable": "false",
+                                "undoPending": "false",
+                                "blockedBySam3d": "false",
+                                "bodyShapeReady": "true",
+                                "bodyShapePreparing": "false",
+                            },
                         },
                         {"uid": "Person #2", "selected": "false"},
                     ],
@@ -1047,6 +1062,10 @@ class BridgeProtocolTests(unittest.TestCase):
         self.assertEqual(hair["lockedCount"], 0)
         self.assertIs(hair["items"][0]["locked"], False)
         self.assertIs(hair["items"][0]["simulated"], True)
+        body_proportions = persons[0]["bodyProportions"]
+        self.assertIs(body_proportions["bodyShapeReady"], True)
+        self.assertIs(body_proportions["bodyShapePreparing"], False)
+        self.assertIs(body_proportions["undoPending"], False)
         atoms = scene["atoms"]
         assert isinstance(atoms, list)
         self.assertIs(atoms[0]["selected"], True)
@@ -1103,9 +1122,7 @@ class BridgeSourceTests(unittest.TestCase):
         packaged = (
             repository / "src" / "vampip" / "bridge_assets" / "VAMPipBridge.cs"
         ).read_bytes()
-        documented = (
-            repository / "bridge" / "vam" / "VAMPipBridge.cs"
-        ).read_bytes()
+        documented = (repository / "bridge" / "vam" / "VAMPipBridge.cs").read_bytes()
         self.assertEqual(packaged, documented)
 
     def test_packaged_and_documented_bridge_readmes_match(self) -> None:
@@ -1113,9 +1130,7 @@ class BridgeSourceTests(unittest.TestCase):
         packaged = (
             repository / "src" / "vampip" / "bridge_assets" / "README.md"
         ).read_bytes()
-        documented = (
-            repository / "bridge" / "vam" / "README.md"
-        ).read_bytes()
+        documented = (repository / "bridge" / "vam" / "README.md").read_bytes()
         self.assertEqual(packaged, documented)
 
     def test_bridge_source_has_narrow_protocol_two_surface(self) -> None:
@@ -1230,9 +1245,7 @@ class BridgeSourceTests(unittest.TestCase):
             strict_create_check,
         )
         self.assertLess(strict_create_check, existing_type_check)
-        strict_create_block = source[
-            strict_create_check:existing_type_check
-        ]
+        strict_create_block = source[strict_create_check:existing_type_check]
         self.assertIn(
             "createIfMissing requires targetUid to be absent",
             strict_create_block,
@@ -1260,8 +1273,8 @@ class BridgeSourceTests(unittest.TestCase):
             repository / "src" / "vampip" / "bridge_assets" / "VAMPipBridge.cs"
         ).read_text(encoding="utf-8")
 
-        self.assertIn('Sam3dSolutionSchema = 1', source)
-        self.assertIn('Sam3dControllerCount = 19', source)
+        self.assertIn("Sam3dSolutionSchema = 1", source)
+        self.assertIn("Sam3dControllerCount = 19", source)
         self.assertIn('"selected-person-hip-relative"', source)
         self.assertIn('Sam3dRoot + "\\\\" + request.Sam3dJobId + ".json"', source)
         self.assertIn("LoadSam3dSolution(request)", source)
@@ -1276,8 +1289,7 @@ class BridgeSourceTests(unittest.TestCase):
         self.assertIn("SnapshotSam3dState", source)
         self.assertIn("RestoreSam3dSnapshot", source)
         self.assertIn(
-            "snapshot.CameraCreated =\n"
-            "                    cameraResult.Created;",
+            "snapshot.CameraCreated =\n                    cameraResult.Created;",
             source,
         )
         self.assertIn("RemoveCreatedSam3dCamera(", source)
@@ -1296,7 +1308,7 @@ class BridgeSourceTests(unittest.TestCase):
         self.assertIn(
             "result.Atom = null;\n"
             "                    result.Created = false;\n"
-            "                    return \"\";",
+            '                    return "";',
             source,
         )
         self.assertIn(
@@ -1308,8 +1320,7 @@ class BridgeSourceTests(unittest.TestCase):
             source,
         )
         self.assertIn(
-            "rendererError == null\n"
-            "                            ? \"\"",
+            'rendererError == null\n                            ? ""',
             source,
         )
         self.assertIn(
@@ -1348,18 +1359,18 @@ class BridgeSourceTests(unittest.TestCase):
 
         self.assertIn('"setPersonBodyProportions"', source)
         self.assertIn('"undoPersonBodyProportions"', source)
-        self.assertIn("MaximumBodyProportionChanges = 8", source)
+        self.assertIn("MaximumBodyProportionMorphs = 32", source)
+        self.assertIn("MaximumBodyProportionChanges = 16", source)
         self.assertIn("MaximumBodyProportionDelta = 0.25f", source)
         self.assertIn('"person-body-proportions-v1"', source)
+        self.assertIn('"person-body-shape-v1"', source)
         self.assertIn('result["undoRevision"]', source)
         self.assertIn(
             '"Undo the currently applied SAM3D pose before "',
             source,
         )
 
-        apply_start = source.index(
-            "private static void SetBodyProportionMorphValue("
-        )
+        apply_start = source.index("private static void SetBodyProportionMorphValue(")
         apply_end = source.index(
             "private IEnumerator ExecuteLoadScene(",
             apply_start,
@@ -1393,6 +1404,53 @@ class BridgeSourceTests(unittest.TestCase):
             '"Apply VAM-PIP body proportions"',
             apply_source,
         )
+        self.assertIn(
+            'newUndo.PostApplyGenerationKey = "";',
+            apply_source,
+        )
+        self.assertIn(
+            "newUndo.PendingStableObservations = 0;",
+            apply_source,
+        )
+        self.assertIn(
+            "newUndo.PreApplyGenerationKey =",
+            apply_source,
+        )
+        self.assertIn(
+            "newUndo.PreApplyBodyShapeChecksum =",
+            apply_source,
+        )
+        self.assertIn(
+            "newUndo.RequireBodyShapeReady =",
+            apply_source,
+        )
+        self.assertNotIn(
+            "TryBuildBodyShapeSignature(",
+            apply_source,
+        )
+        readiness_guard = apply_source.index(
+            "if (!IsValidBodyShapeSignature(\n"
+            "                        snapshot.BodyShape))"
+        )
+        undo_branch = apply_source.index(
+            "if (undo)",
+            readiness_guard,
+        )
+        self.assertLess(readiness_guard, undo_branch)
+        self.assertIn(
+            '"preparation or inspect bodyShapeReason."',
+            apply_source,
+        )
+        require_changed = apply_source.index(
+            "newUndo.RequireChangedBodyShapeChecksum =\n"
+            "                            true;",
+            undo_branch,
+        )
+        saved_value = apply_source.index(
+            "BodyProportionUndoValue old =",
+            require_changed,
+        )
+        self.assertLess(require_changed, saved_value)
 
         catalog_start = source.index(
             "private static bool IsAllowlistedBodyProportionMorphName("
@@ -1424,6 +1482,135 @@ class BridgeSourceTests(unittest.TestCase):
             "morph.hasBoneModificationFormulas",
             catalog_source,
         )
+        for shape_morph in (
+            "Breasts Size",
+            "Waist Width",
+            "Hip Size",
+            "Glutes Size",
+            "Thighs Size",
+        ):
+            self.assertIn(f'"{shape_morph}"', catalog_source)
+        self.assertIn("entry.FitKind =", catalog_source)
+        self.assertIn('"structure"', catalog_source)
+        self.assertIn('"shape"', catalog_source)
+        self.assertIn('published["shapeRegion"]', catalog_source)
+        self.assertIn('published["shapeResponses"]', catalog_source)
+        self.assertIn("skin.dazMesh.morphedBaseVertices", catalog_source)
+        self.assertIn("skin.dazMesh.baseTriangles", catalog_source)
+        self.assertIn("DAZMorphVertex[] deltas", catalog_source)
+        self.assertIn("delta.delta * step", catalog_source)
+        self.assertIn("HashBodyShapeSignature(", catalog_source)
+        self.assertIn("TryBodyShapeMeshChecksum(", catalog_source)
+        self.assertIn("snapshot.BodyShapeMeshChecksum", catalog_source)
+        self.assertIn(
+            "undo.PendingStableObservations >= 2",
+            catalog_source,
+        )
+        status_start = catalog_source.index(
+            "private JSONClass BuildPersonBodyProportionStatus("
+        )
+        status_source = catalog_source[status_start:]
+        self.assertIn(
+            'result["bodyShapePreparing"].AsBool',
+            status_source,
+        )
+        self.assertIn(
+            "EnsurePersonBodyShapeBuild(",
+            status_source,
+        )
+        self.assertIn(
+            "CopyBodyShapeResponsesFromCache(",
+            status_source,
+        )
+        self.assertNotIn(
+            "TryBuildBodyShapeSignature(",
+            status_source,
+        )
+        self.assertNotIn(
+            "PopulateBodyShapeResponses(",
+            status_source,
+        )
+        self.assertIn(
+            "undo.RequireChangedBodyShapeChecksum",
+            status_source,
+        )
+        self.assertIn(
+            "undo.PreApplyBodyShapeChecksum",
+            status_source,
+        )
+        self.assertIn(
+            "undo.PreApplyGenerationKey",
+            status_source,
+        )
+        self.assertIn(
+            "undo.RequireBodyShapeReady",
+            status_source,
+        )
+        self.assertIn(
+            "waitingForChangedChecksum",
+            status_source,
+        )
+        self.assertIn(
+            "waitingForChangedGeneration",
+            status_source,
+        )
+        coroutine_start = catalog_source.index(
+            "private IEnumerator BuildPersonBodyShapeCacheCoroutine("
+        )
+        coroutine_end = catalog_source.index(
+            "private void EnsurePersonBodyShapeBuild(",
+            coroutine_start,
+        )
+        coroutine_source = catalog_source[
+            coroutine_start:coroutine_end
+        ]
+        self.assertIn(
+            "BodyShapeBuildMaximumStepsPerFrame",
+            coroutine_source,
+        )
+        self.assertIn("yield return null;", coroutine_source)
+        self.assertIn(
+            "BodyShapeBustFirstFraction = 0.58f",
+            source,
+        )
+        self.assertIn(
+            "BodyShapeBustLastFraction = 0.76f",
+            source,
+        )
+        self.assertIn(
+            "BodyShapeWaistFirstFraction = 0.34f",
+            source,
+        )
+        self.assertIn(
+            "BodyShapeSeatFirstFraction = -0.08f",
+            source,
+        )
+        self.assertIn(
+            "TryScanBodyShapeTorsoSection(",
+            catalog_source,
+        )
+        for shape_measurement in (
+            "bustGirth",
+            "bustWidth",
+            "bustDepth",
+            "underbustGirth",
+            "underbustWidth",
+            "underbustDepth",
+            "breastGirthExcess",
+            "breastDepthExcess",
+            "breastProjection",
+            "waistGirth",
+            "waistWidth",
+            "waistDepth",
+            "seatGirth",
+            "seatWidth",
+            "seatDepth",
+            "gluteProjection",
+            "upperThighGirth",
+            "upperThighWidth",
+            "upperThighDepth",
+        ):
+            self.assertIn(f'"{shape_measurement}"', catalog_source)
         for measurement in (
             "upperArm",
             "forearm",
@@ -1452,9 +1639,7 @@ class BridgeSourceTests(unittest.TestCase):
             pose_start,
         )
         pose_source = source[pose_start:pose_end]
-        apply_start = source.index(
-            "private IEnumerator ExecuteApplySam3dResult("
-        )
+        apply_start = source.index("private IEnumerator ExecuteApplySam3dResult(")
         undo_end = source.index(
             "private static bool IsSafeSam3dOutput(",
             apply_start,
@@ -1478,12 +1663,8 @@ class BridgeSourceTests(unittest.TestCase):
             "private static void ApplySam3dTransformContents("
         )
         apply_contents_end = len(pose_source)
-        apply_contents_source = pose_source[
-            apply_contents_start:apply_contents_end
-        ]
-        lock_start = pose_source.index(
-            "private static void LockSam3dSavedPhysics("
-        )
+        apply_contents_source = pose_source[apply_contents_start:apply_contents_end]
+        lock_start = pose_source.index("private static void LockSam3dSavedPhysics(")
         lock_end = pose_source.index(
             "private static void CommitSam3dPoseLock(",
             lock_start,
@@ -1530,9 +1711,7 @@ class BridgeSourceTests(unittest.TestCase):
             "private static void ApplySam3dTransformContents(",
             apply_wrapper_start,
         )
-        apply_wrapper_source = pose_source[
-            apply_wrapper_start:apply_wrapper_end
-        ]
+        apply_wrapper_source = pose_source[apply_wrapper_start:apply_wrapper_end]
         apply_action_end = action_source.index(
             "private IEnumerator ExecuteUndoSam3dResult("
         )
@@ -1542,9 +1721,7 @@ class BridgeSourceTests(unittest.TestCase):
             "private static void FinishSam3dPoseTransaction(",
             restore_physics_start,
         )
-        restore_physics_source = pose_source[
-            restore_physics_start:restore_physics_end
-        ]
+        restore_physics_source = pose_source[restore_physics_start:restore_physics_end]
 
         self.assertIn("Sam3dPhysicsResetFrames = 5", source)
         self.assertIn("saved.Position = controller.control.position;", pose_source)
@@ -1614,9 +1791,7 @@ class BridgeSourceTests(unittest.TestCase):
             lock_source,
         )
         self.assertGreaterEqual(
-            lock_source.count(
-                "IsSam3dSavedPhysicalBodyAvailable("
-            ),
+            lock_source.count("IsSam3dSavedPhysicalBodyAvailable("),
             3,
         )
         self.assertIn(
@@ -1636,9 +1811,7 @@ class BridgeSourceTests(unittest.TestCase):
         self.assertIn(controller_restore_guard, restore_physics_source)
         self.assertLess(
             restore_physics_source.index(controller_restore_guard),
-            restore_physics_source.index(
-                "saved.Controller.physicsEnabled ="
-            ),
+            restore_physics_source.index("saved.Controller.physicsEnabled ="),
         )
         self.assertIn(
             "saved.PhysicalBody.isKinematic =\n"
@@ -1660,9 +1833,7 @@ class BridgeSourceTests(unittest.TestCase):
         self.assertIn(camera_restore_guard, restore_physics_source)
         self.assertLess(
             restore_physics_source.index(camera_restore_guard),
-            restore_physics_source.index(
-                "snapshot.CameraController.physicsEnabled ="
-            ),
+            restore_physics_source.index("snapshot.CameraController.physicsEnabled ="),
         )
         self.assertIn(
             "snapshot.CameraPhysicalBody.isKinematic =\n"
@@ -1693,8 +1864,7 @@ class BridgeSourceTests(unittest.TestCase):
             pose_source[
                 pose_source.index(
                     "private Sam3dUndoSnapshot CurrentSam3dSnapshot()"
-                ) :
-                pose_source.index(
+                ) : pose_source.index(
                     "private void ReleaseSam3dPoseLockWithoutRestoringPose("
                 )
             ],
@@ -1711,26 +1881,19 @@ class BridgeSourceTests(unittest.TestCase):
             restore_source,
         )
         self.assertLess(
-            restore_source.index(
-                "saved.Controller.control.rotation = saved.Rotation;"
-            ),
-            restore_source.index(
-                "SnapSam3dControllerPhysicalPose("
-            ),
+            restore_source.index("saved.Controller.control.rotation = saved.Rotation;"),
+            restore_source.index("SnapSam3dControllerPhysicalPose("),
         )
         self.assertIn(
-            "Rigidbody physicalBody =\n"
-            "                controller.followWhenOffRB;",
+            "Rigidbody physicalBody =\n                controller.followWhenOffRB;",
             snap_source,
         )
         self.assertIn(
-            "physicalBody.position =\n"
-            "                    controller.control.position;",
+            "physicalBody.position =\n                    controller.control.position;",
             snap_source,
         )
         self.assertIn(
-            "physicalBody.rotation =\n"
-            "                    controller.control.rotation;",
+            "physicalBody.rotation =\n                    controller.control.rotation;",
             snap_source,
         )
         self.assertIn("physicalBody.velocity = Vector3.zero;", snap_source)
@@ -1739,8 +1902,7 @@ class BridgeSourceTests(unittest.TestCase):
             snap_source,
         )
         self.assertIn(
-            "Transform physicalTransform =\n"
-            "                controller.followWhenOff;",
+            "Transform physicalTransform =\n                controller.followWhenOff;",
             snap_source,
         )
         self.assertIn("snapshot.CameraController.followWhenOff.position", pose_source)
@@ -1748,14 +1910,10 @@ class BridgeSourceTests(unittest.TestCase):
             apply_contents_source.index(
                 "controller.control.rotation = requestedRotation;"
             ),
-            apply_contents_source.index(
-                "SnapSam3dControllerPhysicalPose(controller);"
-            ),
+            apply_contents_source.index("SnapSam3dControllerPhysicalPose(controller);"),
         )
         self.assertLess(
-            apply_contents_source.index(
-                "SnapSam3dControllerPhysicalPose(controller);"
-            ),
+            apply_contents_source.index("SnapSam3dControllerPhysicalPose(controller);"),
             apply_contents_source.index(
                 "FreeControllerV3 cameraController = camera.mainController;"
             ),
@@ -1765,12 +1923,8 @@ class BridgeSourceTests(unittest.TestCase):
         )
         camera_source = apply_contents_source[camera_start:]
         self.assertLess(
-            camera_source.index(
-                "cameraController.control.rotation ="
-            ),
-            camera_source.index(
-                "SnapSam3dControllerPhysicalPose(cameraController);"
-            ),
+            camera_source.index("cameraController.control.rotation ="),
+            camera_source.index("SnapSam3dControllerPhysicalPose(cameraController);"),
         )
         self.assertIn(
             "SuperController.singleton.ResetSimulation(",
@@ -1783,9 +1937,7 @@ class BridgeSourceTests(unittest.TestCase):
             pose_source,
         )
         self.assertIn(
-            "else\n"
-            "                {\n"
-            "                    FinishSam3dPoseTransaction(",
+            "else\n                {\n                    FinishSam3dPoseTransaction(",
             pose_source,
         )
         self.assertNotIn("LockSam3dSavedPhysics(snapshot);", commit_source)
@@ -1846,19 +1998,15 @@ class BridgeSourceTests(unittest.TestCase):
             apply_wrapper_source,
         )
         self.assertLess(
-            apply_wrapper_source.index(
-                "CaptureSam3dRequestedHeadRotation("
-            ),
+            apply_wrapper_source.index("CaptureSam3dRequestedHeadRotation("),
             apply_wrapper_source.index("applied = true;"),
         )
         self.assertIn(
-            "Vector3 settledPosition =\n"
-            "                head.PhysicalBody.position;",
+            "Vector3 settledPosition =\n                head.PhysicalBody.position;",
             finalize_source,
         )
         self.assertIn(
-            "head.Controller.control.position =\n"
-            "                settledPosition;",
+            "head.Controller.control.position =\n                settledPosition;",
             finalize_source,
         )
         self.assertIn(
@@ -1880,20 +2028,12 @@ class BridgeSourceTests(unittest.TestCase):
         )
         self.assertNotIn("neckControl", finalize_source)
         self.assertLess(
-            finalize_source.index(
-                "LockSam3dControllerPhysics(head);"
-            ),
-            finalize_source.index(
-                "SnapSam3dControllerPhysicalPose("
-            ),
+            finalize_source.index("LockSam3dControllerPhysics(head);"),
+            finalize_source.index("SnapSam3dControllerPhysicalPose("),
         )
         self.assertLess(
-            finalize_source.index(
-                "SnapSam3dControllerPhysicalPose("
-            ),
-            finalize_source.index(
-                "snapshot.PersistentHeadLockActive = true;"
-            ),
+            finalize_source.index("SnapSam3dControllerPhysicalPose("),
+            finalize_source.index("snapshot.PersistentHeadLockActive = true;"),
         )
         self.assertIn("RestoreSam3dSnapshot(snapshot);", action_source)
         self.assertIn(
@@ -1906,8 +2046,7 @@ class BridgeSourceTests(unittest.TestCase):
             pose_source,
         )
         self.assertIn(
-            '"Restore VAM-PIP SAM3D pose",\n'
-            "                    cameraRemovedByUndo);",
+            '"Restore VAM-PIP SAM3D pose",\n                    cameraRemovedByUndo);',
             pose_source,
         )
         self.assertIn(
@@ -1916,15 +2055,9 @@ class BridgeSourceTests(unittest.TestCase):
             restore_source,
         )
         self.assertIn("return false;", restore_source)
-        track_request = (
-            "_inFlightSam3dCameraRequest = request;"
-        )
-        track_result = (
-            "_inFlightSam3dCameraResult = cameraResult;"
-        )
-        ensure_camera = (
-            "yield return EnsureSam3dCamera(request, cameraResult);"
-        )
+        track_request = "_inFlightSam3dCameraRequest = request;"
+        track_result = "_inFlightSam3dCameraResult = cameraResult;"
+        ensure_camera = "yield return EnsureSam3dCamera(request, cameraResult);"
         self.assertIn(track_request, action_source)
         self.assertIn(track_result, action_source)
         self.assertLess(
@@ -1936,15 +2069,11 @@ class BridgeSourceTests(unittest.TestCase):
             action_source.index(ensure_camera),
         )
         self.assertGreaterEqual(
-            action_source.count(
-                "ClearInFlightSam3dCamera("
-            ),
+            action_source.count("ClearInFlightSam3dCamera("),
             3,
         )
         self.assertEqual(
-            apply_action_source.count(
-                "yield return WaitForSam3dPhysicsSettlement();"
-            ),
+            apply_action_source.count("yield return WaitForSam3dPhysicsSettlement();"),
             2,
         )
         self.assertIn(
@@ -1969,9 +2098,7 @@ class BridgeSourceTests(unittest.TestCase):
             "CaptureSam3dSettledDiagnostics("
         )
         self.assertLess(
-            apply_action_source.index(
-                "_sam3dUndoSnapshot = snapshot;"
-            ),
+            apply_action_source.index("_sam3dUndoSnapshot = snapshot;"),
             first_settlement,
         )
         self.assertLess(first_settlement, finalize_call)
@@ -1980,9 +2107,7 @@ class BridgeSourceTests(unittest.TestCase):
         rollback_start = apply_action_source.index(
             "Could not finalize the settled SAM3D head rotation:"
         )
-        rollback_source = apply_action_source[
-            rollback_start:second_settlement
-        ]
+        rollback_source = apply_action_source[rollback_start:second_settlement]
         self.assertIn(
             "RestoreSam3dSnapshot(snapshot);",
             rollback_source,
@@ -2001,20 +2126,13 @@ class BridgeSourceTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
 
         disable = source[
-            source.index("private void OnDisable()") :
-            source.index("private void OnDestroy()")
+            source.index("private void OnDisable()") : source.index(
+                "private void OnDestroy()"
+            )
         ]
-        stop_start = source.index(
-            "private void StopBridgeWorkForLifecycle("
-        )
-        destroy = source[
-            source.index("private void OnDestroy()") :
-            stop_start
-        ]
-        stop = source[
-            stop_start :
-            source.index("private void Update()", stop_start)
-        ]
+        stop_start = source.index("private void StopBridgeWorkForLifecycle(")
+        destroy = source[source.index("private void OnDestroy()") : stop_start]
+        stop = source[stop_start : source.index("private void Update()", stop_start)]
         release_start = source.index(
             "private void ReleaseSam3dPoseLockWithoutRestoringPose("
         )
@@ -2023,9 +2141,7 @@ class BridgeSourceTests(unittest.TestCase):
             release_start,
         )
         release = source[release_start:release_end]
-        current_start = source.index(
-            "private Sam3dUndoSnapshot CurrentSam3dSnapshot()"
-        )
+        current_start = source.index("private Sam3dUndoSnapshot CurrentSam3dSnapshot()")
         current = source[current_start:release_start]
 
         for lifecycle in (disable, destroy):
@@ -2062,14 +2178,10 @@ class BridgeSourceTests(unittest.TestCase):
         )
         self.assertLess(
             stop.index("RemoveInFlightCreatedSam3dCamera();"),
-            stop.index(
-                "ReleaseSam3dPoseLockWithoutRestoringPose("
-            ),
+            stop.index("ReleaseSam3dPoseLockWithoutRestoringPose("),
         )
         self.assertLess(
-            stop.index(
-                "ReleaseSam3dPoseLockWithoutRestoringPose("
-            ),
+            stop.index("ReleaseSam3dPoseLockWithoutRestoringPose("),
             stop.index("FailRequest("),
         )
         self.assertIn("_sam3dUndoSnapshot = null;", release)
@@ -2085,9 +2197,7 @@ class BridgeSourceTests(unittest.TestCase):
         self.assertNotIn(".control.rotation", release)
         self.assertNotIn("ResetSimulation(", release)
         self.assertGreaterEqual(
-            current.count(
-                "ReleaseSam3dPoseLockWithoutRestoringPose("
-            ),
+            current.count("ReleaseSam3dPoseLockWithoutRestoringPose("),
             5,
         )
         self.assertIn(
@@ -2140,18 +2250,15 @@ class BridgeSourceTests(unittest.TestCase):
         )
         self.assertIn('sam3d["settlement"] = settlement;', source)
         self.assertIn(
-            "Rigidbody physicalBody =\n"
-            "                    controller.followWhenOffRB;",
+            "Rigidbody physicalBody =\n                    controller.followWhenOffRB;",
             source,
         )
         self.assertIn(
-            "item.ActualPosition =\n"
-            "                        physicalBody.position;",
+            "item.ActualPosition =\n                        physicalBody.position;",
             source,
         )
         self.assertIn(
-            "item.ActualRotation =\n"
-            "                        physicalBody.rotation;",
+            "item.ActualRotation =\n                        physicalBody.rotation;",
             source,
         )
         self.assertIn(
@@ -2185,12 +2292,7 @@ class BridgeSourceTests(unittest.TestCase):
             / "bridge_assets"
             / "Preset_VAMPipSAM3DCamera.vap"
         )
-        documented = (
-            repository
-            / "bridge"
-            / "vam"
-            / "Preset_VAMPipSAM3DCamera.vap"
-        )
+        documented = repository / "bridge" / "vam" / "Preset_VAMPipSAM3DCamera.vap"
         self.assertEqual(packaged.read_bytes(), documented.read_bytes())
         preset = json.loads(packaged.read_text(encoding="utf-8"))
         plugin = preset["storables"][0]["plugins"]["plugin#0"]
@@ -2219,7 +2321,7 @@ class BridgeSourceTests(unittest.TestCase):
         self.assertIn("SanitizeRosterTags", source)
         self.assertIn("item.displayName", source)
         self.assertIn("item.tagsArray", source)
-        self.assertIn("clothing[\"activeItems\"]", source)
+        self.assertIn('clothing["activeItems"]', source)
         self.assertIn(
             "atom.GetComponentsInChildren<DAZHairGroup>()",
             source,
@@ -2270,9 +2372,7 @@ class BridgeSourceTests(unittest.TestCase):
         self.assertIn("entry.DisplayName", clothing_key)
         self.assertIn("entry.Tags[tagIndex]", clothing_key)
 
-        hair_status_start = source.index(
-            "private JSONClass BuildPersonHairStatus"
-        )
+        hair_status_start = source.index("private JSONClass BuildPersonHairStatus")
         hair_status_end = source.index(
             "private JSONClass BuildCuaStatus",
             hair_status_start,
@@ -2329,7 +2429,7 @@ class BridgeSourceTests(unittest.TestCase):
         )
         self.assertIn("IsCurrentCuaChoiceSnapshot(", source)
         self.assertIn("BuildCuaGenerationKey(", source)
-        self.assertIn("Guid.NewGuid().ToString(\"N\")", source)
+        self.assertIn('Guid.NewGuid().ToString("N")', source)
         self.assertIn("object.ReferenceEquals(snapshot.Atom, target)", source)
         self.assertIn(
             "object.ReferenceEquals(snapshot.Loader, state.Loader)",
@@ -2369,9 +2469,7 @@ class BridgeSourceTests(unittest.TestCase):
         self.assertNotIn('cua["assetUrl"]', roster_source)
 
         # Selected choice changes alone do not participate in token rotation.
-        generation_start = source.index(
-            "private static string BuildCuaGenerationKey"
-        )
+        generation_start = source.index("private static string BuildCuaGenerationKey")
         generation_end = source.index(
             "private JSONClass BuildCuaStatus",
             generation_start,

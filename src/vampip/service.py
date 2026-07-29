@@ -52,6 +52,12 @@ from vampip.body_proportions import (
     signature_from_live as live_body_proportion_signature,
     signature_from_manifest as sam3d_body_proportion_signature,
 )
+from vampip.body_shape import (
+    build_body_shape_analysis,
+    live_body_shape,
+    normalize_shape_regions,
+    normalize_shape_strength,
+)
 from vampip.catalog import (
     catalog_facets as load_catalog_facets,
     get_resource_thumbnail,
@@ -106,6 +112,12 @@ from vampip.sam3d import (
     Sam3dJobManager,
     Sam3dJobError,
     validate_job_id as validate_sam3d_job_id,
+)
+from vampip.sam3d_body_shape import (
+    BODY_SHAPE_METRICS,
+    BODY_SHAPE_REGIONS,
+    consensus_body_shapes,
+    validate_body_shape,
 )
 from vampip.sam3d_vam import (
     VR_RENDERER_RESOLUTIONS,
@@ -189,8 +201,7 @@ def _normalize_sam3d_body_references(
     raw_tokens = references.split(",")
     if not 1 <= len(raw_tokens) <= _SAM3D_BODY_REFERENCE_LIMIT:
         raise ValueError(
-            f"references must contain between 1 and "
-            f"{_SAM3D_BODY_REFERENCE_LIMIT} jobs"
+            f"references must contain between 1 and {_SAM3D_BODY_REFERENCE_LIMIT} jobs"
         )
     normalized: list[tuple[str, int]] = []
     seen_jobs: set[str] = set()
@@ -330,8 +341,7 @@ def _package_conflict_document(
     nonselected_active = bool(
         selected_digest
         and any(
-            bool(row["enabled"])
-            and str(row["content_sha256"] or "") != selected_digest
+            bool(row["enabled"]) and str(row["content_sha256"] or "") != selected_digest
             for row in ordered
         )
     )
@@ -881,9 +891,9 @@ def _presentation_tags(value: object, *, maximum: int = 128) -> list[str]:
 
 
 def _revision_scoped_key(revision: str, kind: str, index: int) -> str:
-    digest = hashlib.sha256(
-        f"{revision}\0{kind}\0{index}".encode("utf-8")
-    ).hexdigest()[:24]
+    digest = hashlib.sha256(f"{revision}\0{kind}\0{index}".encode("utf-8")).hexdigest()[
+        :24
+    ]
     return f"{kind}-{digest}"
 
 
@@ -894,10 +904,7 @@ def _public_capabilities(value: object) -> list[str]:
     seen: set[str] = set()
     for raw_capability in value[:128]:
         capability = _equipment_text(raw_capability, maximum=100)
-        if (
-            not re.fullmatch(r"[a-z0-9-]+", capability)
-            or capability in seen
-        ):
+        if not re.fullmatch(r"[a-z0-9-]+", capability) or capability in seen:
             continue
         seen.add(capability)
         capabilities.append(capability)
@@ -943,10 +950,13 @@ def _sam3d_settlement_number(
     if isinstance(value, bool):
         return None
     if isinstance(value, str):
-        if re.fullmatch(
-            r"-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?",
-            value,
-        ) is None:
+        if (
+            re.fullmatch(
+                r"-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?",
+                value,
+            )
+            is None
+        ):
             return None
     elif not isinstance(value, (int, float)):
         return None
@@ -1023,12 +1033,8 @@ def _public_sam3d_settlement(value: object) -> dict[str, object] | None:
         "schema": schema,
         "available": False,
         "error": _equipment_text(raw_error, maximum=1000),
-        "settleFrames": (
-            _bounded_int(value.get("settleFrames"), maximum=120) or 0
-        ),
-        "controllerLimit": (
-            _bounded_int(value.get("controllerLimit"), maximum=2) or 0
-        ),
+        "settleFrames": (_bounded_int(value.get("settleFrames"), maximum=120) or 0),
+        "controllerLimit": (_bounded_int(value.get("controllerLimit"), maximum=2) or 0),
         "controllers": [],
     }
     request_id = _equipment_text(value.get("requestId"), maximum=32).casefold()
@@ -1038,9 +1044,7 @@ def _public_sam3d_settlement(value: object) -> dict[str, object] | None:
     captured_at = _equipment_text(value.get("capturedAtUtc"), maximum=64)
     if captured_at:
         try:
-            timestamp = datetime.fromisoformat(
-                captured_at.replace("Z", "+00:00")
-            )
+            timestamp = datetime.fromisoformat(captured_at.replace("Z", "+00:00"))
         except ValueError:
             timestamp = None
         if timestamp is not None and timestamp.tzinfo is not None:
@@ -1062,9 +1066,7 @@ def _public_sam3d_settlement(value: object) -> dict[str, object] | None:
             seen.add(controller_id)
             controller: dict[str, object] = {"id": controller_id}
             for key in ("requested", "actual"):
-                transform = _public_sam3d_settlement_transform(
-                    raw_controller.get(key)
-                )
+                transform = _public_sam3d_settlement_transform(raw_controller.get(key))
                 if transform is not None:
                     controller[key] = transform
             position_error = _sam3d_settlement_number(
@@ -1107,8 +1109,7 @@ def _public_sam3d_settlement(value: object) -> dict[str, object] | None:
     result["available"] = bool(
         available is True
         and raw_error == ""
-        and {item["id"] for item in controllers}
-        == {"headControl", "neckControl"}
+        and {item["id"] for item in controllers} == {"headControl", "neckControl"}
         and all(
             {
                 "requested",
@@ -1231,11 +1232,7 @@ def _public_body_proportions(value: object) -> dict[str, object] | None:
                 continue
             key = _equipment_text(raw.get("key"), maximum=32).casefold()
             name = _presentation_text(raw.get("name"), maximum=128)
-            if (
-                re.fullmatch(r"[0-9a-f]{32}", key) is None
-                or key in seen
-                or not name
-            ):
+            if re.fullmatch(r"[0-9a-f]{32}", key) is None or key in seen or not name:
                 continue
             current = _sam3d_settlement_number(
                 raw.get("value"),
@@ -1262,24 +1259,72 @@ def _public_body_proportions(value: object) -> dict[str, object] | None:
             ):
                 continue
             seen.add(key)
-            morphs.append(
-                {
-                    "key": key,
-                    "name": name,
-                    "region": _presentation_text(
-                        raw.get("region"),
-                        maximum=128,
-                    ),
-                    "value": current,
-                    "min": minimum,
-                    "max": maximum,
-                }
+            public_morph: dict[str, object] = {
+                "key": key,
+                "name": name,
+                "region": _presentation_text(
+                    raw.get("region"),
+                    maximum=128,
+                ),
+                "value": current,
+                "min": minimum,
+                "max": maximum,
+            }
+            fit_kind = _equipment_text(raw.get("fitKind"), maximum=16)
+            if fit_kind in {"structure", "shape"}:
+                public_morph["fitKind"] = fit_kind
+            if isinstance(raw.get("builtIn"), bool):
+                public_morph["builtIn"] = raw["builtIn"]
+            if fit_kind == "shape":
+                shape_region = _equipment_text(
+                    raw.get("shapeRegion"),
+                    maximum=16,
+                )
+                raw_responses = raw.get("shapeResponses")
+                responses: dict[str, float] = {}
+                if shape_region in BODY_SHAPE_REGIONS and isinstance(
+                    raw_responses, dict
+                ):
+                    for metric in BODY_SHAPE_METRICS:
+                        response = _sam3d_settlement_number(
+                            raw_responses.get(metric),
+                            minimum=-10.0,
+                            maximum=10.0,
+                        )
+                        if response is not None:
+                            responses[metric] = response
+                if shape_region in BODY_SHAPE_REGIONS and responses:
+                    public_morph["shapeRegion"] = shape_region
+                    public_morph["shapeResponses"] = responses
+            morphs.append(public_morph)
+
+    body_shape: dict[str, object] | None = None
+    raw_body_shape = value.get("bodyShape")
+    try:
+        validate_body_shape(raw_body_shape)
+    except (TypeError, ValueError):
+        pass
+    else:
+        # The strict fixed schema contains only bounded JSON scalar values.
+        # Round-tripping gives the browser an independent document.
+        try:
+            copied = json.loads(
+                json.dumps(
+                    raw_body_shape,
+                    ensure_ascii=True,
+                    allow_nan=False,
+                    separators=(",", ":"),
+                )
             )
-    return {
+        except (TypeError, ValueError, json.JSONDecodeError):
+            pass
+        else:
+            if isinstance(copied, dict):
+                body_shape = copied
+
+    result: dict[str, object] = {
         "ready": bool(
-            value.get("ready") is True
-            and revision
-            and len(measurements) == 7
+            value.get("ready") is True and revision and len(measurements) == 7
         ),
         "selectedOnly": value.get("selectedOnly") is True,
         "revision": revision or None,
@@ -1287,7 +1332,19 @@ def _public_body_proportions(value: object) -> dict[str, object] | None:
         "measurements": measurements,
         "morphs": morphs,
         "undoAvailable": value.get("undoAvailable") is True,
+        "undoPending": value.get("undoPending") is True,
+        "bodyShapeReady": value.get("bodyShapeReady") is True,
+        "bodyShapePreparing": value.get("bodyShapePreparing") is True,
     }
+    body_shape_reason = _presentation_text(
+        value.get("bodyShapeReason"),
+        maximum=512,
+    )
+    if body_shape_reason:
+        result["bodyShapeReason"] = body_shape_reason
+    if body_shape is not None:
+        result["bodyShape"] = body_shape
+    return result
 
 
 def _public_cua_status(value: object) -> dict[str, object] | None:
@@ -1347,8 +1404,7 @@ def _public_sam3d_camera_status(value: object) -> dict[str, object] | None:
     aspect_value = value.get("aspectRatio")
     aspect_ratio = (
         aspect_value
-        if isinstance(aspect_value, str)
-        and aspect_value in VR_RENDERER_RESOLUTIONS
+        if isinstance(aspect_value, str) and aspect_value in VR_RENDERER_RESOLUTIONS
         else None
     )
     output_resolution: str | None = None
@@ -1808,9 +1864,7 @@ class ManagerService:
             str(scene.get("selectedUid") or "") if available and scene else ""
         )
         sam3d = (
-            _public_sam3d_status(scene.get("sam3d"))
-            if available and scene
-            else None
+            _public_sam3d_status(scene.get("sam3d")) if available and scene else None
         )
         if not include_clothing_refs:
             public_persons: list[object] = []
@@ -1839,12 +1893,8 @@ class ManagerService:
                             in {"female", "male", "both", "none"}
                             else "Unknown"
                         ),
-                        "activeCount": _nonnegative_int(
-                            clothing.get("activeCount")
-                        ),
-                        "lockedCount": _nonnegative_int(
-                            clothing.get("lockedCount")
-                        ),
+                        "activeCount": _nonnegative_int(clothing.get("activeCount")),
+                        "lockedCount": _nonnegative_int(clothing.get("lockedCount")),
                         "truncated": clothing.get("truncated") is True,
                         "revision": _equipment_text(
                             clothing.get("revision"),
@@ -1864,8 +1914,7 @@ class ManagerService:
                             public_active_items.append(
                                 {
                                     "displayName": (
-                                        display_name
-                                        or "Unnamed clothing item"
+                                        display_name or "Unnamed clothing item"
                                     ),
                                     "tags": _presentation_tags(
                                         raw_item.get("tags"),
@@ -1886,12 +1935,8 @@ class ManagerService:
                             hair.get("revision"),
                             maximum=32,
                         ),
-                        "activeCount": _nonnegative_int(
-                            hair.get("activeCount")
-                        ),
-                        "lockedCount": _nonnegative_int(
-                            hair.get("lockedCount")
-                        ),
+                        "activeCount": _nonnegative_int(hair.get("activeCount")),
+                        "lockedCount": _nonnegative_int(hair.get("lockedCount")),
                         "truncated": hair.get("truncated") is True,
                         "items": [],
                     }
@@ -1915,9 +1960,7 @@ class ManagerService:
                                         maximum=32,
                                     ),
                                     "locked": raw_item.get("locked") is True,
-                                    "simulated": (
-                                        raw_item.get("simulated") is True
-                                    ),
+                                    "simulated": (raw_item.get("simulated") is True),
                                 }
                             )
                     public_hair["items"] = public_hair_items
@@ -1982,11 +2025,7 @@ class ManagerService:
         if not isinstance(bridge, dict):
             return ""
         value = bridge.get("instanceId")
-        return (
-            str(value)
-            if isinstance(value, str) and 0 < len(value) <= 128
-            else ""
-        )
+        return str(value) if isinstance(value, str) and 0 < len(value) <= 128 else ""
 
     @staticmethod
     def _sam3d_body_reference_support_from_manifest(
@@ -2000,9 +2039,7 @@ class ManagerService:
         if not isinstance(people, list):
             return []
         support: list[dict[str, object]] = []
-        for person_index, person in enumerate(
-            people[: _SAM3D_BODY_INDEX_LIMIT + 1]
-        ):
+        for person_index, person in enumerate(people[: _SAM3D_BODY_INDEX_LIMIT + 1]):
             space = "unavailable"
             multi_reference = False
             if isinstance(person, dict):
@@ -2037,10 +2074,7 @@ class ManagerService:
         if document.get("state") != "succeeded":
             return []
         job_id = document.get("id")
-        if (
-            not isinstance(job_id, str)
-            or re.fullmatch(r"[0-9a-f]{32}", job_id) is None
-        ):
+        if not isinstance(job_id, str) or re.fullmatch(r"[0-9a-f]{32}", job_id) is None:
             return []
         try:
             manifest = self._sam3d().manifest(job_id)
@@ -2099,8 +2133,7 @@ class ManagerService:
             bridge = scene.get("bridge")
             bridge = bridge if isinstance(bridge, dict) else {}
             same_bridge_request = bool(
-                request_id
-                and bridge.get("requestId") == request_id
+                request_id and bridge.get("requestId") == request_id
             )
             if same_bridge_request:
                 bridge_state = str(bridge.get("state") or "").casefold()
@@ -2145,17 +2178,11 @@ class ManagerService:
             and action_state in {"queued", "running"}
         ):
             action_state = "succeeded"
-        can_undo = bool(
-            current_applied and live.get("undoAvailable") is True
-        )
+        can_undo = bool(current_applied and live.get("undoAvailable") is True)
         solution_revision = (
             revision
             if re.fullmatch(r"[0-9a-f]{32}", revision) is not None
-            else (
-                str(live.get("revision"))
-                if current_applied
-                else ""
-            )
+            else (str(live.get("revision")) if current_applied else "")
         )
         camera_uid = (
             str(live.get("cameraUid") or "")
@@ -2183,8 +2210,7 @@ class ManagerService:
             action["message"] = action_message
             result["last_vam_action"] = action
         capture_requested = bool(
-            action_name == "capture"
-            or isinstance(result.get("last_capture"), dict)
+            action_name == "capture" or isinstance(result.get("last_capture"), dict)
         )
         captured = False
         if capture_requested:
@@ -2210,12 +2236,9 @@ class ManagerService:
             settlement = _public_sam3d_settlement(live.get("settlement"))
             if settlement is not None:
                 result["settlement"] = settlement
-        if (
-            include_body_reference_support
-            and result.get("state") == "succeeded"
-        ):
-            result["body_reference_support"] = (
-                self._sam3d_body_reference_support(result)
+        if include_body_reference_support and result.get("state") == "succeeded":
+            result["body_reference_support"] = self._sam3d_body_reference_support(
+                result
             )
         return result
 
@@ -2239,8 +2262,7 @@ class ManagerService:
         successful_requests = {
             str(capture["request_id"])
             for capture in raw_captures
-            if isinstance(capture, dict)
-            and isinstance(capture.get("request_id"), str)
+            if isinstance(capture, dict) and isinstance(capture.get("request_id"), str)
         }
         if (
             isinstance(action, dict)
@@ -2270,10 +2292,7 @@ class ManagerService:
                         # unique name. Do not index an incomplete or failed
                         # current request.
                         continue
-                    if (
-                        root == current_root
-                        and request_id not in successful_requests
-                    ):
+                    if root == current_root and request_id not in successful_requests:
                         # Unlike the legacy renderer, the prompt-free writer
                         # has no temporary suffix. Only bridge-confirmed writes
                         # from this directory are safe to expose as captures.
@@ -2512,16 +2531,12 @@ class ManagerService:
                     is None
                     or not isinstance(action.get("revision"), str)
                 ):
-                    raise FileNotFoundError(
-                        "SAM3D capture has not been requested"
-                    )
+                    raise FileNotFoundError("SAM3D capture has not been requested")
                 scene = self._scene_snapshot(include_clothing_refs=False)
                 live = scene.get("sam3d")
                 live = live if isinstance(live, dict) else {}
                 live_action = live.get("lastAction")
-                live_action = (
-                    live_action if isinstance(live_action, dict) else {}
-                )
+                live_action = live_action if isinstance(live_action, dict) else {}
                 live_succeeded = bool(
                     live_action.get("action") == "capture"
                     and live_action.get("requestId") == action["request_id"]
@@ -2531,9 +2546,7 @@ class ManagerService:
                 )
                 stored_succeeded = action.get("state") == "succeeded"
                 if not (live_succeeded or stored_succeeded):
-                    raise FileNotFoundError(
-                        "SAM3D capture is not confirmed complete"
-                    )
+                    raise FileNotFoundError("SAM3D capture is not confirmed complete")
                 request_id = action["request_id"]
                 revision = action["revision"]
                 solution = self._load_sam3d_solution(job_id, revision)
@@ -2553,11 +2566,7 @@ class ManagerService:
         solution: dict[str, object],
     ) -> tuple[str, str]:
         camera = solution.get("camera")
-        image_format = (
-            camera.get("imageFormat")
-            if isinstance(camera, dict)
-            else None
-        )
+        image_format = camera.get("imageFormat") if isinstance(camera, dict) else None
         if image_format == "jpeg":
             return "jpg", "image/jpeg"
         if image_format == "png":
@@ -2566,10 +2575,7 @@ class ManagerService:
 
     @staticmethod
     def _sam3d_solution_revision(value: object, *, label: str) -> str:
-        if (
-            not isinstance(value, str)
-            or re.fullmatch(r"[0-9a-f]{32}", value) is None
-        ):
+        if not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{32}", value) is None:
             raise ValueError(f"{label} must be a lowercase 32-character token")
         return value
 
@@ -2676,8 +2682,7 @@ class ManagerService:
             (
                 value
                 for value in scene.get("persons", [])
-                if isinstance(value, dict)
-                and value.get("uid") == target_uid
+                if isinstance(value, dict) and value.get("uid") == target_uid
             ),
             None,
         )
@@ -2719,6 +2724,8 @@ class ManagerService:
         references: object = None,
         strength: object = 0.5,
         regions: object = None,
+        shape_strength: object = 0.5,
+        shape_regions: object = (),
     ) -> dict[str, object]:
         job_id = validate_sam3d_job_id(job_id)
         reference_values = _normalize_sam3d_body_references(
@@ -2728,8 +2735,11 @@ class ManagerService:
         )
         strength_value = normalize_body_proportion_strength(strength)
         region_values = normalize_body_proportion_regions(regions)
+        shape_strength_value = normalize_shape_strength(shape_strength)
+        shape_region_values = normalize_shape_regions(shape_regions)
+        shape_enabled = bool(shape_region_values)
         scene = self._require_live_capability(
-            "person-body-proportions-v1",
+            ("person-body-shape-v1" if shape_enabled else "person-body-proportions-v1"),
             action_label="analyzing body proportions",
         )
         target_uid, _ = self._validate_live_atom_target(
@@ -2739,33 +2749,57 @@ class ManagerService:
             create_if_missing=False,
         )
         body_status = self._live_body_proportion_status(scene, target_uid)
+        body_shape_ready = body_status.get("bodyShapeReady") is True
+        body_shape_preparing = body_status.get("bodyShapePreparing") is True
+        body_shape_reason = _presentation_text(
+            body_status.get("bodyShapeReason"),
+            maximum=512,
+        )
+        current_body_shape: dict[str, object] | None = None
+        if shape_enabled:
+            if not body_shape_ready:
+                raise ValueError(
+                    "VaM body-shape measurements are unavailable: "
+                    + (
+                        body_shape_reason
+                        or "neutral body-shape calibration is not ready"
+                    )
+                )
+            try:
+                current_body_shape = live_body_shape(body_status.get("bodyShape"))
+            except ValueError as exc:
+                if body_shape_reason:
+                    raise ValueError(
+                        "VaM body-shape measurements are unavailable: "
+                        + body_shape_reason
+                    ) from exc
+                raise
         manager = self._sam3d()
         signatures: list[dict[str, object]] = []
+        shape_signatures: list[dict[str, object]] = []
         reference_jobs: list[dict[str, object]] = []
         incompatible_jobs: list[str] = []
         multi_reference = len(reference_values) > 1
-        for reference_job_id, reference_index in reference_values:
+        structure_enabled = bool(region_values)
+        for reference_position, (
+            reference_job_id,
+            reference_index,
+        ) in enumerate(reference_values):
             job = manager.get(reference_job_id)
             if job["state"] != "succeeded":
                 raise Sam3dJobError(
-                    "every body reference must be a successfully completed "
-                    "SAM3D job"
+                    "every body reference must be a successfully completed SAM3D job"
                 )
             manifest = manager.manifest(reference_job_id)
             reference_revision = str(manifest["revision"])
-            support = self._sam3d_body_reference_support_from_manifest(
-                manifest
-            )
+            support = self._sam3d_body_reference_support_from_manifest(manifest)
             selected_support = next(
-                (
-                    item
-                    for item in support
-                    if item["person_index"] == reference_index
-                ),
+                (item for item in support if item["person_index"] == reference_index),
                 None,
             )
             if (
-                multi_reference
+                structure_enabled
+                and multi_reference
                 and (
                     selected_support is None
                     or selected_support["multi_reference"] is not True
@@ -2777,24 +2811,41 @@ class ManagerService:
                 manifest,
                 reference_index,
             )
-            signatures.append(signature)
-            reference_jobs.append(
-                {
-                    "job_id": reference_job_id,
-                    "person_index": reference_index,
-                    "job_revision": reference_revision,
-                    "confidence": signature["overallConfidence"],
-                }
-            )
+            if structure_enabled or reference_position == 0:
+                signatures.append(signature)
+            shape_signature: dict[str, object] | None = None
+            if shape_enabled:
+                shape_signature = manager.body_shape(
+                    reference_job_id,
+                    reference_index,
+                )
+                shape_signatures.append(shape_signature)
+            reference_job: dict[str, object] = {
+                "job_id": reference_job_id,
+                "person_index": reference_index,
+                "job_revision": reference_revision,
+                "confidence": (
+                    signature["overallConfidence"]
+                    if structure_enabled or shape_signature is None
+                    else shape_signature["overallConfidence"]
+                ),
+            }
+            if shape_signature is not None:
+                reference_job["shape_confidence"] = shape_signature["overallConfidence"]
+            reference_jobs.append(reference_job)
         if incompatible_jobs:
             raise ValueError(
                 "Multi-reference body fitting requires neutral MHR body "
                 "signatures. Incompatible SAM3D job IDs: "
                 + ", ".join(incompatible_jobs)
             )
-        target = consensus_body_signatures(
-            signatures,
-            source_ids=[item[0] for item in reference_values],
+        target = (
+            consensus_body_signatures(
+                signatures,
+                source_ids=[item[0] for item in reference_values],
+            )
+            if structure_enabled
+            else signatures[0]
         )
         consensus = target.get("consensus")
         reference_disagreement = (
@@ -2823,12 +2874,81 @@ class ManagerService:
             strength=strength_value,
             regions=region_values,
         )
+        structure_changes = list(analysis["changes"])
+        shape_analysis: dict[str, object] | None = None
+        shape_target: dict[str, object] | None = None
+        shape_reference_disagreement: float | None = None
+        if shape_enabled:
+            assert current_body_shape is not None
+            shape_target = consensus_body_shapes(
+                shape_signatures,
+                source_ids=[item[0] for item in reference_values],
+            )
+            shape_consensus = shape_target.get("consensus")
+            if isinstance(shape_consensus, dict) and isinstance(
+                shape_consensus.get("overallRelativeDisagreement"),
+                (int, float),
+            ):
+                shape_reference_disagreement = float(
+                    shape_consensus["overallRelativeDisagreement"]
+                )
+            shape_analysis = build_body_shape_analysis(
+                shape_target,
+                current_body_shape,
+                body_status,
+                strength=shape_strength_value,
+                regions=shape_region_values,
+            )
+        shape_changes = (
+            list(shape_analysis["changes"]) if shape_analysis is not None else []
+        )
+        combined_changes: list[dict[str, object]] = []
+        seen_change_keys: set[str] = set()
+        for change in [*structure_changes, *shape_changes]:
+            if not isinstance(change, dict):
+                continue
+            key = change.get("key")
+            if not isinstance(key, str) or key in seen_change_keys:
+                continue
+            seen_change_keys.add(key)
+            combined_changes.append(change)
+            if len(combined_changes) >= 16:
+                break
+        analysis["structure_changes"] = structure_changes
+        analysis["shape_measurements"] = (
+            shape_analysis["measurements"] if shape_analysis is not None else []
+        )
+        analysis["shape_changes"] = shape_changes
+        analysis["shape_unavailable"] = (
+            shape_analysis["unavailable"] if shape_analysis is not None else []
+        )
+        analysis["shape_confidence"] = (
+            shape_analysis["confidence"] if shape_analysis is not None else None
+        )
+        analysis["shape_regions"] = sorted(shape_region_values)
+        analysis["shape_strength"] = shape_strength_value
+        analysis["shape_target"] = shape_target
+        analysis["shape_current"] = (
+            shape_analysis["current"] if shape_analysis is not None else None
+        )
+        analysis["shape_reference_disagreement"] = shape_reference_disagreement
+        analysis["changes"] = combined_changes
+        analysis["canApply"] = bool(
+            analysis["ready"]
+            and combined_changes
+            and body_shape_ready
+            and body_status.get("undoAvailable") is not True
+            and body_status.get("undoPending") is not True
+        )
+        if shape_analysis is not None:
+            analysis["warning"] = f"{analysis['warning']} {shape_analysis['warning']}"
         live_sam3d = scene.get("sam3d")
         pose_applied = bool(
-            isinstance(live_sam3d, dict)
-            and live_sam3d.get("applied") is True
+            isinstance(live_sam3d, dict) and live_sam3d.get("applied") is True
         )
-        person_fit_active = body_status.get("undoAvailable") is True
+        undo_available = body_status.get("undoAvailable") is True
+        undo_pending = body_status.get("undoPending") is True
+        person_fit_active = undo_available or undo_pending
         result: dict[str, object] = {
             **analysis,
             "job_id": job_id,
@@ -2848,19 +2968,40 @@ class ManagerService:
             "applied": person_fit_active,
             "person_fit_active": person_fit_active,
             "apply_revision": (
-                body_status.get("undoRevision")
-                if person_fit_active
-                else None
+                body_status.get("undoRevision") if undo_available else None
             ),
             "can_apply": bool(
-                analysis["canApply"]
-                and not pose_applied
-                and not person_fit_active
+                analysis["canApply"] and not pose_applied and not person_fit_active
             ),
-            "can_undo": person_fit_active,
+            "can_undo": undo_available,
+            "undo_pending": undo_pending,
             "pose_applied": pose_applied,
+            "body_shape_ready": body_shape_ready,
+            "body_shape_preparing": body_shape_preparing,
         }
-        if person_fit_active:
+        if not body_shape_ready:
+            result["canApply"] = False
+            result["can_apply"] = False
+            if body_shape_preparing:
+                result["apply_blocked_reason"] = (
+                    "VaM is preparing its neutral body-shape calibration. "
+                    "Structure analysis and review remain available, but Apply "
+                    "will unlock only after the bridge publishes a stable cache."
+                )
+            else:
+                result["apply_blocked_reason"] = (
+                    "Apply requires a valid neutral body-shape calibration from "
+                    "VaM"
+                    + (f": {body_shape_reason}" if body_shape_reason else ".")
+                )
+        elif undo_pending:
+            result["canApply"] = False
+            result["can_apply"] = False
+            result["apply_blocked_reason"] = (
+                "VaM is settling the new body mesh and preparing its exact "
+                "undo snapshot. Wait for the next bridge refresh."
+            )
+        elif person_fit_active:
             result["canApply"] = False
             result["can_apply"] = False
             result["apply_blocked_reason"] = (
@@ -2887,8 +3028,7 @@ class ManagerService:
             }
             and bridge_request.get("targetUid") == target_uid
             and isinstance(bridge_status, dict)
-            and bridge_status.get("requestId")
-            == bridge_request.get("requestId")
+            and bridge_status.get("requestId") == bridge_request.get("requestId")
         ):
             state = str(bridge_status.get("state") or "").casefold()
             if state:
@@ -2909,6 +3049,8 @@ class ManagerService:
         references: object = None,
         strength: object = 0.5,
         regions: object = None,
+        shape_strength: object = 0.5,
+        shape_regions: object = (),
     ) -> dict[str, object]:
         expected_job_revision = self._sam3d_solution_revision(
             expected_job_revision,
@@ -2925,6 +3067,8 @@ class ManagerService:
             references=references,
             strength=strength,
             regions=regions,
+            shape_strength=shape_strength,
+            shape_regions=shape_regions,
         )
         if analysis["job_revision"] != expected_job_revision:
             raise ValueError("SAM3D job revision has changed; analyze again")
@@ -3049,10 +3193,7 @@ class ManagerService:
             action_label="applying a SAM3D pose",
         )
         live_sam3d = scene.get("sam3d")
-        if (
-            isinstance(live_sam3d, dict)
-            and live_sam3d.get("applied") is True
-        ):
+        if isinstance(live_sam3d, dict) and live_sam3d.get("applied") is True:
             raise ValueError(
                 "undo the currently applied SAM3D solution before applying another"
             )
@@ -3113,9 +3254,7 @@ class ManagerService:
             )
             + "\n"
         )
-        solution_sha256 = hashlib.sha256(
-            solution_payload.encode("ascii")
-        ).hexdigest()
+        solution_sha256 = hashlib.sha256(solution_payload.encode("ascii")).hexdigest()
         solution_path = self._sam3d_solution_path(job_id)
         with self._bridge_mailbox_transaction():
             solution_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -3227,17 +3366,13 @@ class ManagerService:
             or not isinstance(camera_atom.get("sam3dCamera"), dict)
             or camera_atom["sam3dCamera"].get("compatible") is not True
         ):
-            raise ValueError(
-                "camera_uid is not a compatible VR/Funscript camera atom"
-        )
+            raise ValueError("camera_uid is not a compatible VR/Funscript camera atom")
         solution, solution_sha256 = self._read_sam3d_solution(
             job_id,
             expected_revision,
         )
         revision = str(solution["revision"])
-        capture_extension, capture_content_type = self._sam3d_capture_media(
-            solution
-        )
+        capture_extension, capture_content_type = self._sam3d_capture_media(solution)
         live = self._require_current_sam3d_application(
             scene,
             job_id=job_id,
@@ -3501,18 +3636,14 @@ class ManagerService:
             if code or message:
                 public_error = {
                     "code": code or "adapter-error",
-                    "message": (
-                        message
-                        or "Timeline adapter reported an error."
-                    ),
+                    "message": (message or "Timeline adapter reported an error."),
                 }
         return {
             "id": timeline_id,
             "revision": revision,
             "atomUid": _presentation_text(value.get("atomUid"), maximum=200),
             "label": (
-                _presentation_text(value.get("label"), maximum=256)
-                or "Timeline"
+                _presentation_text(value.get("label"), maximum=256) or "Timeline"
             ),
             "enhanced": value.get("enhanced") is True,
             "adapterVersion": _presentation_text(
@@ -3603,33 +3734,21 @@ class ManagerService:
         capabilities = (
             [
                 capability
-                for capability in _public_capabilities(
-                    document.get("capabilities")
-                )
+                for capability in _public_capabilities(document.get("capabilities"))
                 if capability in timeline_capability_allowlist
             ]
             if available and document
             else []
         )
-        raw_counts = (
-            document.get("counts")
-            if available and document
-            else None
-        )
+        raw_counts = document.get("counts") if available and document else None
         counts = raw_counts if isinstance(raw_counts, dict) else {}
-        raw_limits = (
-            document.get("limits")
-            if available and document
-            else None
-        )
+        raw_limits = document.get("limits") if available and document else None
         limits = raw_limits if isinstance(raw_limits, dict) else {}
         return {
             "available": available,
             "vam_running": bool(pids),
             "loading": (
-                document.get("loading") is True
-                if available and document
-                else False
+                document.get("loading") is True if available and document else False
             ),
             "timeline_protocol": (
                 _nonnegative_int(document.get("timelineProtocol"))
@@ -3638,9 +3757,7 @@ class ManagerService:
             ),
             "instances": instances,
             "truncated": (
-                document.get("truncated") is True
-                if available and document
-                else False
+                document.get("truncated") is True if available and document else False
             ),
             "counts": {
                 "instances": min(
@@ -3652,10 +3769,7 @@ class ManagerService:
                     32_000_000,
                     _nonnegative_int(counts.get("clips")),
                 ),
-                "publishedClips": sum(
-                    len(instance["clips"])
-                    for instance in instances
-                ),
+                "publishedClips": sum(len(instance["clips"]) for instance in instances),
             },
             "limits": {
                 "maxInstances": min(
@@ -3674,9 +3788,7 @@ class ManagerService:
             "capabilities": capabilities,
             "bridge": _public_bridge_status(bridge),
             "updated_at_utc": (
-                document.get("updatedAtUtc")
-                if available and document
-                else None
+                document.get("updatedAtUtc") if available and document else None
             ),
         }
 
@@ -4151,13 +4263,10 @@ class ManagerService:
                     {
                         "resource_ref": (
                             resource_ref
-                            if isinstance(resource_ref, str)
-                            and resource_ref
+                            if isinstance(resource_ref, str) and resource_ref
                             else ""
                         ),
-                        "display_name": (
-                            display_name or "Unnamed clothing item"
-                        ),
+                        "display_name": (display_name or "Unnamed clothing item"),
                         "tags": _presentation_tags(
                             raw_item.get("tags"),
                             maximum=32,
@@ -4173,8 +4282,7 @@ class ManagerService:
                     "display_name": "Unnamed clothing item",
                     "tags": [],
                     "locked": (
-                        resource_ref.replace("\\", "/").casefold()
-                        in locked_refs
+                        resource_ref.replace("\\", "/").casefold() in locked_refs
                     ),
                 }
                 for resource_ref in active_refs
@@ -4273,9 +4381,7 @@ class ManagerService:
             package_ref, separator, raw_member = normalized_ref.partition(":/")
             member = _equipment_member(raw_member if separator else normalized_ref)
             resource_type = (
-                _equipment_resource_type(member)
-                if member is not None
-                else None
+                _equipment_resource_type(member) if member is not None else None
             )
 
             row: sqlite3.Row | None = None
@@ -4360,18 +4466,13 @@ class ManagerService:
                 }
             )
 
-        identified_count = sum(
-            1 for item in items if item.get("actionable") is True
-        )
+        identified_count = sum(1 for item in items if item.get("actionable") is True)
         unidentified_count = max(active_count - identified_count, 0)
         result.update(
             {
                 "identified_count": identified_count,
                 "unidentified_count": unidentified_count,
-                "complete": (
-                    not truncated
-                    and len(items) == active_count
-                ),
+                "complete": (not truncated and len(items) == active_count),
                 "items": items,
             }
         )
@@ -4446,8 +4547,7 @@ class ManagerService:
                 action_token = raw_item.get("actionToken")
                 if (
                     isinstance(action_token, str)
-                    and re.fullmatch(r"[0-9a-fA-F]{32}", action_token)
-                    is not None
+                    and re.fullmatch(r"[0-9a-fA-F]{32}", action_token) is not None
                 ):
                     identity = action_token.casefold()
                     action_token_counts[identity] = (
@@ -4472,8 +4572,7 @@ class ManagerService:
                 action_token = raw_item.get("actionToken")
                 has_action_token = (
                     isinstance(action_token, str)
-                    and re.fullmatch(r"[0-9a-fA-F]{32}", action_token)
-                    is not None
+                    and re.fullmatch(r"[0-9a-fA-F]{32}", action_token) is not None
                     and action_token_counts.get(
                         action_token.casefold(),
                         0,
@@ -4489,9 +4588,7 @@ class ManagerService:
                             item_index,
                         ),
                         "actionable": (
-                            action_surface_ready
-                            and has_action_token
-                            and not locked
+                            action_surface_ready and has_action_token and not locked
                         ),
                         "display_name": display_name or "Unnamed hair item",
                         "tags": _presentation_tags(
@@ -4537,9 +4634,7 @@ class ManagerService:
             not isinstance(revision, str)
             or re.fullmatch(r"[0-9a-fA-F]{32}", revision) is None
         ):
-            raise ValueError(
-                "revision must contain exactly 32 hexadecimal characters"
-            )
+            raise ValueError("revision must contain exactly 32 hexadecimal characters")
         if (
             not isinstance(item_key, str)
             or re.fullmatch(r"hair-[0-9a-f]{24}", item_key) is None
@@ -4560,8 +4655,7 @@ class ManagerService:
                 (
                     value
                     for value in scene.get("persons", [])
-                    if isinstance(value, dict)
-                    and str(value.get("uid") or "") == uid
+                    if isinstance(value, dict) and str(value.get("uid") or "") == uid
                 ),
                 None,
             )
@@ -4569,9 +4663,7 @@ class ManagerService:
                 raise ValueError(f"Person atom is no longer available: {uid}")
             hair = person.get("hair")
             if not isinstance(hair, dict) or hair.get("ready") is not True:
-                raise ValueError(
-                    "the selected Person has no ready live Hair snapshot"
-                )
+                raise ValueError("the selected Person has no ready live Hair snapshot")
             live_revision = str(hair.get("revision") or "")
             if live_revision != revision:
                 raise ValueError(
@@ -4579,8 +4671,7 @@ class ManagerService:
                 )
             if hair.get("truncated") is True:
                 raise ValueError(
-                    "the Person Hair roster is truncated and cannot be "
-                    "changed safely"
+                    "the Person Hair roster is truncated and cannot be changed safely"
                 )
 
             raw_items = hair.get("items")
@@ -4590,8 +4681,7 @@ class ManagerService:
                 )
             if (
                 len(raw_items) > 128
-                or len(raw_items)
-                != _nonnegative_int(hair.get("activeCount"))
+                or len(raw_items) != _nonnegative_int(hair.get("activeCount"))
                 or any(not isinstance(raw_item, dict) for raw_item in raw_items)
             ):
                 raise ValueError(
@@ -4617,8 +4707,7 @@ class ManagerService:
             selected = matches[0]
             if selected.get("locked") is True:
                 raise ValueError(
-                    "the Hair layer is locked in VaM and cannot be removed "
-                    "externally"
+                    "the Hair layer is locked in VaM and cannot be removed externally"
                 )
             action_token = selected.get("actionToken")
             if (
@@ -4741,8 +4830,7 @@ class ManagerService:
                         if (
                             row["valid"]
                             and row["version_text"]
-                            and str(row["creator"]).casefold()
-                            == creator.casefold()
+                            and str(row["creator"]).casefold() == creator.casefold()
                             and str(row["package_name"]).casefold()
                             == package_name.casefold()
                             and (
@@ -4760,10 +4848,7 @@ class ManagerService:
                     family_ids,
                     choices=choices,
                 )
-                roots = [
-                    str(report["package_id"])
-                    for report in repair_reports
-                ]
+                roots = [str(report["package_id"]) for report in repair_reports]
                 if not roots:
                     raise
                 roots_from_fallback = True
@@ -4773,9 +4858,7 @@ class ManagerService:
                 package_choices=choices,
             )
 
-            ambiguous = [
-                str(value) for value in graph.get("ambiguous_ids", [])
-            ]
+            ambiguous = [str(value) for value in graph.get("ambiguous_ids", [])]
             if ambiguous:
                 rows, _ = self._package_conflict_reports(
                     connection,
@@ -4799,8 +4882,7 @@ class ManagerService:
                 except ValueError as exc:
                     if (
                         not roots_from_fallback
-                        or str(exc)
-                        != "resource is missing from its installed package"
+                        or str(exc) != "resource is missing from its installed package"
                     ):
                         raise
                 graph = package_dependency_graph(
@@ -4809,12 +4891,8 @@ class ManagerService:
                     package_choices=choices,
                 )
 
-            conflict_ids = [
-                str(value) for value in graph.get("conflict_ids", [])
-            ]
-            conflict_keys = {
-                identity.casefold() for identity in conflict_ids
-            }
+            conflict_ids = [str(value) for value in graph.get("conflict_ids", [])]
+            conflict_keys = {identity.casefold() for identity in conflict_ids}
             graph_hash_hydration_needed = any(
                 row["valid"]
                 and row["version_text"]
@@ -4846,8 +4924,7 @@ class ManagerService:
                 except ValueError as exc:
                     if (
                         not roots_from_fallback
-                        or str(exc)
-                        != "resource is missing from its installed package"
+                        or str(exc) != "resource is missing from its installed package"
                     ):
                         raise
                 graph = package_dependency_graph(
@@ -4876,8 +4953,7 @@ class ManagerService:
             except ValueError as exc:
                 if (
                     not roots_from_fallback
-                    or str(exc)
-                    != "resource is missing from its installed package"
+                    or str(exc) != "resource is missing from its installed package"
                 ):
                     raise
                 location = None
@@ -4885,10 +4961,7 @@ class ManagerService:
         dependencies = graph.get("dependencies")
         if not isinstance(dependencies, list):
             dependencies = []
-        reports = {
-            str(report["package_id"]).casefold(): report
-            for report in conflicts
-        }
+        reports = {str(report["package_id"]).casefold(): report for report in conflicts}
         for dependency in dependencies:
             if not isinstance(dependency, dict):
                 continue
@@ -4944,9 +5017,7 @@ class ManagerService:
 
         identity = package_identity.strip() if isinstance(package_identity, str) else ""
         opaque_copy = copy_id.strip() if isinstance(copy_id, str) else ""
-        revision = (
-            report_revision.strip() if isinstance(report_revision, str) else ""
-        )
+        revision = report_revision.strip() if isinstance(report_revision, str) else ""
         parsed = parse_dependency_ref(identity)
         if (
             not identity
@@ -4979,14 +5050,18 @@ class ManagerService:
                     "the package copies changed; refresh the dependency report"
                 )
             copies = report.get("copies")
-            selected_copy = next(
-                (
-                    item
-                    for item in copies
-                    if isinstance(item, dict) and item.get("copy_id") == opaque_copy
-                ),
-                None,
-            ) if isinstance(copies, list) else None
+            selected_copy = (
+                next(
+                    (
+                        item
+                        for item in copies
+                        if isinstance(item, dict) and item.get("copy_id") == opaque_copy
+                    ),
+                    None,
+                )
+                if isinstance(copies, list)
+                else None
+            )
             if selected_copy is None:
                 raise FileExistsError(
                     "the selected package copy is stale; refresh and try again"
@@ -4997,9 +5072,7 @@ class ManagerService:
             choice = PackageCopyChoice(
                 package_id=str(report["package_id"]),
                 selected_content_sha256=str(digest),
-                preferred_logical_path=str(
-                    selected_copy["logical_relative_path"]
-                ),
+                preferred_logical_path=str(selected_copy["logical_relative_path"]),
             )
             tentative_choices = dict(choices)
             tentative_choices[identity.casefold()] = choice
@@ -5009,10 +5082,7 @@ class ManagerService:
             # commits its cache internally, so all user-visible writes must
             # stay below this validation phase to preserve atomicity.
             validation_ids: dict[str, str] = {}
-            pin_roots = [
-                str(pin["root_ref"])
-                for pin in list_pins(connection)
-            ]
+            pin_roots = [str(pin["root_ref"]) for pin in list_pins(connection)]
             if pin_roots:
                 pin_graph = package_dependency_graph(
                     pin_roots,
@@ -5034,8 +5104,7 @@ class ManagerService:
                     )
                     if pin_resolution.missing:
                         missing = ", ".join(
-                            reference
-                            for _, reference in pin_resolution.missing[:10]
+                            reference for _, reference in pin_resolution.missing[:10]
                         )
                         raise ValueError(
                             "the selected package content needs unavailable "
@@ -5063,9 +5132,7 @@ class ManagerService:
                         "an active lease predates safe package-copy choices; "
                         "release and reload that asset before changing content"
                     )
-                snapshot_ids = [
-                    str(package) for package in lease["packages"]
-                ]
+                snapshot_ids = [str(package) for package in lease["packages"]]
                 lease_roots = list(snapshot_ids)
                 if lease_context["kind"] == "resource":
                     # Resource scans currently retain package identities but
@@ -5085,8 +5152,7 @@ class ManagerService:
                 )
                 if lease_resolution.missing:
                     missing = ", ".join(
-                        reference
-                        for _, reference in lease_resolution.missing[:10]
+                        reference for _, reference in lease_resolution.missing[:10]
                     )
                     raise ValueError(
                         "the selected package content needs unavailable "
@@ -5105,9 +5171,7 @@ class ManagerService:
                 choices=tentative_choices,
             )
             unresolved = [
-                item
-                for item in downstream_conflicts
-                if not bool(item.get("resolved"))
+                item for item in downstream_conflicts if not bool(item.get("resolved"))
             ]
             if unresolved:
                 raise PackageConflictError(
@@ -5154,9 +5218,7 @@ class ManagerService:
             "saved": True,
             "package_id": str(refreshed_report["package_id"]),
             "selected_content_sha256": str(digest),
-            "requires_vam_close": bool(
-                refreshed_report.get("requires_vam_close")
-            ),
+            "requires_vam_close": bool(refreshed_report.get("requires_vam_close")),
             "affected_leases": len(prepared_leases),
             "added_lease_packages": added_lease_packages,
             "conflict": refreshed_report,
@@ -5361,10 +5423,7 @@ class ManagerService:
 
         if package_version is None:
             return None
-        if (
-            isinstance(package_version, str)
-            and package_version.casefold() == "latest"
-        ):
+        if isinstance(package_version, str) and package_version.casefold() == "latest":
             return "latest"
         if (
             isinstance(package_version, bool)
@@ -5373,8 +5432,7 @@ class ManagerService:
             or package_version > 2_147_483_647
         ):
             raise ValueError(
-                "package_version must be an integer from 0 to 2147483647 "
-                "or latest"
+                "package_version must be an integer from 0 to 2147483647 or latest"
             )
         return str(package_version)
 
@@ -6598,9 +6656,7 @@ class ManagerService:
             raise ValueError("timeline_id must be a 32-character opaque token")
         revision = self._timeline_token(expected_revision)
         if not revision:
-            raise ValueError(
-                "expected_revision must be a 32-character opaque token"
-            )
+            raise ValueError("expected_revision must be a 32-character opaque token")
         if (
             not isinstance(operation, str)
             or operation not in TIMELINE_CONTROL_OPERATIONS
@@ -6629,9 +6685,7 @@ class ManagerService:
                     "segmentId": "segment_id",
                     "layerId": "layer_id",
                 }[id_name]
-                raise ValueError(
-                    f"{json_name} must be a 32-character opaque token"
-                )
+                raise ValueError(f"{json_name} must be a 32-character opaque token")
             unexpected_ids = [
                 {
                     "clipId": "clip_id",
@@ -6643,8 +6697,7 @@ class ManagerService:
             ]
             if unexpected_ids:
                 raise ValueError(
-                    f"{operation} does not accept "
-                    + ", ".join(sorted(unexpected_ids))
+                    f"{operation} does not accept " + ", ".join(sorted(unexpected_ids))
                 )
         elif any(identifier is not None for identifier in supplied_ids.values()):
             raise ValueError(f"{operation} does not accept an item ID")
@@ -6695,9 +6748,7 @@ class ManagerService:
                 raise ValueError(
                     "Timeline catalog changed; refresh before sending this control"
                 )
-            controls = {
-                str(control) for control in instance.get("controls", [])
-            }
+            controls = {str(control) for control in instance.get("controls", [])}
             if operation not in controls:
                 raise ValueError(
                     f"the selected Timeline instance does not provide {operation}"
@@ -6776,9 +6827,7 @@ class ManagerService:
                         grouped.setdefault(key, []).append(row)
 
         running = (
-            bool(self._running_pids())
-            if vam_running is None
-            else bool(vam_running)
+            bool(self._running_pids()) if vam_running is None else bool(vam_running)
         )
         reports: list[dict[str, object]] = []
         for key, group in grouped.items():
@@ -6791,15 +6840,10 @@ class ManagerService:
             choice = current_choices.get(key) if current_choices else None
             selected_digest = _choice_digest(choice)
             stale = bool(
-                selected_digest is not None
-                and selected_digest not in unique_signatures
+                selected_digest is not None and selected_digest not in unique_signatures
             )
-            genuine_conflict = (
-                len(group) > 1
-                and (
-                    len(signatures) != len(group)
-                    or len(unique_signatures) > 1
-                )
+            genuine_conflict = len(group) > 1 and (
+                len(signatures) != len(group) or len(unique_signatures) > 1
             )
             if not genuine_conflict and not stale:
                 continue
@@ -6833,14 +6877,11 @@ class ManagerService:
                     choices=choices,
                 )
                 unresolved = [
-                    report
-                    for report in reports
-                    if not bool(report.get("resolved"))
+                    report for report in reports if not bool(report.get("resolved"))
                 ]
                 if unresolved:
                     raise PackageConflictError(
-                        "saved package-copy choice needs attention: "
-                        + exc.package_id,
+                        "saved package-copy choice needs attention: " + exc.package_id,
                         unresolved,
                         code="package_copy_choice_stale",
                     ) from exc
@@ -6867,11 +6908,7 @@ class ManagerService:
             choices=choices,
             vam_running=vam_running,
         )
-        unresolved = [
-            report
-            for report in reports
-            if not bool(report.get("resolved"))
-        ]
+        unresolved = [report for report in reports if not bool(report.get("resolved"))]
         if unresolved:
             identities = ", ".join(
                 str(report["package_id"]) for report in unresolved[:10]
@@ -6881,9 +6918,7 @@ class ManagerService:
                 unresolved,
             )
         unsafe_live = [
-            report
-            for report in reports
-            if bool(report.get("requires_vam_close"))
+            report for report in reports if bool(report.get("requires_vam_close"))
         ]
         if unsafe_live:
             identities = ", ".join(
@@ -7188,9 +7223,7 @@ class ManagerService:
                 "running": bool(pids),
                 "pids": pids,
             },
-            "bridge": _public_bridge_status(
-                read_bridge_status(self.vam_root)
-            ),
+            "bridge": _public_bridge_status(read_bridge_status(self.vam_root)),
             "initial_scan": (
                 {
                     "found": scan_result.found,
@@ -7362,17 +7395,11 @@ class ManagerService:
             )
         reference = parse_dependency_ref(package_identity)
         if reference is None:
-            raise ValueError(
-                "package identity must be creator.package.version"
-            )
+            raise ValueError("package identity must be creator.package.version")
         if not isinstance(query, str):
             raise TypeError("q must be a string")
-        if len(query) > 500 or any(
-            not character.isprintable() for character in query
-        ):
-            raise ValueError(
-                "q must contain at most 500 printable characters"
-            )
+        if len(query) > 500 or any(not character.isprintable() for character in query):
+            raise ValueError("q must contain at most 500 printable characters")
         if resource_types is None:
             resource_types = []
         if not isinstance(resource_types, list) or not all(
@@ -7382,8 +7409,7 @@ class ManagerService:
         if len(resource_types) > 64:
             raise ValueError("at most 64 type filters may be supplied")
         if any(
-            len(value) > 200
-            or any(not character.isprintable() for character in value)
+            len(value) > 200 or any(not character.isprintable() for character in value)
             for value in resource_types
         ):
             raise ValueError(
@@ -7430,14 +7456,11 @@ class ManagerService:
                 )
             ]
             unresolved = [
-                conflict
-                for conflict in conflicts
-                if not bool(conflict.get("resolved"))
+                conflict for conflict in conflicts if not bool(conflict.get("resolved"))
             ]
             if unresolved:
                 stale = any(
-                    bool(conflict.get("choice_stale"))
-                    for conflict in unresolved
+                    bool(conflict.get("choice_stale")) for conflict in unresolved
                 )
                 raise PackageConflictError(
                     (
@@ -7460,8 +7483,7 @@ class ManagerService:
                 # Hash hydration above must turn every stale selection into a
                 # structured report instead of browsing an arbitrary fallback.
                 raise PackageConflictError(
-                    "saved package-copy choice needs attention: "
-                    + reference.full_id,
+                    "saved package-copy choice needs attention: " + reference.full_id,
                     conflicts,
                     code="package_copy_choice_stale",
                 ) from exc
