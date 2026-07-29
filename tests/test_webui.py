@@ -1439,7 +1439,10 @@ process.stdout.write(JSON.stringify(output));
             "browseDependencyPackage(entry.packageId)",
             block,
         )
-        self.assertIn('setView("packages")', block)
+        self.assertIn(
+            'setView("packages", { preserveResourceReturn: true })',
+            block,
+        )
         self.assertIn("elements.searchInput.value = query", block)
         self.assertIn("app.exactPackageId = query", block)
         self.assertNotIn("load-more", block.lower())
@@ -1453,6 +1456,120 @@ process.stdout.write(JSON.stringify(output));
         ):
             with self.subTest(selector=selector):
                 self.assertIn(selector, self.styles)
+
+    def test_dependency_package_navigation_can_return_to_its_resource(self) -> None:
+        for control_id in (
+            "resource-return-context",
+            "resource-return-button",
+            "resource-return-title",
+            "resource-return-detail",
+            "resource-return-dismiss",
+        ):
+            with self.subTest(control_id=control_id):
+                self.assertIn(f'id="{control_id}"', self.html)
+        self.assertIn(
+            'aria-label="Return to the resource you were viewing"',
+            self.html,
+        )
+        self.assertIn('aria-label="Dismiss return link"', self.html)
+
+        browse_start = self.javascript.index(
+            "function browseDependencyPackage("
+        )
+        browse_end = self.javascript.index(
+            "function dependencyCopyFingerprint(", browse_start
+        )
+        browse = self.javascript[browse_start:browse_end]
+        self.assertLess(
+            browse.index("captureResourceReturnContext();"),
+            browse.index('elements.resourceDetailDialog.close("browse")'),
+        )
+        self.assertIn(
+            'setView("packages", { preserveResourceReturn: true })',
+            browse,
+        )
+
+        return_start = self.javascript.index(
+            "function resourceReturnLocationLabel("
+        )
+        return_end = self.javascript.index(
+            "function browseDependencyPackage(", return_start
+        )
+        navigation = self.javascript[return_start:return_end]
+        for saved_state in (
+            "resourceId,",
+            "view: app.view",
+            "query: app.query",
+            "type: app.type",
+            "packageState: app.packageState",
+            "page: libraryPaginationState(app.total, app.page).page",
+            "selectedWorkspaceCategoryId: app.selectedWorkspaceCategoryId",
+            "dependencyPage: app.resourceDependencyPage",
+        ):
+            with self.subTest(saved_state=saved_state):
+                self.assertIn(saved_state, navigation)
+        capture_start = navigation.index(
+            "function captureResourceReturnContext()"
+        )
+        capture_end = navigation.index(
+            "function resourceReturnStateMatches(", capture_start
+        )
+        self.assertNotIn(
+            "resourceDependencyReport",
+            navigation[capture_start:capture_end],
+        )
+        self.assertIn("deferLibraryLoad: true", navigation)
+        self.assertIn(
+            "const restored = await loadLibrary({ page: context.page });",
+            navigation,
+        )
+        self.assertIn("const freshItem = app.items.find(", navigation)
+        self.assertNotIn("context.item", navigation)
+        self.assertNotIn("app.page === context.page", navigation)
+        self.assertIn(
+            "resourceCardOpener(context.resourceId) || elements.searchInput",
+            navigation,
+        )
+        self.assertIn("app.resourceDetailRestore = {", navigation)
+        self.assertIn("dependencyPage: context.dependencyPage", navigation)
+        self.assertIn("app.resourceReturnContext = null", navigation)
+        self.assertIn(
+            "elements.resourceReturnContext?.contains(document.activeElement)",
+            navigation,
+        )
+        self.assertIn(
+            "focusTarget.focus({ preventScroll: true })",
+            navigation,
+        )
+        missing_start = navigation.index("if (!freshItem)")
+        missing_end = navigation.index(
+            "const freshOpener", missing_start
+        )
+        self.assertIn(
+            "clearResourceReturnContext();",
+            navigation[missing_start:missing_end],
+        )
+
+        view_start = self.javascript.index("function setView(")
+        view_end = self.javascript.index(
+            "function updateWorkspaceSearchPlaceholder(", view_start
+        )
+        view = self.javascript[view_start:view_end]
+        self.assertIn("deferLibraryLoad = false", view)
+        self.assertIn("preserveResourceReturn = false", view)
+        self.assertIn(
+            "if (!preserveResourceReturn) clearResourceReturnContext();",
+            view,
+        )
+        self.assertIn("if (!deferLibraryLoad) loadLibrary();", view)
+
+        self.assertIn(".resource-return-context", self.styles)
+        self.assertIn(".resource-return-button:focus-visible", self.styles)
+        mobile_start = self.styles.index("@media (max-width: 600px)")
+        self.assertIn(
+            ".resource-return-button",
+            self.styles[mobile_start:],
+        )
 
     @unittest.skipUnless(shutil.which("node"), "Node.js is not installed")
     def test_dependency_package_navigation_filters_to_the_exact_identity(
@@ -2432,8 +2549,8 @@ process.stdout.write(JSON.stringify({{
         self.assertIn("body.timeline-popout .timeline-transport", self.styles)
 
     def test_static_assets_use_the_current_cache_version(self) -> None:
-        self.assertIn("/styles.css?v=0.12.1", self.html)
-        self.assertIn("/app.js?v=0.12.1", self.html)
+        self.assertIn("/styles.css?v=0.12.2", self.html)
+        self.assertIn("/app.js?v=0.12.2", self.html)
 
 
 if __name__ == "__main__":

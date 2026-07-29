@@ -781,6 +781,97 @@ button svg,
   text-align: center;
 }
 
+.resource-return-context {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 14px;
+  padding: 8px 9px 8px 8px;
+  background:
+    linear-gradient(90deg, rgba(134, 230, 176, 0.09), transparent 72%),
+    var(--surface);
+  border: 1px solid rgba(134, 230, 176, 0.2);
+  border-radius: 10px;
+}
+
+.resource-return-button {
+  display: flex;
+  min-width: 0;
+  flex: 1 1 auto;
+  gap: 9px;
+  align-items: center;
+  padding: 4px 6px;
+  color: var(--text);
+  background: transparent;
+  border: 0;
+  border-radius: 7px;
+  text-align: left;
+}
+
+.resource-return-button:hover {
+  color: var(--accent-strong);
+  background: rgba(134, 230, 176, 0.06);
+}
+
+.resource-return-button:focus-visible,
+.resource-return-dismiss:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.resource-return-button > svg {
+  width: 20px;
+  height: 20px;
+  flex: 0 0 20px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.8;
+}
+
+.resource-return-button > span {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.resource-return-button strong,
+.resource-return-button small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.resource-return-button strong {
+  font-size: 12px;
+}
+
+.resource-return-button small {
+  color: var(--text-faint);
+  font-size: 10px;
+}
+
+.resource-return-dismiss {
+  width: 32px;
+  height: 32px;
+  flex: 0 0 32px;
+  padding: 0;
+  color: var(--text-faint);
+  background: transparent;
+  border: 0;
+  border-radius: 7px;
+  font-size: 19px;
+  line-height: 1;
+}
+
+.resource-return-dismiss:hover {
+  color: var(--text);
+  background: var(--surface-raised);
+}
+
 .asset-workspace {
   display: grid;
   gap: 18px;
@@ -4780,6 +4871,18 @@ body.timeline-popout .timeline-lock-toggle {
 }
 
 @media (max-width: 600px) {
+  .resource-return-context {
+    margin-top: 10px;
+  }
+
+  .resource-return-button {
+    min-height: 40px;
+  }
+
+  .resource-return-button small {
+    max-width: 72vw;
+  }
+
   .resource-detail-dialog {
     width: 100vw;
     height: 100dvh;

@@ -705,6 +705,10 @@ const app = {
   resourceDependencyPage: 1,
   resourceDependencyReport: null,
   resourceDependencyFocus: false,
+  resourceDetailRestore: null,
+  resourceReturnContext: null,
+  resourceReturnGeneration: 0,
+  resourceReturnInFlight: false,
   pendingResourceConflict: null,
   packageChoiceInFlight: new Set(),
   packageConflictToast: null,
@@ -947,6 +951,11 @@ function cacheElements() {
     "resource-detail-eyebrow",
     "resource-detail-title",
     "resource-detail-content",
+    "resource-return-context",
+    "resource-return-button",
+    "resource-return-title",
+    "resource-return-detail",
+    "resource-return-dismiss",
     "confirm-dialog",
     "dialog-close",
     "confirm-icon",
@@ -1065,6 +1074,14 @@ function bindEvents() {
   elements.resourceDetailDialog.addEventListener(
     "close",
     handleResourceDetailClose,
+  );
+  elements.resourceReturnButton.addEventListener(
+    "click",
+    returnToResourceContext,
+  );
+  elements.resourceReturnDismiss.addEventListener(
+    "click",
+    clearResourceReturnContext,
   );
   elements.timelineInstance.addEventListener(
     "change",
@@ -3830,6 +3847,186 @@ function dependencyStateLabel(state) {
   );
 }
 
+function resourceReturnLocationLabel(context) {
+  if (context.view === "workspace") {
+    return context.workspaceCategoryLabel || "Workspace";
+  }
+  return context.view === "resources" ? "Resources" : "Library";
+}
+
+function renderResourceReturnContext() {
+  const context = app.resourceReturnContext;
+  elements.resourceReturnContext.hidden = !context;
+  if (!context) return;
+
+  const title = safePresentationLabel(context.title, "resource");
+  elements.resourceReturnTitle.textContent = `Back to “${title}”`;
+  elements.resourceReturnButton.setAttribute(
+    "aria-label",
+    `Back to ${title} and restore its previous library view`,
+  );
+  const details = [resourceReturnLocationLabel(context)];
+  if (context.query) {
+    details.push(
+      `search “${boundedDependencyText(context.query, "", 64)}”`,
+    );
+  }
+  if (context.type) details.push(prettyType(context.type));
+  if (context.packageState !== "all") {
+    details.push(dependencyStateLabel(context.packageState));
+  }
+  details.push(`page ${formatNumber(context.page)}`);
+  elements.resourceReturnDetail.textContent = details.join(" · ");
+}
+
+function clearResourceReturnContext() {
+  const restoreFocus = Boolean(
+    elements.resourceReturnContext?.contains(document.activeElement),
+  );
+  app.resourceReturnGeneration += 1;
+  if (app.resourceReturnInFlight && app.requestController) {
+    app.requestController.abort();
+  }
+  app.resourceReturnInFlight = false;
+  app.resourceReturnContext = null;
+  setButtonBusy(elements.resourceReturnButton, false);
+  renderResourceReturnContext();
+  if (restoreFocus) {
+    window.setTimeout(() => {
+      const activeTab = elements.viewTabs.find((tab) =>
+        tab.classList.contains("active"),
+      );
+      const focusTarget =
+        !elements.libraryView.hidden &&
+        !["access", "timeline"].includes(app.view)
+          ? elements.searchInput
+          : activeTab;
+      if (focusTarget instanceof HTMLElement && focusTarget.isConnected) {
+        focusTarget.focus({ preventScroll: true });
+      }
+    }, 0);
+  }
+}
+
+function captureResourceReturnContext() {
+  const item = app.resourceDetailItem;
+  const resourceId = normalizedResourceId(
+    Number(item?.id ?? item?.resource_id),
+  );
+  if (
+    resourceId === null ||
+    !["resources", "workspace"].includes(app.view)
+  ) {
+    return;
+  }
+  const model = normalizeResourceCardModel(item, { assumeHidden: true });
+  const category =
+    app.view === "workspace" ? currentWorkspaceCategory() : null;
+  app.resourceReturnGeneration += 1;
+  app.resourceReturnInFlight = false;
+  app.resourceReturnContext = {
+    resourceId,
+    title: model.title,
+    view: app.view,
+    query: app.query,
+    type: app.type,
+    packageState: app.packageState,
+    exactPackageId: app.exactPackageId,
+    page: libraryPaginationState(app.total, app.page).page,
+    selectedWorkspaceCategoryId: app.selectedWorkspaceCategoryId,
+    workspaceCategoryLabel: category?.label || "",
+    dependencyPage: app.resourceDependencyPage,
+    detailScrollTop: Math.max(
+      0,
+      Math.trunc(numberOr(elements.resourceDetailContent?.scrollTop, 0)),
+    ),
+  };
+  setButtonBusy(elements.resourceReturnButton, false);
+  renderResourceReturnContext();
+}
+
+function resourceReturnStateMatches(context) {
+  return (
+    app.view === context.view &&
+    app.query === context.query &&
+    app.type === context.type &&
+    app.packageState === context.packageState &&
+    app.exactPackageId === context.exactPackageId &&
+    elements.searchInput.value.trim() === context.query &&
+    (context.view !== "workspace" ||
+      app.selectedWorkspaceCategoryId ===
+        context.selectedWorkspaceCategoryId)
+  );
+}
+
+async function returnToResourceContext() {
+  const context = app.resourceReturnContext;
+  if (!context || app.resourceReturnInFlight) return;
+  const generation = ++app.resourceReturnGeneration;
+  app.resourceReturnInFlight = true;
+  setButtonBusy(elements.resourceReturnButton, true, "Restoring resource…");
+
+  try {
+    app.selectedWorkspaceCategoryId =
+      context.selectedWorkspaceCategoryId;
+    app.query = context.query;
+    app.type = context.type;
+    app.packageState = context.packageState;
+    app.exactPackageId = context.exactPackageId;
+    setView(context.view, {
+      deferLibraryLoad: true,
+      preserveResourceReturn: true,
+    });
+    configureStateFilter();
+    updateWorkspaceSearchPlaceholder();
+    elements.searchInput.value = context.query;
+    elements.typeFilter.value = context.type;
+    elements.stateFilter.value = context.packageState;
+    updateClearFilters();
+
+    const restored = await loadLibrary({ page: context.page });
+    if (
+      restored !== true ||
+      generation !== app.resourceReturnGeneration ||
+      app.resourceReturnContext !== context ||
+      !resourceReturnStateMatches(context)
+    ) {
+      return;
+    }
+
+    const freshItem = app.items.find(
+      (item) =>
+        normalizedResourceId(
+          Number(item?.id ?? item?.resource_id),
+        ) === context.resourceId,
+    );
+    if (!freshItem) {
+      clearResourceReturnContext();
+      toast(
+        "Could not reopen resource",
+        "The previous library view was restored, but this resource is no longer on that catalogue page.",
+        "error",
+      );
+      return;
+    }
+    const freshOpener =
+      resourceCardOpener(context.resourceId) || elements.searchInput;
+    app.resourceDetailRestore = {
+      resourceId: context.resourceId,
+      dependencyPage: context.dependencyPage,
+      scrollTop: context.detailScrollTop,
+    };
+    openResourceDetailDialog(freshItem, freshOpener);
+    app.resourceReturnContext = null;
+    renderResourceReturnContext();
+  } finally {
+    if (generation === app.resourceReturnGeneration) {
+      app.resourceReturnInFlight = false;
+      setButtonBusy(elements.resourceReturnButton, false);
+    }
+  }
+}
+
 function browseDependencyPackage(packageId) {
   const query = dependencyIdentifier(packageId, "");
   if (!query) {
@@ -3840,6 +4037,7 @@ function browseDependencyPackage(packageId) {
     );
     return;
   }
+  captureResourceReturnContext();
   window.clearTimeout(app.searchTimer);
   if (elements.resourceDetailDialog?.open) {
     elements.resourceDetailDialog.close("browse");
@@ -3852,7 +4050,7 @@ function browseDependencyPackage(packageId) {
   elements.typeFilter.value = "";
   elements.stateFilter.value = "all";
   if (app.view !== "packages") {
-    setView("packages");
+    setView("packages", { preserveResourceReturn: true });
   } else {
     loadLibrary();
   }
@@ -4265,6 +4463,7 @@ function renderResourceDependencyReport(section, item, rawReport) {
     content.append(truncated);
   }
   section.replaceChildren(content);
+  restoreResourceDetailPosition();
   if (app.resourceDependencyFocus && report.conflicts.length) {
     app.resourceDependencyFocus = false;
     window.setTimeout(
@@ -4275,6 +4474,29 @@ function renderResourceDependencyReport(section, item, rawReport) {
       0,
     );
   }
+}
+
+function restoreResourceDetailPosition() {
+  const restore = app.resourceDetailRestore;
+  const resourceId = normalizedResourceId(
+    Number(elements.resourceDetailDialog?.dataset.resourceId),
+  );
+  if (!restore || restore.resourceId !== resourceId) return;
+  app.resourceDetailRestore = null;
+  const scrollTop = Math.max(
+    0,
+    Math.trunc(numberOr(restore.scrollTop, 0)),
+  );
+  window.requestAnimationFrame(() => {
+    if (
+      elements.resourceDetailDialog?.open &&
+      normalizedResourceId(
+        Number(elements.resourceDetailDialog.dataset.resourceId),
+      ) === resourceId
+    ) {
+      elements.resourceDetailContent.scrollTop = scrollTop;
+    }
+  });
 }
 
 function renderResourceDependencyLoading(section) {
@@ -4515,11 +4737,23 @@ function openResourceDetailDialog(item, opener) {
   const dialog = elements.resourceDetailDialog;
   const isNewOpen = !dialog.open;
   const model = normalizeResourceCardModel(item, { assumeHidden: true });
+  const detailRestore =
+    app.resourceDetailRestore?.resourceId === model.id
+      ? app.resourceDetailRestore
+      : null;
+  if (app.resourceDetailRestore && !detailRestore) {
+    app.resourceDetailRestore = null;
+  }
   const previousResourceId = normalizedResourceId(
     Number(dialog.dataset.resourceId),
   );
   if (previousResourceId !== model.id) {
-    app.resourceDependencyPage = 1;
+    app.resourceDependencyPage = detailRestore
+      ? Math.max(
+          1,
+          Math.trunc(numberOr(detailRestore.dependencyPage, 1)),
+        )
+      : 1;
   }
   dialog.dataset.resourceId =
     model.id === null ? "" : String(model.id);
@@ -4698,6 +4932,7 @@ function handleResourceDetailClose() {
   app.resourceDependencyGeneration += 1;
   app.resourceDependencyReport = null;
   app.resourceDependencyFocus = false;
+  app.resourceDetailRestore = null;
   app.resourceDetailItem = null;
   app.pendingResourceConflict = null;
   document.body.classList.remove("resource-detail-open");
@@ -8244,7 +8479,7 @@ async function loadLibrary({
         app.exactPackageId.toLowerCase() !==
           exactPackageId.toLowerCase()
       ) {
-        return;
+        return false;
       }
       incoming = exactResult.items;
       total = exactResult.total;
@@ -8285,10 +8520,12 @@ async function loadLibrary({
     app.offset = offset;
     renderLibrary();
     if (scrollToResults) scrollLibraryToStart();
+    return true;
   } catch (error) {
     if (error.name !== "AbortError") {
       showErrorState(error);
     }
+    return false;
   } finally {
     if (app.requestController === controller) {
       app.loading = false;
@@ -8538,6 +8775,21 @@ function renderLibraryPagination() {
   elements.pageNext.disabled = app.loading || !pagination.hasNext;
 }
 
+function resourceCardOpener(resourceId) {
+  const normalizedId = normalizedResourceId(Number(resourceId));
+  if (normalizedId === null) return null;
+  return (
+    Array.from(
+      elements.cardGrid.querySelectorAll(
+        ".resource-card-preview-button[data-resource-id]",
+      ),
+    ).find(
+      (candidate) =>
+        Number(candidate.dataset.resourceId) === normalizedId,
+    ) || null
+  );
+}
+
 function renderLibrary() {
   const detailWasOpen = Boolean(elements.resourceDetailDialog?.open);
   const detailResourceId = detailWasOpen
@@ -8593,17 +8845,7 @@ function renderLibrary() {
               normalizedResourceId(item?.id ?? item?.resource_id) ===
               detailResourceId,
           );
-    const refreshedOpener =
-      detailResourceId === null
-        ? null
-        : Array.from(
-            elements.cardGrid.querySelectorAll(
-              ".resource-card-preview-button[data-resource-id]",
-            ),
-          ).find(
-            (candidate) =>
-              Number(candidate.dataset.resourceId) === detailResourceId,
-          );
+    const refreshedOpener = resourceCardOpener(detailResourceId);
     if (refreshedItem && refreshedOpener && app.view !== "packages") {
       openResourceDetailDialog(refreshedItem, refreshedOpener);
     } else {
@@ -10739,13 +10981,20 @@ async function updateAutoReconcile() {
   }
 }
 
-function setView(view) {
+function setView(
+  view,
+  {
+    deferLibraryLoad = false,
+    preserveResourceReturn = false,
+  } = {},
+) {
   if (
     !["resources", "workspace", "timeline", "packages", "access"].includes(view) ||
     app.view === view
   ) {
     return;
   }
+  if (!preserveResourceReturn) clearResourceReturnContext();
   if (view !== "packages") app.exactPackageId = "";
   if (elements.resourceDetailDialog?.open) {
     elements.resourceDetailDialog.close("view-change");
@@ -10795,7 +11044,7 @@ function setView(view) {
       loadPersons({ quiet: true });
     }
   }
-  loadLibrary();
+  if (!deferLibraryLoad) loadLibrary();
 }
 
 function updateWorkspaceSearchPlaceholder() {

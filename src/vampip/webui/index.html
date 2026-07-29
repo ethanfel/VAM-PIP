@@ -6,8 +6,8 @@
     <meta name="color-scheme" content="dark">
     <meta name="theme-color" content="#111316">
     <title>VAM-PIP Manager</title>
-    <link rel="stylesheet" href="/styles.css?v=0.12.1">
-    <script src="/app.js?v=0.12.1" defer></script>
+    <link rel="stylesheet" href="/styles.css?v=0.12.2">
+    <script src="/app.js?v=0.12.2" defer></script>
   </head>
   <body>
     <a class="skip-link" href="#main-content">Skip to library</a>
@@ -196,6 +196,34 @@
             <span id="access-tab-count">—</span>
           </button>
         </nav>
+
+        <section
+          class="resource-return-context"
+          id="resource-return-context"
+          aria-label="Return to the resource you were viewing"
+          hidden
+        >
+          <button
+            class="resource-return-button"
+            id="resource-return-button"
+            type="button"
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="m14.5 6-6 6 6 6"></path>
+            </svg>
+            <span>
+              <strong id="resource-return-title">Back to resource</strong>
+              <small id="resource-return-detail">Restore the previous library view</small>
+            </span>
+          </button>
+          <button
+            class="resource-return-dismiss"
+            id="resource-return-dismiss"
+            type="button"
+            aria-label="Dismiss return link"
+            title="Dismiss"
+          >×</button>
+        </section>
 
         <section id="library-view" aria-labelledby="library-title">
           <h2 class="visually-hidden" id="library-title">Library browser</h2>
