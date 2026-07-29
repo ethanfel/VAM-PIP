@@ -284,6 +284,9 @@ namespace VAMPip
             public Rigidbody CameraPhysicalBody;
             public bool CameraPhysicalBodyWasPresent;
             public bool CameraPhysicalBodyKinematic;
+            public bool HeadRequestedRotationCaptured;
+            public Quaternion HeadRequestedRotation;
+            public bool PersistentHeadLockActive;
             public MVRScript Renderer;
             public float FlatHorizontalFov;
             public string CameraTarget;
@@ -3450,6 +3453,7 @@ namespace VAMPip
             Dictionary<string, FreeControllerV3> controllers)
         {
             Sam3dUndoSnapshot snapshot = new Sam3dUndoSnapshot();
+            snapshot.PersistentHeadLockActive = false;
             snapshot.JobId = solution.JobId;
             snapshot.Revision = solution.Revision;
             snapshot.TargetUid = request.TargetUid;
@@ -3597,6 +3601,21 @@ namespace VAMPip
         private static void LockSam3dSavedPhysics(
             Sam3dUndoSnapshot snapshot)
         {
+            ValidateSam3dSavedPhysics(snapshot);
+            int index;
+            for (index = 0;
+                 index < snapshot.Controllers.Count;
+                 index++)
+            {
+                LockSam3dControllerPhysics(
+                    snapshot.Controllers[index]);
+            }
+            LockSam3dCameraPhysics(snapshot);
+        }
+
+        private static void ValidateSam3dSavedPhysics(
+            Sam3dUndoSnapshot snapshot)
+        {
             if (snapshot == null ||
                 snapshot.Controllers == null ||
                 snapshot.Controllers.Count != Sam3dControllerCount)
@@ -3635,23 +3654,72 @@ namespace VAMPip
                 throw new Exception(
                     "The saved SAM3D camera is no longer available.");
             }
+        }
+
+        private static void LockSam3dControllerPhysics(
+            Sam3dControllerUndo saved)
+        {
+            saved.Controller.physicsEnabled = false;
+            if (saved.PhysicalBodyWasPresent)
+            {
+                saved.PhysicalBody.isKinematic = true;
+            }
+        }
+
+        private static void RestoreSam3dControllerPhysics(
+            Sam3dControllerUndo saved)
+        {
+            saved.Controller.physicsEnabled =
+                saved.PhysicsEnabled;
+            if (saved.PhysicalBodyWasPresent)
+            {
+                saved.PhysicalBody.isKinematic =
+                    saved.PhysicalBodyKinematic;
+            }
+        }
+
+        private static void LockSam3dCameraPhysics(
+            Sam3dUndoSnapshot snapshot)
+        {
+            snapshot.CameraController.physicsEnabled = false;
+            if (snapshot.CameraPhysicalBodyWasPresent)
+            {
+                snapshot.CameraPhysicalBody.isKinematic = true;
+            }
+        }
+
+        private static bool IsSam3dPersistentHoldController(
+            Sam3dControllerUndo saved)
+        {
+            string id =
+                saved == null || saved.Controller == null
+                ? ""
+                : saved.Controller.name;
+            return id == "headControl";
+        }
+
+        private static void ReassertSam3dPersistentPoseLock(
+            Sam3dUndoSnapshot snapshot)
+        {
+            ValidateSam3dSavedPhysics(snapshot);
+            int index;
             for (index = 0;
                  index < snapshot.Controllers.Count;
                  index++)
             {
                 Sam3dControllerUndo saved =
                     snapshot.Controllers[index];
-                saved.Controller.physicsEnabled = false;
-                if (saved.PhysicalBodyWasPresent)
+                if (snapshot.PersistentHeadLockActive &&
+                    IsSam3dPersistentHoldController(saved))
                 {
-                    saved.PhysicalBody.isKinematic = true;
+                    LockSam3dControllerPhysics(saved);
+                    SnapSam3dControllerPhysicalPose(
+                        saved.Controller);
                 }
             }
-            snapshot.CameraController.physicsEnabled = false;
-            if (snapshot.CameraPhysicalBodyWasPresent)
-            {
-                snapshot.CameraPhysicalBody.isKinematic = true;
-            }
+            LockSam3dCameraPhysics(snapshot);
+            SnapSam3dControllerPhysicalPose(
+                snapshot.CameraController);
         }
 
         private static bool IsSam3dSavedPhysicalBodyAvailable(
@@ -3668,7 +3736,17 @@ namespace VAMPip
         {
             try
             {
-                LockSam3dSavedPhysics(snapshot);
+                ValidateSam3dSavedPhysics(snapshot);
+                int index;
+                for (index = 0;
+                     index < snapshot.Controllers.Count;
+                     index++)
+                {
+                    Sam3dControllerUndo saved =
+                        snapshot.Controllers[index];
+                    RestoreSam3dControllerPhysics(saved);
+                }
+                LockSam3dCameraPhysics(snapshot);
             }
             finally
             {
@@ -4139,7 +4217,7 @@ namespace VAMPip
             }
             try
             {
-                LockSam3dSavedPhysics(snapshot);
+                ReassertSam3dPersistentPoseLock(snapshot);
             }
             catch (Exception exception)
             {
@@ -4329,6 +4407,81 @@ namespace VAMPip
             diagnostics.CapturedAtUtc = UtcNow();
         }
 
+        private static void CaptureSam3dRequestedHeadRotation(
+            Sam3dUndoSnapshot snapshot,
+            Dictionary<string, FreeControllerV3> controllers)
+        {
+            FreeControllerV3 head;
+            if (snapshot == null ||
+                controllers == null ||
+                !controllers.TryGetValue(
+                    "headControl",
+                    out head) ||
+                head == null ||
+                head.control == null)
+            {
+                throw new Exception(
+                    "The target Person has no usable headControl.");
+            }
+            snapshot.HeadRequestedRotation =
+                head.control.rotation;
+            snapshot.HeadRequestedRotationCaptured = true;
+        }
+
+        private static void FinalizeSam3dPersistentHeadLock(
+            Sam3dUndoSnapshot snapshot)
+        {
+            ValidateSam3dSavedPhysics(snapshot);
+            Sam3dControllerUndo head = null;
+            int index;
+            for (index = 0;
+                 index < snapshot.Controllers.Count;
+                 index++)
+            {
+                Sam3dControllerUndo saved =
+                    snapshot.Controllers[index];
+                if (IsSam3dPersistentHoldController(saved))
+                {
+                    head = saved;
+                    break;
+                }
+            }
+            if (head == null ||
+                head.Controller.control == null ||
+                !head.PhysicalBodyWasPresent ||
+                !snapshot.HeadRequestedRotationCaptured)
+            {
+                throw new Exception(
+                    "The saved SAM3D head hold is incomplete.");
+            }
+
+            Vector3 settledPosition =
+                head.PhysicalBody.position;
+            LockSam3dControllerPhysics(head);
+            head.Controller.control.position =
+                settledPosition;
+            head.Controller.control.rotation =
+                snapshot.HeadRequestedRotation;
+            RecordSam3dRequestedTransform(
+                snapshot.Diagnostics,
+                "headControl",
+                settledPosition,
+                snapshot.HeadRequestedRotation);
+            if (head.Controller.onPositionChangeHandlers != null)
+            {
+                head.Controller.onPositionChangeHandlers(
+                    head.Controller);
+            }
+            SnapSam3dControllerPhysicalPose(
+                head.Controller);
+            LockSam3dCameraPhysics(snapshot);
+            snapshot.PersistentHeadLockActive = true;
+            SuperController.singleton.ResetSimulation(
+                Sam3dPhysicsResetFrames,
+                "Lock settled VAM-PIP SAM3D head rotation",
+                true);
+        }
+
         private static void ApplySam3dTransforms(
             Sam3dSolution solution,
             Atom person,
@@ -4349,6 +4502,9 @@ namespace VAMPip
                     renderer,
                     controllers,
                     diagnostics);
+                CaptureSam3dRequestedHeadRotation(
+                    snapshot,
+                    controllers);
                 applied = true;
             }
             finally
@@ -5027,6 +5183,41 @@ namespace VAMPip
             {
                 yield return WaitForSam3dPhysicsSettlement();
             }
+            if (applyError.Length != 0)
+            {
+                FinishSam3dActionError(
+                    request,
+                    startedAt,
+                    applyError);
+                yield break;
+            }
+
+            try
+            {
+                FinalizeSam3dPersistentHeadLock(snapshot);
+            }
+            catch (Exception exception)
+            {
+                applyError =
+                    "Could not finalize the settled SAM3D head rotation: " +
+                    DescribeException(exception);
+                try
+                {
+                    RestoreSam3dSnapshot(snapshot);
+                    _sam3dUndoSnapshot = null;
+                }
+                catch (Exception restoreException)
+                {
+                    applyError +=
+                        " Automatic rollback also failed: " +
+                        DescribeException(restoreException);
+                }
+                applyError +=
+                    RemoveCreatedSam3dCamera(
+                        request,
+                        cameraResult);
+            }
+            yield return WaitForSam3dPhysicsSettlement();
             if (applyError.Length != 0)
             {
                 FinishSam3dActionError(

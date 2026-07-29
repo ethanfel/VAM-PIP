@@ -1396,6 +1396,48 @@ class BridgeSourceTests(unittest.TestCase):
             commit_start,
         )
         commit_source = pose_source[commit_start:commit_end]
+        begin_start = pose_source.index(
+            "private static void BeginSam3dPoseTransaction("
+        )
+        begin_source = pose_source[begin_start:lock_start]
+        full_lock_end = pose_source.index(
+            "private static void ValidateSam3dSavedPhysics(",
+            lock_start,
+        )
+        full_lock_source = pose_source[lock_start:full_lock_end]
+        hold_start = pose_source.index(
+            "private static bool IsSam3dPersistentHoldController("
+        )
+        reassert_start = pose_source.index(
+            "private static void ReassertSam3dPersistentPoseLock(",
+            hold_start,
+        )
+        hold_source = pose_source[hold_start:reassert_start]
+        reassert_end = pose_source.index(
+            "private static bool IsSam3dSavedPhysicalBodyAvailable(",
+            reassert_start,
+        )
+        reassert_source = pose_source[reassert_start:reassert_end]
+        finalize_start = pose_source.index(
+            "private static void FinalizeSam3dPersistentHeadLock("
+        )
+        finalize_end = pose_source.index(
+            "private static void ApplySam3dTransforms(",
+            finalize_start,
+        )
+        finalize_source = pose_source[finalize_start:finalize_end]
+        apply_wrapper_start = finalize_end
+        apply_wrapper_end = pose_source.index(
+            "private static void ApplySam3dTransformContents(",
+            apply_wrapper_start,
+        )
+        apply_wrapper_source = pose_source[
+            apply_wrapper_start:apply_wrapper_end
+        ]
+        apply_action_end = action_source.index(
+            "private IEnumerator ExecuteUndoSam3dResult("
+        )
+        apply_action_source = action_source[:apply_action_end]
         restore_physics_start = commit_end
         restore_physics_end = pose_source.index(
             "private static void FinishSam3dPoseTransaction(",
@@ -1426,7 +1468,28 @@ class BridgeSourceTests(unittest.TestCase):
             pose_source,
         )
         self.assertIn("snapshot.PersonCollisionEnabled", pose_source)
+        self.assertIn(
+            "snapshot.PersistentHeadLockActive = false;",
+            pose_source,
+        )
         self.assertIn("snapshot.Person.collisionEnabled = false;", pose_source)
+        self.assertIn(
+            "LockSam3dSavedPhysics(snapshot);",
+            begin_source,
+        )
+        self.assertIn(
+            "ValidateSam3dSavedPhysics(snapshot);",
+            full_lock_source,
+        )
+        self.assertIn(
+            "LockSam3dControllerPhysics(\n"
+            "                    snapshot.Controllers[index]);",
+            full_lock_source,
+        )
+        self.assertIn(
+            "LockSam3dCameraPhysics(snapshot);",
+            full_lock_source,
+        )
         self.assertIn(
             "snapshot.Controllers.Count != Sam3dControllerCount",
             lock_source,
@@ -1626,7 +1689,19 @@ class BridgeSourceTests(unittest.TestCase):
             "                    FinishSam3dPoseTransaction(",
             pose_source,
         )
-        self.assertIn("LockSam3dSavedPhysics(snapshot);", commit_source)
+        self.assertNotIn("LockSam3dSavedPhysics(snapshot);", commit_source)
+        self.assertIn(
+            "RestoreSam3dControllerPhysics(saved);",
+            commit_source,
+        )
+        self.assertNotIn(
+            "IsSam3dPersistentHoldController(saved)",
+            commit_source,
+        )
+        self.assertIn(
+            "LockSam3dCameraPhysics(snapshot);",
+            commit_source,
+        )
         self.assertIn(
             "snapshot.Person.collisionEnabled =\n"
             "                        snapshot.PersonCollisionEnabled;",
@@ -1635,6 +1710,91 @@ class BridgeSourceTests(unittest.TestCase):
         self.assertNotIn(
             "RestoreSam3dSavedPhysicsAndCollision(snapshot);",
             commit_source,
+        )
+        self.assertIn('return id == "headControl";', hold_source)
+        self.assertNotIn("neckControl", hold_source)
+        self.assertIn(
+            "ValidateSam3dSavedPhysics(snapshot);",
+            reassert_source,
+        )
+        self.assertIn(
+            "snapshot.PersistentHeadLockActive &&\n"
+            "                    IsSam3dPersistentHoldController(saved)",
+            reassert_source,
+        )
+        self.assertIn(
+            "LockSam3dControllerPhysics(saved);",
+            reassert_source,
+        )
+        self.assertIn(
+            "SnapSam3dControllerPhysicalPose(\n"
+            "                        saved.Controller);",
+            reassert_source,
+        )
+        self.assertIn(
+            "LockSam3dCameraPhysics(snapshot);",
+            reassert_source,
+        )
+        self.assertIn(
+            "SnapSam3dControllerPhysicalPose(\n"
+            "                snapshot.CameraController);",
+            reassert_source,
+        )
+        self.assertIn(
+            "CaptureSam3dRequestedHeadRotation(\n"
+            "                    snapshot,\n"
+            "                    controllers);",
+            apply_wrapper_source,
+        )
+        self.assertLess(
+            apply_wrapper_source.index(
+                "CaptureSam3dRequestedHeadRotation("
+            ),
+            apply_wrapper_source.index("applied = true;"),
+        )
+        self.assertIn(
+            "Vector3 settledPosition =\n"
+            "                head.PhysicalBody.position;",
+            finalize_source,
+        )
+        self.assertIn(
+            "head.Controller.control.position =\n"
+            "                settledPosition;",
+            finalize_source,
+        )
+        self.assertIn(
+            "head.Controller.control.rotation =\n"
+            "                snapshot.HeadRequestedRotation;",
+            finalize_source,
+        )
+        self.assertIn(
+            "RecordSam3dRequestedTransform(\n"
+            "                snapshot.Diagnostics,\n"
+            '                "headControl",\n'
+            "                settledPosition,\n"
+            "                snapshot.HeadRequestedRotation);",
+            finalize_source,
+        )
+        self.assertIn(
+            "snapshot.PersistentHeadLockActive = true;",
+            finalize_source,
+        )
+        self.assertNotIn("neckControl", finalize_source)
+        self.assertLess(
+            finalize_source.index(
+                "LockSam3dControllerPhysics(head);"
+            ),
+            finalize_source.index(
+                "SnapSam3dControllerPhysicalPose("
+            ),
+        )
+        self.assertLess(
+            finalize_source.index(
+                "SnapSam3dControllerPhysicalPose("
+            ),
+            finalize_source.index(
+                "snapshot.PersistentHeadLockActive = true;"
+            ),
         )
         self.assertIn("RestoreSam3dSnapshot(snapshot);", action_source)
         self.assertIn(
@@ -1682,9 +1842,11 @@ class BridgeSourceTests(unittest.TestCase):
             ),
             3,
         )
-        self.assertIn(
-            "yield return WaitForSam3dPhysicsSettlement();",
-            action_source,
+        self.assertEqual(
+            apply_action_source.count(
+                "yield return WaitForSam3dPhysicsSettlement();"
+            ),
+            2,
         )
         self.assertIn(
             "private IEnumerator ExecuteUndoSam3dResult(",
@@ -1694,13 +1856,41 @@ class BridgeSourceTests(unittest.TestCase):
             "CaptureSam3dSettledDiagnostics(",
             action_source,
         )
+        first_settlement = apply_action_source.index(
+            "yield return WaitForSam3dPhysicsSettlement();"
+        )
+        finalize_call = apply_action_source.index(
+            "FinalizeSam3dPersistentHeadLock(snapshot);"
+        )
+        second_settlement = apply_action_source.index(
+            "yield return WaitForSam3dPhysicsSettlement();",
+            first_settlement + 1,
+        )
+        diagnostics_capture = apply_action_source.index(
+            "CaptureSam3dSettledDiagnostics("
+        )
         self.assertLess(
-            action_source.index(
-                "yield return WaitForSam3dPhysicsSettlement();"
+            apply_action_source.index(
+                "_sam3dUndoSnapshot = snapshot;"
             ),
-            action_source.index(
-                "CaptureSam3dSettledDiagnostics("
-            ),
+            first_settlement,
+        )
+        self.assertLess(first_settlement, finalize_call)
+        self.assertLess(finalize_call, second_settlement)
+        self.assertLess(second_settlement, diagnostics_capture)
+        rollback_start = apply_action_source.index(
+            "Could not finalize the settled SAM3D head rotation:"
+        )
+        rollback_source = apply_action_source[
+            rollback_start:second_settlement
+        ]
+        self.assertIn(
+            "RestoreSam3dSnapshot(snapshot);",
+            rollback_source,
+        )
+        self.assertLess(
+            rollback_source.index("RestoreSam3dSnapshot(snapshot);"),
+            rollback_source.index("_sam3dUndoSnapshot = null;"),
         )
 
     def test_bridge_sam3d_pose_lock_lifecycle_cleanup_is_no_pose_and_idempotent(
@@ -1801,7 +1991,10 @@ class BridgeSourceTests(unittest.TestCase):
             ),
             5,
         )
-        self.assertIn("LockSam3dSavedPhysics(snapshot);", current)
+        self.assertIn(
+            "ReassertSam3dPersistentPoseLock(snapshot);",
+            current,
+        )
         self.assertIn(
             "_inFlightSam3dCameraRequest = null;",
             stop,
