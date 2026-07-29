@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 import sqlite3
 import stat
@@ -11,7 +12,12 @@ from unittest import mock
 import zipfile
 
 from vampip.database import SCHEMA_VERSION, connect
-from vampip.bridge import install_bridge, read_bridge_request, read_bridge_status
+from vampip.bridge import (
+    bridge_directory,
+    install_bridge,
+    read_bridge_request,
+    read_bridge_status,
+)
 from vampip.inventory import rows_for_root, scan
 from vampip.manager_state import add_pin, list_leases
 from vampip.session_plugins import SessionPluginPresetError
@@ -1048,7 +1054,7 @@ class ManagerServiceTests(unittest.TestCase):
         self.assertEqual(len(installed), 2)
         self.assertTrue(all(path.is_file() for path in installed))
         source = installed[0].read_text(encoding="utf-8")
-        self.assertIn('BridgeVersion = "0.8.1"', source)
+        self.assertIn('BridgeVersion = "0.9.0"', source)
         self.assertNotRegex(source, r"(?m)^\s*Type(?:\s|\.)")
         self.assertNotIn("new Type[]", source)
         self.assertNotIn("System.Reflection", source)
@@ -1061,6 +1067,267 @@ class ManagerServiceTests(unittest.TestCase):
         installed[0].write_text("different", encoding="utf-8")
         with self.assertRaises(FileExistsError):
             install_bridge(self.vam_root)
+
+    def test_timeline_roster_is_bounded_and_controls_use_published_tokens(
+        self,
+    ) -> None:
+        directory = bridge_directory(self.vam_root)
+        directory.mkdir(parents=True)
+        instance_id = "bridge-instance"
+        timeline_id = "1" * 32
+        revision = "2" * 32
+        clip_id = "3" * 32
+        updated = datetime.now(timezone.utc).isoformat()
+        (directory / "status.json").write_text(
+            json.dumps(
+                {
+                    "protocol": 2,
+                    "bridgeVersion": "0.9.0",
+                    "instanceId": instance_id,
+                    "state": "ok",
+                    "ok": True,
+                }
+            ),
+            encoding="utf-8",
+        )
+        (directory / "timeline.json").write_text(
+            json.dumps(
+                {
+                    "protocol": 2,
+                    "timelineProtocol": 1,
+                    "instanceId": instance_id,
+                    "updatedAtUtc": updated,
+                    "loading": False,
+                    "truncated": False,
+                    "counts": {
+                        "instances": 1,
+                        "publishedInstances": 1,
+                        "clips": 1,
+                        "publishedClips": 1,
+                    },
+                    "limits": {
+                        "maxInstances": 32,
+                        "maxClips": 256,
+                        "maxClipsGlobally": 1024,
+                    },
+                    "capabilities": ["timeline-roster", "arbitrary-action"],
+                    "instances": [
+                        {
+                            "id": timeline_id,
+                            "revision": revision,
+                            "atomUid": "Person",
+                            "label": "Person: Timeline",
+                            "enhanced": True,
+                            "ready": True,
+                            "selected": True,
+                            "controls": ["playClip", "CallAction"],
+                            "transport": {
+                                "playing": False,
+                                "time": 2.5,
+                                "speed": 1,
+                                "weight": 1,
+                            },
+                            "current": {"clipId": clip_id},
+                            "segments": [],
+                            "layers": [],
+                            "clips": [
+                                {
+                                    "id": clip_id,
+                                    "name": "Idle",
+                                    "selected": True,
+                                    "length": 4,
+                                }
+                            ],
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        service = self.service([4321])
+        roster = service.timeline()
+        self.assertTrue(roster["available"])
+        self.assertEqual(roster["capabilities"], ["timeline-roster"])
+        self.assertEqual(roster["counts"]["publishedClips"], 1)
+        self.assertEqual(roster["limits"]["maxClipsGlobally"], 1024)
+        instance = roster["instances"][0]
+        self.assertEqual(instance["controls"], ["playClip"])
+        self.assertEqual(instance["clips"][0]["id"], clip_id)
+        self.assertNotIn("CallAction", json.dumps(roster))
+
+        result = service.control_timeline(
+            timeline_id=timeline_id,
+            expected_revision=revision,
+            operation="playClip",
+            clip_id=clip_id,
+        )
+        self.assertIsNotNone(result["bridge_request"])
+        request = read_bridge_request(self.vam_root)
+        self.assertIsNotNone(request)
+        assert request is not None
+        self.assertEqual(request["command"], "controlTimeline")
+        self.assertEqual(request["clipId"], clip_id)
+        self.assertNotIn("Person", json.dumps(request))
+
+    def test_timeline_roster_preserves_out_of_window_current_names(
+        self,
+    ) -> None:
+        instance = ManagerService._public_timeline_instance(
+            {
+                "id": "1" * 32,
+                "revision": "2" * 32,
+                "ready": True,
+                "enhanced": True,
+                "current": {
+                    "clipId": None,
+                    "segmentId": None,
+                    "layerId": None,
+                    "qualified": (
+                        "Overflow Segment::Overflow Layer::Overflow Clip"
+                    ),
+                    "name": "Overflow Clip",
+                    "segment": "Overflow Segment",
+                    "layer": "Overflow Layer",
+                },
+                "segments": [{"id": "3" * 32, "name": "Published Segment"}],
+                "layers": [
+                    {
+                        "id": "4" * 32,
+                        "segmentId": "3" * 32,
+                        "name": "Published Layer",
+                    }
+                ],
+                "clips": [
+                    {
+                        "id": "5" * 32,
+                        "segmentId": "3" * 32,
+                        "layerId": "4" * 32,
+                        "name": "Published Clip",
+                    }
+                ],
+                "truncated": {
+                    "segments": True,
+                    "layers": True,
+                    "clips": True,
+                },
+            }
+        )
+
+        self.assertIsNotNone(instance)
+        assert instance is not None
+        self.assertEqual(
+            instance["current"],
+            {
+                "clipId": None,
+                "segmentId": None,
+                "layerId": None,
+                "qualified": (
+                    "Overflow Segment::Overflow Layer::Overflow Clip"
+                ),
+                "name": "Overflow Clip",
+                "segment": "Overflow Segment",
+                "layer": "Overflow Layer",
+            },
+        )
+        self.assertEqual(instance["clips"][0]["name"], "Published Clip")
+        self.assertTrue(instance["truncated"]["clips"])
+
+    def test_timeline_roster_sanitizes_adapter_error_and_limits(
+        self,
+    ) -> None:
+        instance = ManagerService._public_timeline_instance(
+            {
+                "id": "1" * 32,
+                "revision": "2" * 32,
+                "enhanced": True,
+                "ready": False,
+                "error": {
+                    "code": "State_Error<script>",
+                    "message": "Timeline catalog could not be built.",
+                },
+                "limits": {
+                    "maxSegments": 999,
+                    "maxLayers": "128",
+                    "maxClips": 9999,
+                    "maxClipsGlobally": 99999,
+                    "allocatedClips": 0,
+                },
+            }
+        )
+
+        self.assertIsNotNone(instance)
+        assert instance is not None
+        self.assertEqual(
+            instance["error"],
+            {
+                "code": "stateerrorscript",
+                "message": "Timeline catalog could not be built.",
+            },
+        )
+        self.assertEqual(
+            instance["limits"],
+            {
+                "maxSegments": 64,
+                "maxLayers": 128,
+                "maxClips": 256,
+                "maxClipsGlobally": 1024,
+                "allocatedClips": 0,
+            },
+        )
+
+    def test_timeline_control_rejects_stale_or_unpublished_identifiers(
+        self,
+    ) -> None:
+        directory = bridge_directory(self.vam_root)
+        directory.mkdir(parents=True)
+        instance_id = "bridge-instance"
+        updated = datetime.now(timezone.utc).isoformat()
+        (directory / "status.json").write_text(
+            json.dumps(
+                {
+                    "protocol": 2,
+                    "instanceId": instance_id,
+                    "state": "ok",
+                }
+            ),
+            encoding="utf-8",
+        )
+        (directory / "timeline.json").write_text(
+            json.dumps(
+                {
+                    "protocol": 2,
+                    "timelineProtocol": 1,
+                    "instanceId": instance_id,
+                    "updatedAtUtc": updated,
+                    "instances": [
+                        {
+                            "id": "1" * 32,
+                            "revision": "2" * 32,
+                            "ready": True,
+                            "controls": ["selectClip"],
+                            "clips": [{"id": "3" * 32}],
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        service = self.service([4321])
+        with self.assertRaisesRegex(ValueError, "catalog changed"):
+            service.control_timeline(
+                timeline_id="1" * 32,
+                expected_revision="4" * 32,
+                operation="selectClip",
+                clip_id="3" * 32,
+            )
+        with self.assertRaisesRegex(ValueError, "not part"):
+            service.control_timeline(
+                timeline_id="1" * 32,
+                expected_revision="2" * 32,
+                operation="selectClip",
+                clip_id="4" * 32,
+            )
 
     def test_bridge_status_accepts_vam_simplejson_scalar_strings(self) -> None:
         status_path = (

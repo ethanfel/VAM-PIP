@@ -6,7 +6,8 @@ rescan packages, publishes bounded atom and Person rosters, and can load an
 allowlisted scene or SubScene, apply one allowlisted Person or generic atom
 preset, safely load one Custom Unity Asset, add one allowlisted native atom,
 wear or remove one exact clothing item, or select one existing atom on VaM's
-Unity main thread.
+Unity main thread. It also publishes a bounded roster of Timeline instances
+and exposes a fixed, revision-bound Timeline transport protocol.
 
 ## Install
 
@@ -331,12 +332,57 @@ scene and can discard unsaved scene work; the external client must require a
 clear confirmation before sending it. Merge is also a large, non-idempotent
 scene mutation.
 
+Timeline controls use only bridge-minted 32-hex IDs. A browser never supplies
+an atom UID, plugin/storable/action name, animation name, or Timeline's
+internal numeric IDs:
+
+```json
+{
+  "protocol": 2,
+  "requestId": "unique-timeline-1",
+  "command": "controlTimeline",
+  "timelineId": "0123456789abcdef0123456789abcdef",
+  "expectedRevision": "abcdef0123456789abcdef0123456789",
+  "operation": "playClip",
+  "clipId": "11111111111111111111111111111111"
+}
+```
+
+The allowlisted operations are `play`, `pause`, `stop`, `reset`,
+`nextFrame`, `previousFrame`, `selectClip`, `playClip`, `selectSegment`,
+`selectLayer`, `setTime`, `setSpeed`, `setWeight`, and `setLocked`.
+Setters accept only bounded numeric or boolean values. Item operations verify
+that their opaque ID was published by the expected catalog revision.
+
+`timeline.json` is refreshed separately from `scene.json` at a normal
+one-second cadence, with an immediate refresh after a control, and uses
+`timelineProtocol: 1`. It contains at most 32 instances, 64 segments, 128
+layers, and 256 clips per instance. A shared budget limits all published clip
+catalogues to 1,024 entries. The selected atom receives budget first, then
+playing Timeline instances, then stable scene scan order. Every published
+instance still reports live transport and fixed controls when its catalogue
+allocation is zero; the bridge does not invoke another full enhanced-adapter
+refresh after the shared budget is exhausted. Root and per-instance
+`counts`, `limits`, and truncation flags make clipping explicit. Sanitized
+adapter `{code,message}` errors are forwarded instead of being represented as
+an indefinitely initializing adapter. Labels and qualified names are
+sanitized and bounded.
+
+Enhanced Timeline forks can implement adapter protocol 1 through the fixed
+non-restorable strings `VAM-PIP External State`, `VAM-PIP External Command`,
+and `VAM-PIP External Result`, plus the fixed actions
+`VAM-PIP Refresh External State` and `VAM-PIP Execute External Command`.
+The bridge maps adapter numeric IDs to private opaque tokens. Unmodified
+Timeline 291 remains usable through its fixed public storables for transport,
+clip selection, time, speed, weight, and lock controls; it cannot publish
+exact layer/current-clip state.
+
 The bridge writes `status.json`:
 
 ```json
 {
   "protocol": 2,
-  "bridgeVersion": "0.8.1",
+  "bridgeVersion": "0.9.0",
   "instanceId": "id-created-when-the-plugin-started",
   "requestId": "a-new-unique-id",
   "lastCompletedRequestId": "a-new-unique-id",
@@ -373,7 +419,11 @@ The bridge writes `status.json`:
     "person-hair-roster",
     "person-hair-item-toggle",
     "person-add",
-    "person-select"
+    "person-select",
+    "timeline-roster",
+    "timeline-transport",
+    "timeline-animation-play",
+    "timeline-adapter-v1"
   ]
 }
 ```
@@ -400,7 +450,7 @@ The bridge refreshes `scene.json` once per second:
 ```json
 {
   "protocol": 2,
-  "bridgeVersion": "0.8.1",
+  "bridgeVersion": "0.9.0",
   "instanceId": "id-created-when-the-plugin-started",
   "updatedAtUtc": "2026-07-28T12:00:02.0000000Z",
   "loading": false,

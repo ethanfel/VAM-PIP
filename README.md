@@ -21,7 +21,7 @@ leaving managed mode restores that baseline.
 
 ## Current status
 
-Version 0.10.0 is functional but should still be treated as an early release.
+Version 0.11.0 is functional but should still be treated as an early release.
 Package switching is deliberately conservative:
 
 - entering managed mode requires explicit confirmation;
@@ -168,6 +168,42 @@ serializes live actions, waits while VaM is loading, and invokes VaM's core
 package rescan. BrowserAssist must be reloaded when it needs to rebuild its
 private package/resource manifest. The bridge cannot rename files, run
 commands, accept operating-system paths, or invoke arbitrary VaM storables.
+
+## Timeline workspace
+
+The **Timeline** tab discovers every `VamTimeline.AtomPlugin` in the current
+scene and provides a large transport workspace plus a compact detachable
+controller. Unmodified Timeline instances support a fixed legacy subset: play,
+pause, stop/reset, frame stepping, animation choice, seek, speed, weight, and
+lock where those storables are present.
+
+The enhanced Timeline fork adds protocol 1 state for exact segment, layer, and
+clip synchronization. Its audited drop-in workflow keeps each original
+`AcidBubbles.Timeline.<version>` filename, script path, plugin class, and scene
+slot, so existing embedded Timeline data loads normally without migration or
+scene rewriting. It publishes bounded catalogues with separate catalog and
+live-state revisions; the browser receives only bridge-minted opaque IDs. Every
+command is checked against the observed revision and a fixed operation
+allowlist. Atom UIDs, plugin IDs, animation labels, and VaM storable/action
+names never cross the browser control boundary.
+
+Timeline state normally refreshes once per second and immediately after a
+control. Clip catalogues share a 1,024-entry global budget, prioritized for
+the selected atom and then playing instances. Transport stays live even when
+an instance receives no catalogue allocation, while published counts, limits,
+truncation flags, and sanitized adapter errors explain the bounded state.
+
+The full view includes selectors, clip structure, inspector, interpolated
+playhead, and a bounded canvas dope-sheet foundation. Track/keyframe rendering
+activates when a future adapter version publishes graph data; keyframe
+mutation is intentionally not part of protocol 1. The compact route is:
+
+```text
+/?view=timeline&popout=compact
+```
+
+Its title is `VAM-PIP Timeline`, which can be matched by a desktop-compositor
+“keep above” rule. A browser popup cannot enforce always-on-top by itself.
 
 ## External workspace
 

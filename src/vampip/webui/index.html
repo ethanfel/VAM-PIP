@@ -6,8 +6,8 @@
     <meta name="color-scheme" content="dark">
     <meta name="theme-color" content="#111316">
     <title>VAM-PIP Manager</title>
-    <link rel="stylesheet" href="/styles.css?v=0.10.0">
-    <script src="/app.js?v=0.10.0" defer></script>
+    <link rel="stylesheet" href="/styles.css?v=0.11.0">
+    <script src="/app.js?v=0.11.0" defer></script>
   </head>
   <body>
     <a class="skip-link" href="#main-content">Skip to library</a>
@@ -182,6 +182,10 @@
           <button class="view-tab" type="button" data-view="workspace" aria-selected="false">
             Workspace
             <span id="workspace-tab-count">—</span>
+          </button>
+          <button class="view-tab" type="button" data-view="timeline" aria-selected="false">
+            Timeline
+            <span id="timeline-tab-count">—</span>
           </button>
           <button class="view-tab" type="button" data-view="packages" aria-selected="false">
             Packages
@@ -579,6 +583,182 @@
           <div id="card-grid" class="card-grid" hidden></div>
           <div class="load-more-row">
             <button class="secondary-button" id="load-more" type="button" hidden>Load more</button>
+          </div>
+        </section>
+
+        <section id="timeline-view" class="timeline-view" hidden aria-labelledby="timeline-title">
+          <header class="timeline-heading">
+            <div class="timeline-heading-copy">
+              <p class="eyebrow">Live choreography</p>
+              <div class="timeline-title-row">
+                <h2 id="timeline-title">Timeline workspace</h2>
+                <span class="timeline-connection-state" id="timeline-connection-state" role="status">
+                  <span class="status-dot" aria-hidden="true"></span>
+                  <span id="timeline-connection-label">Checking Timeline…</span>
+                </span>
+              </div>
+              <p>See the animation structure at a useful scale and control the selected Timeline instance in VaM.</p>
+            </div>
+
+            <div class="timeline-heading-actions">
+              <label class="timeline-instance-field" for="timeline-instance">
+                <span>Timeline instance</span>
+                <select id="timeline-instance" disabled>
+                  <option value="">Checking the scene…</option>
+                </select>
+              </label>
+              <button class="secondary-button timeline-popout-button" id="timeline-popout-button" type="button">
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M14 4h6v6M20 4l-8 8M18 13v6H5V6h6"></path>
+                </svg>
+                Pop out
+              </button>
+            </div>
+          </header>
+
+          <section class="timeline-state-panel" id="timeline-state-panel" role="status" aria-live="polite">
+            <span class="timeline-state-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24">
+                <path d="M4 12h3l2-5 4 10 2-5h5M4 4v16M20 4v16"></path>
+              </svg>
+            </span>
+            <div>
+              <strong id="timeline-state-title">Connecting to Timeline</strong>
+              <p id="timeline-state-message">Waiting for the VAM-PIP bridge to publish the current scene.</p>
+            </div>
+            <button class="secondary-button small" id="timeline-retry-button" type="button">Retry</button>
+          </section>
+
+          <div class="timeline-editor" id="timeline-editor" hidden>
+            <div class="timeline-selection-bar" aria-label="Timeline selection">
+              <label>
+                <span>Segment</span>
+                <select id="timeline-segment-select"></select>
+              </label>
+              <label>
+                <span>Layer</span>
+                <select id="timeline-layer-select"></select>
+              </label>
+              <label class="timeline-clip-field">
+                <span>Animation clip</span>
+                <select id="timeline-clip-select"></select>
+              </label>
+              <div class="timeline-revision" title="The revision prevents stale browser edits from overwriting newer in-game changes.">
+                <span>Revision</span>
+                <strong id="timeline-revision">—</strong>
+              </div>
+            </div>
+
+            <div class="timeline-workbench">
+              <aside class="timeline-outline" aria-labelledby="timeline-outline-title">
+                <header>
+                  <div>
+                    <p class="eyebrow">Scene structure</p>
+                    <h3 id="timeline-outline-title">Layers &amp; clips</h3>
+                  </div>
+                  <span class="count-badge" id="timeline-clip-count">0</span>
+                </header>
+                <div class="timeline-outline-list" id="timeline-outline-list"></div>
+              </aside>
+
+              <section class="timeline-sheet" aria-labelledby="timeline-sheet-title">
+                <header class="timeline-sheet-heading">
+                  <div>
+                    <p class="eyebrow">Read-only graph</p>
+                    <h3 id="timeline-sheet-title">Dope sheet</h3>
+                  </div>
+                  <div class="timeline-sheet-summary">
+                    <span id="timeline-track-summary">No tracks</span>
+                    <span id="timeline-duration-summary">00:00.000</span>
+                  </div>
+                </header>
+                <div class="timeline-canvas-scroll" id="timeline-canvas-scroll">
+                  <canvas
+                    id="timeline-canvas"
+                    class="timeline-canvas"
+                    width="960"
+                    height="320"
+                    aria-label="Timeline track and keyframe overview"
+                  ></canvas>
+                  <div class="timeline-canvas-empty" id="timeline-canvas-empty">
+                    <strong>No graph data published</strong>
+                    <span>Transport remains available. Enhanced Timeline graph data will appear here when supported.</span>
+                  </div>
+                </div>
+                <p class="timeline-limit-note" id="timeline-limit-note" hidden></p>
+              </section>
+
+              <aside class="timeline-inspector" aria-labelledby="timeline-inspector-title">
+                <header>
+                  <p class="eyebrow">Selection</p>
+                  <h3 id="timeline-inspector-title">Clip details</h3>
+                </header>
+                <dl class="timeline-inspector-facts" id="timeline-inspector-facts"></dl>
+                <section class="timeline-capabilities" aria-labelledby="timeline-capabilities-title">
+                  <h4 id="timeline-capabilities-title">External controls</h4>
+                  <div id="timeline-capability-list"></div>
+                </section>
+              </aside>
+            </div>
+
+            <footer class="timeline-transport" aria-label="Timeline transport">
+              <div class="timeline-transport-buttons">
+                <button class="timeline-control-button" id="timeline-previous-frame" type="button" data-timeline-op="previousFrame" aria-label="Previous frame" title="Previous frame">
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M6 5v14M18 6l-8 6 8 6z"></path>
+                  </svg>
+                </button>
+                <button class="timeline-control-button" id="timeline-reset" type="button" data-timeline-op="reset" aria-label="Stop and reset" title="Stop and reset">
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M8 8h8v8H8zM5 5v14"></path>
+                  </svg>
+                </button>
+                <button class="timeline-play-button" id="timeline-play-pause" type="button" data-timeline-op="play" aria-label="Play" title="Play">
+                  <svg class="timeline-play-icon" viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="m9 6 9 6-9 6z"></path>
+                  </svg>
+                  <svg class="timeline-pause-icon" viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M9 6v12M15 6v12"></path>
+                  </svg>
+                </button>
+                <button class="timeline-control-button" id="timeline-stop" type="button" data-timeline-op="stop" aria-label="Stop" title="Stop">
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M7 7h10v10H7z"></path>
+                  </svg>
+                </button>
+                <button class="timeline-control-button" id="timeline-next-frame" type="button" data-timeline-op="nextFrame" aria-label="Next frame" title="Next frame">
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M18 5v14M6 6l8 6-8 6z"></path>
+                  </svg>
+                </button>
+              </div>
+
+              <div class="timeline-scrubber-block">
+                <div class="timeline-time-row">
+                  <output id="timeline-timecode" for="timeline-scrubber">00:00.000</output>
+                  <span id="timeline-duration-timecode">/ 00:00.000</span>
+                </div>
+                <input id="timeline-scrubber" type="range" min="0" max="1" step="0.001" value="0" aria-label="Timeline position">
+              </div>
+
+              <label class="timeline-parameter" for="timeline-speed">
+                <span>Speed <output id="timeline-speed-value" for="timeline-speed">1.00×</output></span>
+                <input id="timeline-speed" type="range" min="-1" max="5" step="0.05" value="1">
+              </label>
+              <label class="timeline-parameter" for="timeline-weight">
+                <span>Weight <output id="timeline-weight-value" for="timeline-weight">100%</output></span>
+                <input id="timeline-weight" type="range" min="0" max="1" step="0.01" value="1">
+              </label>
+              <label class="timeline-lock-toggle" for="timeline-lock">
+                <input id="timeline-lock" type="checkbox">
+                <span aria-hidden="true">
+                  <svg viewBox="0 0 24 24">
+                    <path d="M7 10V8a5 5 0 0 1 10 0v2M5 10h14v10H5z"></path>
+                  </svg>
+                </span>
+                <strong>Lock</strong>
+              </label>
+            </footer>
           </div>
         </section>
 

@@ -5,6 +5,7 @@ from dataclasses import asdict
 from datetime import datetime, timezone
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -21,6 +22,7 @@ from vampip.bridge import (
     read_bridge_status,
     read_bridge_request,
     read_scene_status,
+    read_timeline_status,
     request_add_atom,
     request_add_person,
     request_atom_preset,
@@ -34,6 +36,8 @@ from vampip.bridge import (
     request_select_atom,
     request_select_person,
     request_subscene_load,
+    request_timeline_control,
+    TIMELINE_CONTROL_OPERATIONS,
 )
 from vampip.catalog import (
     catalog_facets as load_catalog_facets,
@@ -1287,6 +1291,414 @@ class ManagerService:
         """Return the canonical bridge-published live scene snapshot."""
 
         return self.persons()
+
+    @staticmethod
+    def _timeline_document_is_fresh(document: dict[str, object]) -> bool:
+        updated = document.get("updatedAtUtc")
+        if not isinstance(updated, str):
+            return False
+        try:
+            parsed = datetime.fromisoformat(updated.replace("Z", "+00:00"))
+        except ValueError:
+            return False
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        age = (datetime.now(timezone.utc) - parsed).total_seconds()
+        return -5 <= age <= 10
+
+    @staticmethod
+    def _timeline_token(value: object) -> str:
+        if not isinstance(value, str) or len(value) != 32:
+            return ""
+        if any(character not in "0123456789abcdefABCDEF" for character in value):
+            return ""
+        return value.lower()
+
+    @staticmethod
+    def _timeline_number(
+        value: object,
+        *,
+        lower: float,
+        upper: float,
+        default: float = 0.0,
+    ) -> float:
+        if isinstance(value, bool):
+            return default
+        if isinstance(value, str):
+            text = value.strip()
+            if not text or len(text) > 32:
+                return default
+            try:
+                result = float(text)
+            except ValueError:
+                return default
+        elif isinstance(value, (int, float)):
+            result = float(value)
+        else:
+            return default
+        if not math.isfinite(result):
+            return default
+        return min(upper, max(lower, result))
+
+    @classmethod
+    def _public_timeline_item(
+        cls,
+        value: object,
+        *,
+        kind: str,
+    ) -> dict[str, object] | None:
+        if not isinstance(value, dict):
+            return None
+        item_id = cls._timeline_token(value.get("id"))
+        if not item_id:
+            return None
+        item: dict[str, object] = {
+            "id": item_id,
+            "name": _presentation_text(value.get("name"), maximum=256),
+            "selected": value.get("selected") is True,
+        }
+        if kind in {"layer", "clip"}:
+            segment_id = cls._timeline_token(value.get("segmentId"))
+            item["segmentId"] = segment_id or None
+        if kind == "clip":
+            layer_id = cls._timeline_token(value.get("layerId"))
+            item.update(
+                {
+                    "layerId": layer_id or None,
+                    "qualified": _presentation_text(
+                        value.get("qualified"),
+                        maximum=512,
+                    ),
+                    "length": cls._timeline_number(
+                        value.get("length"),
+                        lower=0,
+                        upper=86400,
+                    ),
+                    "loop": value.get("loop") is True,
+                    "playing": value.get("playing") is True,
+                    "main": value.get("main") is True,
+                    "time": cls._timeline_number(
+                        value.get("time"),
+                        lower=0,
+                        upper=86400,
+                    ),
+                    "speed": cls._timeline_number(
+                        value.get("speed"),
+                        lower=-1,
+                        upper=5,
+                        default=1,
+                    ),
+                    "weight": cls._timeline_number(
+                        value.get("weight"),
+                        lower=0,
+                        upper=1,
+                        default=1,
+                    ),
+                    "targetCount": _nonnegative_int(value.get("targetCount")),
+                }
+            )
+        return item
+
+    @classmethod
+    def _public_timeline_instance(
+        cls,
+        value: object,
+    ) -> dict[str, object] | None:
+        if not isinstance(value, dict):
+            return None
+        timeline_id = cls._timeline_token(value.get("id"))
+        revision = cls._timeline_token(value.get("revision"))
+        if not timeline_id or not revision:
+            return None
+
+        controls = value.get("controls")
+        public_controls: list[str] = []
+        if isinstance(controls, list):
+            seen: set[str] = set()
+            for control in controls[:32]:
+                if (
+                    isinstance(control, str)
+                    and control in TIMELINE_CONTROL_OPERATIONS
+                    and control not in seen
+                ):
+                    seen.add(control)
+                    public_controls.append(control)
+
+        transport = value.get("transport")
+        if not isinstance(transport, dict):
+            transport = {}
+        public_transport: dict[str, object] = {
+            "playing": transport.get("playing") is True,
+            "paused": transport.get("paused") is True,
+            "time": cls._timeline_number(
+                transport.get("time"),
+                lower=0,
+                upper=86400,
+            ),
+            "clipTime": cls._timeline_number(
+                transport.get("clipTime"),
+                lower=0,
+                upper=86400,
+            ),
+            "duration": cls._timeline_number(
+                transport.get("duration"),
+                lower=0,
+                upper=86400,
+            ),
+            "speed": cls._timeline_number(
+                transport.get("speed"),
+                lower=-1,
+                upper=5,
+                default=1,
+            ),
+            "weight": cls._timeline_number(
+                transport.get("weight"),
+                lower=0,
+                upper=1,
+                default=1,
+            ),
+            "locked": transport.get("locked") is True,
+        }
+
+        current = value.get("current")
+        if not isinstance(current, dict):
+            current = {}
+        public_current: dict[str, object] = {}
+        for source, destination in (
+            ("clipId", "clipId"),
+            ("segmentId", "segmentId"),
+            ("layerId", "layerId"),
+        ):
+            token = cls._timeline_token(current.get(source))
+            public_current[destination] = token or None
+        for key, maximum in (
+            ("qualified", 512),
+            ("name", 256),
+            ("segment", 256),
+            ("layer", 256),
+        ):
+            public_current[key] = _presentation_text(
+                current.get(key),
+                maximum=maximum,
+            )
+
+        collections: dict[str, list[dict[str, object]]] = {}
+        for collection_name, kind, maximum in (
+            ("segments", "segment", 64),
+            ("layers", "layer", 128),
+            ("clips", "clip", 256),
+        ):
+            public_items: list[dict[str, object]] = []
+            raw_items = value.get(collection_name)
+            if isinstance(raw_items, list):
+                for raw_item in raw_items[:maximum]:
+                    item = cls._public_timeline_item(raw_item, kind=kind)
+                    if item is not None:
+                        public_items.append(item)
+            collections[collection_name] = public_items
+
+        raw_counts = value.get("counts")
+        counts = raw_counts if isinstance(raw_counts, dict) else {}
+        raw_limits = value.get("limits")
+        limits = raw_limits if isinstance(raw_limits, dict) else {}
+        raw_truncated = value.get("truncated")
+        truncated = raw_truncated if isinstance(raw_truncated, dict) else {}
+        raw_error = value.get("error")
+        public_error: dict[str, str] | None = None
+        if isinstance(raw_error, dict):
+            code = re.sub(
+                r"[^a-z0-9-]",
+                "",
+                _presentation_text(
+                    raw_error.get("code"),
+                    maximum=64,
+                ).casefold(),
+            )[:64]
+            message = _presentation_text(
+                raw_error.get("message"),
+                maximum=500,
+            )
+            if code or message:
+                public_error = {
+                    "code": code or "adapter-error",
+                    "message": (
+                        message
+                        or "Timeline adapter reported an error."
+                    ),
+                }
+        return {
+            "id": timeline_id,
+            "revision": revision,
+            "atomUid": _presentation_text(value.get("atomUid"), maximum=200),
+            "label": (
+                _presentation_text(value.get("label"), maximum=256)
+                or "Timeline"
+            ),
+            "enhanced": value.get("enhanced") is True,
+            "adapterVersion": _presentation_text(
+                value.get("adapterVersion"),
+                maximum=64,
+            ),
+            "ready": value.get("ready") is True,
+            "selected": value.get("selected") is True,
+            "stateSequence": _nonnegative_int(value.get("stateSequence")),
+            "transport": public_transport,
+            "current": public_current,
+            **collections,
+            "counts": {
+                "segments": min(
+                    1_000_000,
+                    _nonnegative_int(counts.get("segments")),
+                ),
+                "layers": min(
+                    1_000_000,
+                    _nonnegative_int(counts.get("layers")),
+                ),
+                "clips": min(
+                    1_000_000,
+                    _nonnegative_int(counts.get("clips")),
+                ),
+                "publishedSegments": len(collections["segments"]),
+                "publishedLayers": len(collections["layers"]),
+                "publishedClips": len(collections["clips"]),
+            },
+            "limits": {
+                "maxSegments": min(
+                    64,
+                    _nonnegative_int(limits.get("maxSegments")),
+                ),
+                "maxLayers": min(
+                    128,
+                    _nonnegative_int(limits.get("maxLayers")),
+                ),
+                "maxClips": min(
+                    256,
+                    _nonnegative_int(limits.get("maxClips")),
+                ),
+                "maxClipsGlobally": min(
+                    1024,
+                    _nonnegative_int(limits.get("maxClipsGlobally")),
+                ),
+                "allocatedClips": min(
+                    256,
+                    _nonnegative_int(limits.get("allocatedClips")),
+                ),
+            },
+            "truncated": {
+                "segments": truncated.get("segments") is True,
+                "layers": truncated.get("layers") is True,
+                "clips": truncated.get("clips") is True,
+            },
+            "error": public_error,
+            "controls": public_controls,
+        }
+
+    def timeline(self) -> dict[str, object]:
+        """Return the public, bounded Timeline roster from the live bridge."""
+
+        pids = list(self._running_pids())
+        bridge = read_bridge_status(self.vam_root)
+        document = read_timeline_status(self.vam_root)
+        available = bool(
+            pids
+            and bridge
+            and document
+            and self._timeline_document_is_fresh(document)
+            and document.get("instanceId") == bridge.get("instanceId")
+        )
+        instances: list[dict[str, object]] = []
+        if available and document:
+            raw_instances = document.get("instances")
+            if isinstance(raw_instances, list):
+                for raw_instance in raw_instances[:32]:
+                    instance = self._public_timeline_instance(raw_instance)
+                    if instance is not None:
+                        instances.append(instance)
+        timeline_capability_allowlist = {
+            "timeline-roster",
+            "timeline-transport",
+            "timeline-animation-play",
+            "timeline-adapter-v1",
+        }
+        capabilities = (
+            [
+                capability
+                for capability in _public_capabilities(
+                    document.get("capabilities")
+                )
+                if capability in timeline_capability_allowlist
+            ]
+            if available and document
+            else []
+        )
+        raw_counts = (
+            document.get("counts")
+            if available and document
+            else None
+        )
+        counts = raw_counts if isinstance(raw_counts, dict) else {}
+        raw_limits = (
+            document.get("limits")
+            if available and document
+            else None
+        )
+        limits = raw_limits if isinstance(raw_limits, dict) else {}
+        return {
+            "available": available,
+            "vam_running": bool(pids),
+            "loading": (
+                document.get("loading") is True
+                if available and document
+                else False
+            ),
+            "timeline_protocol": (
+                _nonnegative_int(document.get("timelineProtocol"))
+                if available and document
+                else None
+            ),
+            "instances": instances,
+            "truncated": (
+                document.get("truncated") is True
+                if available and document
+                else False
+            ),
+            "counts": {
+                "instances": min(
+                    1_000_000,
+                    _nonnegative_int(counts.get("instances")),
+                ),
+                "publishedInstances": len(instances),
+                "clips": min(
+                    32_000_000,
+                    _nonnegative_int(counts.get("clips")),
+                ),
+                "publishedClips": sum(
+                    len(instance["clips"])
+                    for instance in instances
+                ),
+            },
+            "limits": {
+                "maxInstances": min(
+                    32,
+                    _nonnegative_int(limits.get("maxInstances")),
+                ),
+                "maxClips": min(
+                    256,
+                    _nonnegative_int(limits.get("maxClips")),
+                ),
+                "maxClipsGlobally": min(
+                    1024,
+                    _nonnegative_int(limits.get("maxClipsGlobally")),
+                ),
+            },
+            "capabilities": capabilities,
+            "bridge": _public_bridge_status(bridge),
+            "updated_at_utc": (
+                document.get("updatedAtUtc")
+                if available and document
+                else None
+            ),
+        }
 
     @staticmethod
     def _bridge_request_is_terminal(
@@ -3615,6 +4027,158 @@ class ManagerService:
                 "bridge_busy": bridge_message is not None,
                 "bridge_message": bridge_message,
             }
+
+    def control_timeline(
+        self,
+        *,
+        timeline_id: object,
+        expected_revision: object,
+        operation: object,
+        value: object = None,
+        clip_id: object = None,
+        segment_id: object = None,
+        layer_id: object = None,
+    ) -> dict[str, object]:
+        """Queue one fixed Timeline operation against a published revision."""
+
+        timeline_token = self._timeline_token(timeline_id)
+        if not timeline_token:
+            raise ValueError("timeline_id must be a 32-character opaque token")
+        revision = self._timeline_token(expected_revision)
+        if not revision:
+            raise ValueError(
+                "expected_revision must be a 32-character opaque token"
+            )
+        if (
+            not isinstance(operation, str)
+            or operation not in TIMELINE_CONTROL_OPERATIONS
+        ):
+            accepted = ", ".join(sorted(TIMELINE_CONTROL_OPERATIONS))
+            raise ValueError(f"op must be one of: {accepted}")
+
+        supplied_ids = {
+            "clipId": clip_id,
+            "segmentId": segment_id,
+            "layerId": layer_id,
+        }
+        operation_id = {
+            "selectClip": ("clips", "clipId"),
+            "playClip": ("clips", "clipId"),
+            "selectSegment": ("segments", "segmentId"),
+            "selectLayer": ("layers", "layerId"),
+        }.get(operation)
+        item_token: str | None = None
+        if operation_id is not None:
+            _, id_name = operation_id
+            item_token = self._timeline_token(supplied_ids[id_name])
+            if not item_token:
+                json_name = {
+                    "clipId": "clip_id",
+                    "segmentId": "segment_id",
+                    "layerId": "layer_id",
+                }[id_name]
+                raise ValueError(
+                    f"{json_name} must be a 32-character opaque token"
+                )
+            unexpected_ids = [
+                {
+                    "clipId": "clip_id",
+                    "segmentId": "segment_id",
+                    "layerId": "layer_id",
+                }[name]
+                for name, identifier in supplied_ids.items()
+                if name != id_name and identifier is not None
+            ]
+            if unexpected_ids:
+                raise ValueError(
+                    f"{operation} does not accept "
+                    + ", ".join(sorted(unexpected_ids))
+                )
+        elif any(identifier is not None for identifier in supplied_ids.values()):
+            raise ValueError(f"{operation} does not accept an item ID")
+
+        if operation == "setLocked":
+            if not isinstance(value, bool):
+                raise TypeError("setLocked value must be a boolean")
+        elif operation in {"setTime", "setSpeed", "setWeight"}:
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise TypeError(f"{operation} value must be a finite number")
+            number = float(value)
+            if not math.isfinite(number):
+                raise ValueError(f"{operation} value must be a finite number")
+            lower, upper = {
+                "setTime": (0.0, 86400.0),
+                "setSpeed": (-1.0, 5.0),
+                "setWeight": (0.0, 1.0),
+            }[operation]
+            if not lower <= number <= upper:
+                raise ValueError(
+                    f"{operation} value must be between {lower:g} and {upper:g}"
+                )
+            value = number
+        elif value is not None:
+            raise ValueError(f"{operation} does not accept a value")
+
+        with self._bridge_mailbox_lock:
+            self._ensure_bridge_mailbox_idle()
+            timeline = self.timeline()
+            if not timeline["vam_running"]:
+                raise ValueError("VaM must be running before controlling Timeline")
+            if not timeline["available"]:
+                raise ValueError(
+                    "the VAM-PIP bridge is not publishing a fresh Timeline snapshot"
+                )
+            instance = next(
+                (
+                    candidate
+                    for candidate in timeline.get("instances", [])
+                    if isinstance(candidate, dict)
+                    and candidate.get("id") == timeline_token
+                ),
+                None,
+            )
+            if instance is None:
+                raise ValueError("Timeline instance is no longer available")
+            if instance.get("revision") != revision:
+                raise ValueError(
+                    "Timeline catalog changed; refresh before sending this control"
+                )
+            controls = {
+                str(control) for control in instance.get("controls", [])
+            }
+            if operation not in controls:
+                raise ValueError(
+                    f"the selected Timeline instance does not provide {operation}"
+                )
+            if operation_id is not None:
+                collection_name, _ = operation_id
+                collection = instance.get(collection_name)
+                if not isinstance(collection, list) or not any(
+                    isinstance(item, dict) and item.get("id") == item_token
+                    for item in collection
+                ):
+                    raise ValueError(
+                        "Timeline item is not part of the expected revision"
+                    )
+
+            request_id = self._queue_bridge_request(
+                lambda: request_timeline_control(
+                    self.vam_root,
+                    timeline_id=timeline_token,
+                    expected_revision=revision,
+                    operation=operation,
+                    item_id=item_token,
+                    value=value,
+                )
+            )
+        return {
+            "timeline_id": timeline_token,
+            "expected_revision": revision,
+            "operation": operation,
+            "bridge_request": request_id,
+            "bridge_busy": False,
+            "bridge_message": None,
+        }
 
     def _running_pids(self) -> list[int]:
         return self._process_probe()

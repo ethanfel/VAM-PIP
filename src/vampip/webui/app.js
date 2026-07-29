@@ -3,6 +3,11 @@
 const PAGE_SIZE = 60;
 const MAX_VARIANT_MATCH_COUNT = 1_000_000;
 const MAX_RENDERED_RESOURCE_VARIANTS = 12;
+const MAX_TIMELINE_TRACKS = 80;
+const MAX_TIMELINE_KEYS_PER_TRACK = 2_000;
+const MAX_TIMELINE_KEYS = 10_000;
+const TIMELINE_PLAYING_POLL_MS = 1000;
+const TIMELINE_IDLE_POLL_MS = 1_000;
 const TOKEN_KEY = "vampip-token";
 const WORKSPACE_ACTION_STALL_MS = 5 * 60 * 1000;
 const PERSON_BRIDGE_BUSY_STATES = new Set([
@@ -716,6 +721,22 @@ const app = {
   selectedWorkspaceCategoryId: "scene",
   workspaceApplyMode: "replace",
   personMutationInFlight: false,
+  timeline: null,
+  timelineError: null,
+  timelineInFlight: false,
+  timelinePollTimer: null,
+  timelineReceivedAt: 0,
+  timelineRenderFrame: null,
+  timelineLastCanvasDrawAt: 0,
+  timelineControlInFlight: false,
+  timelineSeekInFlight: false,
+  timelinePendingSeek: null,
+  timelinePreviewTime: null,
+  selectedTimelineId: "",
+  selectedTimelineSegmentId: "",
+  selectedTimelineLayerId: "",
+  selectedTimelineClipId: "",
+  timelinePopout: false,
 };
 
 const elements = {};
@@ -728,6 +749,7 @@ async function init() {
   cacheElements();
   captureToken();
   bindEvents();
+  applyInitialRoute();
   configureStateFilter();
   setConnection("connecting", "Connecting");
   let activityLoaded = false;
@@ -781,10 +803,48 @@ function cacheElements() {
     "pending-action",
     "resources-tab-count",
     "workspace-tab-count",
+    "timeline-tab-count",
     "packages-tab-count",
     "access-tab-count",
     "library-view",
+    "timeline-view",
     "access-view",
+    "timeline-connection-state",
+    "timeline-connection-label",
+    "timeline-instance",
+    "timeline-popout-button",
+    "timeline-state-panel",
+    "timeline-state-title",
+    "timeline-state-message",
+    "timeline-retry-button",
+    "timeline-editor",
+    "timeline-segment-select",
+    "timeline-layer-select",
+    "timeline-clip-select",
+    "timeline-revision",
+    "timeline-clip-count",
+    "timeline-outline-list",
+    "timeline-track-summary",
+    "timeline-duration-summary",
+    "timeline-canvas-scroll",
+    "timeline-canvas",
+    "timeline-canvas-empty",
+    "timeline-limit-note",
+    "timeline-inspector-facts",
+    "timeline-capability-list",
+    "timeline-previous-frame",
+    "timeline-reset",
+    "timeline-play-pause",
+    "timeline-stop",
+    "timeline-next-frame",
+    "timeline-timecode",
+    "timeline-duration-timecode",
+    "timeline-scrubber",
+    "timeline-speed",
+    "timeline-speed-value",
+    "timeline-weight",
+    "timeline-weight-value",
+    "timeline-lock",
     "asset-workspace",
     "person-context",
     "person-target",
@@ -917,6 +977,52 @@ function captureToken() {
   }
 }
 
+function applyInitialRoute() {
+  const params = new URLSearchParams(window.location.search);
+  const requestedView = params.get("view");
+  app.timelinePopout =
+    requestedView === "timeline" && params.get("popout") === "compact";
+  if (app.timelinePopout) {
+    document.body.classList.add("timeline-popout");
+    document.title = "VAM-PIP Timeline";
+  }
+  if (requestedView === "timeline" || app.timelinePopout) {
+    setView("timeline");
+  }
+}
+
+function updateViewRoute(view) {
+  const url = new URL(window.location.href);
+  if (view === "timeline") {
+    url.searchParams.set("view", "timeline");
+  } else if (!app.timelinePopout) {
+    url.searchParams.delete("view");
+    url.searchParams.delete("popout");
+  }
+  window.history.replaceState(null, document.title, url);
+}
+
+function openTimelinePopout() {
+  const url = new URL(window.location.href);
+  url.searchParams.set("view", "timeline");
+  url.searchParams.set("popout", "compact");
+  if (app.token) url.hash = `token=${encodeURIComponent(app.token)}`;
+  const popup = window.open(
+    url,
+    "vampip-timeline",
+    "popup=yes,width=1180,height=440,resizable=yes,scrollbars=yes",
+  );
+  if (!popup) {
+    toast(
+      "Pop-out was blocked",
+      "Allow pop-ups for this local VAM-PIP page, then try again.",
+      "error",
+    );
+    return;
+  }
+  popup.focus();
+}
+
 function bindEvents() {
   elements.refreshButton.addEventListener("click", () =>
     refreshAll({ force: true, retryEquipment: true }),
@@ -944,6 +1050,66 @@ function bindEvents() {
     "close",
     handleResourceDetailClose,
   );
+  elements.timelineInstance.addEventListener(
+    "change",
+    handleTimelineInstanceChange,
+  );
+  elements.timelineSegmentSelect.addEventListener(
+    "change",
+    handleTimelineSegmentChange,
+  );
+  elements.timelineLayerSelect.addEventListener(
+    "change",
+    handleTimelineLayerChange,
+  );
+  elements.timelineClipSelect.addEventListener(
+    "change",
+    handleTimelineClipChange,
+  );
+  elements.timelinePopoutButton.addEventListener("click", openTimelinePopout);
+  elements.timelineRetryButton.addEventListener("click", () =>
+    loadTimeline({ force: true }),
+  );
+  for (const control of [
+    elements.timelinePreviousFrame,
+    elements.timelineReset,
+    elements.timelinePlayPause,
+    elements.timelineStop,
+    elements.timelineNextFrame,
+  ]) {
+    control.addEventListener("click", () =>
+      sendTimelineControl(control.dataset.timelineOp),
+    );
+  }
+  elements.timelineScrubber.addEventListener("input", handleTimelineScrubInput);
+  elements.timelineScrubber.addEventListener("change", handleTimelineScrubCommit);
+  elements.timelineSpeed.addEventListener("input", () => {
+    elements.timelineSpeedValue.value =
+      `${numberOr(elements.timelineSpeed.value, 1).toFixed(2)}×`;
+  });
+  elements.timelineSpeed.addEventListener("change", () =>
+    sendTimelineControl("setSpeed", {
+      value: numberOr(elements.timelineSpeed.value, 1),
+    }),
+  );
+  elements.timelineWeight.addEventListener("input", () => {
+    elements.timelineWeightValue.value =
+      `${Math.round(numberOr(elements.timelineWeight.value, 1) * 100)}%`;
+  });
+  elements.timelineWeight.addEventListener("change", () =>
+    sendTimelineControl("setWeight", {
+      value: numberOr(elements.timelineWeight.value, 1),
+    }),
+  );
+  elements.timelineLock.addEventListener("change", () =>
+    sendTimelineControl("setLocked", {
+      value: elements.timelineLock.checked,
+    }),
+  );
+  elements.timelineCanvas.addEventListener("click", handleTimelineCanvasClick);
+  window.addEventListener("resize", () => {
+    if (app.view === "timeline") drawTimelineCanvas();
+  });
   elements.autoReconcile.addEventListener("change", updateAutoReconcile);
   elements.loadMore.addEventListener("click", () => loadLibrary({ append: true }));
   elements.clearFilters.addEventListener("click", clearFilters);
@@ -1086,7 +1252,7 @@ function bindEvents() {
       !event.altKey &&
       !isEditing(event.target) &&
       !anyModalOpen() &&
-      app.view !== "access"
+      !["access", "timeline"].includes(app.view)
     ) {
       event.preventDefault();
       elements.searchInput.focus();
@@ -1302,6 +1468,9 @@ async function refreshAll(options = {}) {
   setButtonBusy(elements.refreshButton, true);
   const sceneRequestGeneration = beginPersonSnapshotRequest();
   const sceneRequest = fetchLiveSceneSnapshot();
+  const timelineRequest = app.timelineInFlight
+    ? Promise.resolve(null)
+    : TimelineClient.snapshot();
   try {
     const [
       statusResult,
@@ -1309,6 +1478,7 @@ async function refreshAll(options = {}) {
       sessionPluginResult,
       sceneResult,
       workspaceCategoriesResult,
+      timelineResult,
     ] =
       await Promise.allSettled([
         api("/api/status"),
@@ -1316,6 +1486,7 @@ async function refreshAll(options = {}) {
         api("/api/session-plugins"),
         sceneRequest,
         fetchWorkspaceCategories(),
+        timelineRequest,
       ]);
 
     if (statusResult.status === "rejected") {
@@ -1363,6 +1534,16 @@ async function refreshAll(options = {}) {
     }
     renderWorkspaceCategoryNavigation();
     renderWorkspaceCategorySummary();
+    if (
+      timelineResult.status === "fulfilled" &&
+      timelineResult.value
+    ) {
+      acceptTimelineSnapshot(timelineResult.value);
+      renderTimeline();
+    } else {
+      app.timelineError = timelineResult.reason;
+      if (app.view === "timeline") renderTimeline();
+    }
     await syncPersonEquipment({
       quiet: true,
       retry: Boolean(options.retryEquipment),
@@ -1372,7 +1553,7 @@ async function refreshAll(options = {}) {
       retry: Boolean(options.retryEquipment),
     });
 
-    if (app.view !== "access") {
+    if (["resources", "workspace", "packages"].includes(app.view)) {
       await loadLibrary({ preserveCount: true });
     }
   } catch (error) {
@@ -5265,6 +5446,1677 @@ async function addPersonInVam() {
   }
 }
 
+const TimelineClient = Object.freeze({
+  snapshotPath: "/api/vam/timeline",
+  controlPath: "/api/vam/timeline/control",
+
+  async snapshot(signal) {
+    const payload = await api(this.snapshotPath, { signal });
+    return normalizeTimelineSnapshot(payload);
+  },
+
+  async control(command) {
+    const body = {
+      timeline_id: String(command.timelineId),
+      expected_revision: String(command.expectedRevision),
+      op: String(command.op),
+    };
+    if (Object.hasOwn(command, "value")) body.value = command.value;
+    if (command.op === "selectClip" || command.op === "playClip") {
+      if (command.clipId) body.clip_id = String(command.clipId);
+    } else if (command.op === "selectSegment") {
+      if (command.segmentId) body.segment_id = String(command.segmentId);
+    } else if (command.op === "selectLayer") {
+      if (command.layerId) body.layer_id = String(command.layerId);
+    }
+    return api(this.controlPath, { method: "POST", body });
+  },
+});
+
+function timelineProperty(object, ...names) {
+  if (!object || typeof object !== "object") return undefined;
+  for (const name of names) {
+    if (Object.hasOwn(object, name)) return object[name];
+  }
+  return undefined;
+}
+
+function timelineBoolean(value, fallback = false) {
+  if (typeof value === "boolean") return value;
+  if (value === 1 || value === "1" || value === "true") return true;
+  if (value === 0 || value === "0" || value === "false") return false;
+  return fallback;
+}
+
+function timelineNumber(value, fallback = 0) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : fallback;
+}
+
+function timelineBoundedCount(value, maximum) {
+  return Math.min(
+    maximum,
+    Math.max(0, Math.trunc(timelineNumber(value, 0))),
+  );
+}
+
+function timelineId(value) {
+  if (value === undefined || value === null) return "";
+  return String(value);
+}
+
+function timelineText(value) {
+  if (value === undefined || value === null) return "";
+  return String(value);
+}
+
+function timelineCollection(value) {
+  if (Array.isArray(value)) return value;
+  if (!value || typeof value !== "object") return [];
+  return Object.entries(value).map(([id, entry]) =>
+    entry && typeof entry === "object" ? { id, ...entry } : { id, label: entry },
+  );
+}
+
+function timelineDataIsTruncated(value) {
+  if (value && typeof value === "object") {
+    return Object.values(value).some((entry) => timelineBoolean(entry, false));
+  }
+  return timelineBoolean(value, false);
+}
+
+function normalizeTimelineLimits(value, root = false) {
+  const source = value && typeof value === "object" ? value : {};
+  if (root) {
+    return {
+      maxInstances: timelineBoundedCount(source.maxInstances, 32),
+      maxClips: timelineBoundedCount(source.maxClips, 256),
+      maxClipsGlobally: timelineBoundedCount(
+        source.maxClipsGlobally,
+        1024,
+      ),
+    };
+  }
+  return {
+    maxSegments: timelineBoundedCount(source.maxSegments, 64),
+    maxLayers: timelineBoundedCount(source.maxLayers, 128),
+    maxClips: timelineBoundedCount(source.maxClips, 256),
+    maxClipsGlobally: timelineBoundedCount(
+      source.maxClipsGlobally,
+      1024,
+    ),
+    allocatedClips: timelineBoundedCount(source.allocatedClips, 256),
+  };
+}
+
+function normalizeTimelineAdapterError(value) {
+  if (!value || typeof value !== "object") return null;
+  const code = timelineText(value.code)
+    .toLowerCase()
+    .replace(/[^a-z0-9-]/g, "")
+    .slice(0, 64);
+  const message = timelineText(value.message).slice(0, 500);
+  if (!code && !message) return null;
+  return {
+    code: code || "adapter-error",
+    message: message || "Timeline adapter reported an error.",
+  };
+}
+
+function normalizeTimelineCapabilities(value) {
+  const capabilities = new Set();
+  if (Array.isArray(value)) {
+    for (const entry of value) {
+      if (typeof entry === "string" && entry.trim()) {
+        capabilities.add(entry.trim());
+      } else if (entry && typeof entry === "object") {
+        const name = timelineProperty(entry, "id", "name", "capability");
+        if (name && timelineBoolean(entry.available, true)) {
+          capabilities.add(String(name));
+        }
+      }
+    }
+  } else if (value && typeof value === "object") {
+    for (const [name, available] of Object.entries(value)) {
+      if (timelineBoolean(available, false)) capabilities.add(name);
+    }
+  } else if (typeof value === "string") {
+    for (const name of value.split(",")) {
+      if (name.trim()) capabilities.add(name.trim());
+    }
+  }
+  return capabilities;
+}
+
+function normalizeTimelineControls(value) {
+  const controls = new Set();
+  if (Array.isArray(value)) {
+    for (const entry of value) {
+      const name =
+        typeof entry === "string"
+          ? entry
+          : timelineProperty(entry, "op", "id", "name");
+      if (name) controls.add(String(name));
+    }
+  } else if (value && typeof value === "object") {
+    for (const [name, enabled] of Object.entries(value)) {
+      if (timelineBoolean(enabled, false)) controls.add(name);
+    }
+  }
+  return controls;
+}
+
+function normalizeTimelineNode(entry, index, kind) {
+  const source = entry && typeof entry === "object" ? entry : {};
+  const id = timelineId(
+    timelineProperty(
+      source,
+      "id",
+      `${kind}Id`,
+      `${kind}_id`,
+      "uid",
+      "key",
+    ) ?? `${kind}-${index}`,
+  );
+  return {
+    ...source,
+    id,
+    index: timelineNumber(source.index, index),
+    label: String(
+      timelineProperty(source, "label", "name", "animation", "displayName") ||
+        `${kind[0].toUpperCase()}${kind.slice(1)} ${index + 1}`,
+    ),
+    segmentId: timelineId(
+      timelineProperty(source, "segmentId", "segment_id", "segment"),
+    ),
+    layerId: timelineId(
+      timelineProperty(source, "layerId", "layer_id", "layer"),
+    ),
+    duration: Math.max(
+      0,
+      timelineNumber(
+        timelineProperty(source, "duration", "length", "clipLength"),
+        0,
+      ),
+    ),
+    playing: timelineBoolean(
+      timelineProperty(source, "playing", "isPlaying", "is_playing"),
+      false,
+    ),
+    tracks: timelineCollection(
+      timelineProperty(source, "tracks", "targets", "graph"),
+    ),
+  };
+}
+
+function normalizeTimelineInstance(entry, index, rootCapabilities) {
+  const source = entry && typeof entry === "object" ? entry : {};
+  const transport =
+    timelineProperty(source, "transport", "playback") || {};
+  const current =
+    timelineProperty(source, "current", "selection", "selected") || {};
+  const atomValue = timelineProperty(source, "atom", "atomUid", "atom_uid");
+  const atom =
+    atomValue && typeof atomValue === "object"
+      ? atomValue
+      : { uid: timelineId(atomValue) };
+  const id = timelineId(
+    timelineProperty(source, "id", "timelineId", "timeline_id", "instanceId") ||
+      `${timelineProperty(atom, "uid", "id", "name") || "timeline"}-${index}`,
+  );
+  const capabilities = new Set(rootCapabilities);
+  for (const capability of normalizeTimelineCapabilities(source.capabilities)) {
+    capabilities.add(capability);
+  }
+  const controls = normalizeTimelineControls(source.controls);
+  const enhanced = timelineBoolean(
+    timelineProperty(source, "enhanced", "adapterAvailable", "adapter_available"),
+    false,
+  );
+  const ready = timelineBoolean(source.ready, enhanced || controls.size > 0);
+  if (controls.size > 0) capabilities.add("timeline-transport");
+  if (enhanced) {
+    capabilities.add("timeline-model-read");
+    capabilities.add("timeline-selection");
+  }
+
+  const time = Math.max(
+    0,
+    timelineNumber(
+      timelineProperty(transport, "clipTime", "clip_time") ??
+        timelineProperty(current, "clipTime", "clip_time") ??
+        timelineProperty(transport, "time", "currentTime", "current_time") ??
+        timelineProperty(current, "time", "currentTime", "current_time"),
+      0,
+    ),
+  );
+  const duration = Math.max(
+    0,
+    timelineNumber(
+      timelineProperty(transport, "clipDuration", "clip_duration") ??
+        timelineProperty(current, "clipDuration", "clip_duration") ??
+        timelineProperty(transport, "duration", "length") ??
+        timelineProperty(current, "duration", "length"),
+      0,
+    ),
+  );
+  return {
+    raw: source,
+    id,
+    revision: timelineId(
+      timelineProperty(
+        source,
+        "revision",
+        "catalogRevision",
+        "catalog_revision",
+      ),
+    ),
+    stateSequence: timelineId(
+      timelineProperty(source, "stateSequence", "state_sequence"),
+    ),
+    atomUid: timelineId(
+      timelineProperty(atom, "uid", "id", "name") ||
+        timelineProperty(source, "atomUid", "atom_uid"),
+    ),
+    label: String(
+      source.label ||
+        timelineProperty(atom, "label", "uid", "name") ||
+        `Timeline ${index + 1}`,
+    ),
+    selected: timelineBoolean(source.selected, false),
+    enhanced,
+    ready,
+    adapterVersion: String(
+      timelineProperty(source, "adapterVersion", "adapter_version") || "",
+    ),
+    error: normalizeTimelineAdapterError(source.error),
+    capabilities,
+    controls,
+    current: {
+      segmentId: timelineId(
+        timelineProperty(current, "segmentId", "segment_id"),
+      ),
+      layerId: timelineId(
+        timelineProperty(current, "layerId", "layer_id"),
+      ),
+      clipId: timelineId(
+        timelineProperty(
+          current,
+          "clipId",
+          "clip_id",
+          "animationId",
+          "animation_id",
+        ),
+      ),
+      trackId: timelineId(
+        timelineProperty(current, "trackId", "track_id", "targetId", "target_id"),
+      ),
+      qualified: timelineText(
+        timelineProperty(
+          current,
+          "qualified",
+          "qualifiedName",
+          "qualified_name",
+        ),
+      ),
+      name: timelineText(
+        timelineProperty(current, "name", "clipName", "clip_name", "animation"),
+      ),
+      segment: timelineText(
+        timelineProperty(current, "segment", "segmentName", "segment_name"),
+      ),
+      layer: timelineText(
+        timelineProperty(current, "layer", "layerName", "layer_name"),
+      ),
+    },
+    transport: {
+      playing: timelineBoolean(
+        timelineProperty(transport, "playing", "isPlaying", "is_playing"),
+        false,
+      ),
+      paused: timelineBoolean(transport.paused, false),
+      locked: timelineBoolean(
+        timelineProperty(transport, "locked", "isLocked", "is_locked"),
+        false,
+      ),
+      time: Math.min(time, duration || time),
+      duration,
+      speed: timelineNumber(transport.speed, 1),
+      weight: Math.min(1, Math.max(0, timelineNumber(transport.weight, 1))),
+    },
+    segments: timelineCollection(source.segments).map((item, itemIndex) =>
+      normalizeTimelineNode(item, itemIndex, "segment"),
+    ),
+    layers: timelineCollection(source.layers).map((item, itemIndex) =>
+      normalizeTimelineNode(item, itemIndex, "layer"),
+    ),
+    clips: timelineCollection(
+      timelineProperty(source, "clips", "animations"),
+    ).map((item, itemIndex) => normalizeTimelineNode(item, itemIndex, "clip")),
+    tracks: timelineCollection(
+      timelineProperty(source, "tracks", "targets", "graph"),
+    ),
+    counts:
+      source.counts && typeof source.counts === "object" ? source.counts : {},
+    limits: normalizeTimelineLimits(source.limits),
+    truncated: timelineProperty(source, "truncated", "isTruncated") || false,
+  };
+}
+
+function normalizeTimelineSnapshot(payload) {
+  const source =
+    payload?.timeline && typeof payload.timeline === "object"
+      ? payload.timeline
+      : payload || {};
+  const capabilities = normalizeTimelineCapabilities(source.capabilities);
+  const bridge =
+    source.bridge && typeof source.bridge === "object" ? source.bridge : {};
+  const instances = timelineCollection(source.instances).map((entry, index) =>
+    normalizeTimelineInstance(entry, index, capabilities),
+  );
+  return {
+    raw: source,
+    available: timelineBoolean(source.available, instances.length > 0),
+    vamRunning: timelineBoolean(
+      timelineProperty(source, "vam_running", "vamRunning"),
+      true,
+    ),
+    loading: timelineBoolean(source.loading, false),
+    stale: timelineBoolean(
+      source.stale ?? timelineProperty(bridge, "stale", "is_stale"),
+      false,
+    ),
+    protocol: String(
+      timelineProperty(source, "timeline_protocol", "timelineProtocol", "protocol") ||
+        "",
+    ),
+    instances,
+    truncated: timelineProperty(source, "truncated", "isTruncated") || false,
+    counts:
+      source.counts && typeof source.counts === "object" ? source.counts : {},
+    limits: normalizeTimelineLimits(source.limits, true),
+    capabilities,
+    bridge,
+    updatedAt: String(
+      timelineProperty(source, "updated_at_utc", "updatedAtUtc", "updated_at") ||
+        "",
+    ),
+  };
+}
+
+function timelineCurrentSignature(instance) {
+  if (!instance) return "";
+  return [
+    instance.current.segmentId,
+    instance.current.layerId,
+    instance.current.clipId,
+    instance.current.segment,
+    instance.current.layer,
+    instance.current.name,
+    instance.current.qualified,
+  ].join(":");
+}
+
+function timelineCurrentIdentity(instance, kind) {
+  const current = instance?.current;
+  if (!current) return { id: "", label: "" };
+  if (kind === "segment") {
+    return {
+      id: current.segmentId,
+      label: current.segment,
+    };
+  }
+  if (kind === "layer") {
+    return {
+      id: current.layerId,
+      label: [current.segment, current.layer].filter(Boolean).join(" · "),
+    };
+  }
+  return {
+    id: current.clipId,
+    label:
+      current.qualified ||
+      [current.segment, current.layer, current.name]
+        .filter(Boolean)
+        .join(" · "),
+  };
+}
+
+function timelineCollectionForKind(instance, kind) {
+  if (!instance) return [];
+  if (kind === "segment") return instance.segments;
+  if (kind === "layer") return instance.layers;
+  return instance.clips;
+}
+
+function timelineCurrentOutsidePublishedWindow(instance, kind = "clip") {
+  const identity = timelineCurrentIdentity(instance, kind);
+  if (!identity.id && !identity.label) return false;
+  return !timelineCollectionForKind(instance, kind).some(
+    (item) => identity.id && item.id === identity.id,
+  );
+}
+
+function timelineSelectionFromCurrent(instance, kind, items) {
+  const identity = timelineCurrentIdentity(instance, kind);
+  if (identity.id && items.some((item) => item.id === identity.id)) {
+    return identity.id;
+  }
+  if (identity.id || identity.label) return "";
+  return items[0]?.id || "";
+}
+
+function timelineOutsideOptionLabel(instance, kind) {
+  const label = timelineCurrentIdentity(instance, kind).label || "unnamed";
+  return `Current · ${label} · outside published window`;
+}
+
+function selectedTimelineInstance() {
+  const instances = app.timeline?.instances || [];
+  return (
+    instances.find((instance) => instance.id === app.selectedTimelineId) ||
+    instances.find((instance) => instance.selected) ||
+    instances[0] ||
+    null
+  );
+}
+
+function selectedTimelineClip(instance = selectedTimelineInstance()) {
+  if (!instance) return null;
+  const clips = timelineClipsForSelection(instance);
+  if (app.selectedTimelineClipId) {
+    return (
+      clips.find(
+        (clip) => clip.id === app.selectedTimelineClipId,
+      ) || null
+    );
+  }
+  const current = clips.find(
+    (clip) => clip.id === instance.current.clipId,
+  );
+  if (current) return current;
+  if (timelineCurrentOutsidePublishedWindow(instance, "clip")) return null;
+  return clips[0] || null;
+}
+
+function acceptTimelineSnapshot(snapshot) {
+  const previous = selectedTimelineInstance();
+  const previousSignature = timelineCurrentSignature(previous);
+  app.timeline = snapshot;
+  app.timelineError = null;
+  app.timelineReceivedAt = performance.now();
+
+  const instances = snapshot.instances;
+  let instance = instances.find(
+    (candidate) => candidate.id === app.selectedTimelineId,
+  );
+  if (!instance) {
+    instance = instances.find((candidate) => candidate.selected) || instances[0];
+    app.selectedTimelineId = instance?.id || "";
+    syncTimelineSelectionFromInstance(instance);
+  } else if (
+    previous &&
+    timelineCurrentSignature(instance) !== previousSignature &&
+    !app.timelineControlInFlight &&
+    !app.timelineSeekInFlight
+  ) {
+    syncTimelineSelectionFromInstance(instance);
+  } else {
+    ensureTimelineSelectionExists(instance);
+  }
+}
+
+function syncTimelineSelectionFromInstance(instance) {
+  if (!instance) {
+    app.selectedTimelineSegmentId = "";
+    app.selectedTimelineLayerId = "";
+    app.selectedTimelineClipId = "";
+    return;
+  }
+  app.selectedTimelineSegmentId = timelineSelectionFromCurrent(
+    instance,
+    "segment",
+    instance.segments,
+  );
+  const layers = timelineLayersForSegment(instance);
+  app.selectedTimelineLayerId = timelineSelectionFromCurrent(
+    instance,
+    "layer",
+    layers,
+  );
+  app.selectedTimelineClipId = timelineSelectionFromCurrent(
+    instance,
+    "clip",
+    timelineClipsForSelection(instance),
+  );
+}
+
+function ensureTimelineSelectionExists(instance) {
+  if (!instance) {
+    syncTimelineSelectionFromInstance(null);
+    return;
+  }
+  if (
+    !instance.segments.some(
+      (segment) => segment.id === app.selectedTimelineSegmentId,
+    )
+  ) {
+    app.selectedTimelineSegmentId = timelineSelectionFromCurrent(
+      instance,
+      "segment",
+      instance.segments,
+    );
+  }
+  const layers = timelineLayersForSegment(instance);
+  if (
+    !layers.some((layer) => layer.id === app.selectedTimelineLayerId)
+  ) {
+    app.selectedTimelineLayerId = timelineSelectionFromCurrent(
+      instance,
+      "layer",
+      layers,
+    );
+  }
+  const clips = timelineClipsForSelection(instance);
+  if (!clips.some((clip) => clip.id === app.selectedTimelineClipId)) {
+    app.selectedTimelineClipId = timelineSelectionFromCurrent(
+      instance,
+      "clip",
+      clips,
+    );
+  }
+}
+
+function timelineLayersForSegment(instance) {
+  if (!instance) return [];
+  const selected = app.selectedTimelineSegmentId;
+  const filtered = instance.layers.filter(
+    (layer) => !selected || !layer.segmentId || layer.segmentId === selected,
+  );
+  return selected ? filtered : instance.layers;
+}
+
+function timelineClipsForSelection(instance) {
+  if (!instance) return [];
+  const segmentId = app.selectedTimelineSegmentId;
+  const layerId = app.selectedTimelineLayerId;
+  const filtered = instance.clips.filter(
+    (clip) =>
+      (!segmentId || !clip.segmentId || clip.segmentId === segmentId) &&
+      (!layerId || !clip.layerId || clip.layerId === layerId),
+  );
+  return segmentId || layerId ? filtered : instance.clips;
+}
+
+function timelineTracksForSelection(instance = selectedTimelineInstance()) {
+  if (!instance) return [];
+  const clip = selectedTimelineClip(instance);
+  const source = clip?.tracks.length
+    ? clip.tracks
+    : timelineCollection(
+        timelineProperty(instance.raw.current, "tracks", "targets", "graph"),
+      ).length
+      ? timelineCollection(
+          timelineProperty(instance.raw.current, "tracks", "targets", "graph"),
+        )
+      : instance.tracks;
+  return source.slice(0, MAX_TIMELINE_TRACKS);
+}
+
+async function loadTimeline({ quiet = false } = {}) {
+  if (app.timelineInFlight) return app.timeline;
+  app.timelineInFlight = true;
+  if (!quiet && !app.timeline) {
+    app.timelineError = null;
+    renderTimeline();
+  }
+  try {
+    const snapshot = await TimelineClient.snapshot();
+    acceptTimelineSnapshot(snapshot);
+    renderTimeline();
+    return snapshot;
+  } catch (error) {
+    app.timelineError = error;
+    if (app.timeline) app.timeline.stale = true;
+    renderTimeline();
+    return null;
+  } finally {
+    app.timelineInFlight = false;
+    scheduleTimelinePoll();
+  }
+}
+
+function startTimelinePolling() {
+  if (app.view !== "timeline") return;
+  scheduleTimelinePoll(50);
+}
+
+function stopTimelinePolling() {
+  if (app.timelinePollTimer !== null) {
+    window.clearTimeout(app.timelinePollTimer);
+    app.timelinePollTimer = null;
+  }
+  if (app.timelineRenderFrame !== null) {
+    window.cancelAnimationFrame(app.timelineRenderFrame);
+    app.timelineRenderFrame = null;
+  }
+}
+
+function scheduleTimelinePoll(delay = null) {
+  if (app.view !== "timeline") return;
+  if (app.timelinePollTimer !== null) {
+    window.clearTimeout(app.timelinePollTimer);
+  }
+  const instance = selectedTimelineInstance();
+  const pollDelay =
+    delay ??
+    (instance?.transport.playing && !instance.transport.paused
+      ? TIMELINE_PLAYING_POLL_MS
+      : TIMELINE_IDLE_POLL_MS);
+  app.timelinePollTimer = window.setTimeout(() => {
+    app.timelinePollTimer = null;
+    loadTimeline({ quiet: true });
+  }, pollDelay);
+}
+
+function timelineSnapshotState(snapshot = app.timeline) {
+  if (app.timelineError && !snapshot) {
+    return {
+      kind: "error",
+      title:
+        app.timelineError.status === 404
+          ? "Timeline support is not available yet"
+          : "Could not read Timeline",
+      message:
+        app.timelineError.status === 404
+          ? "Update the VAM-PIP manager and bridge together, then reload this page."
+          : errorMessage(app.timelineError),
+    };
+  }
+  if (!snapshot) {
+    return {
+      kind: "loading",
+      title: "Connecting to Timeline",
+      message: "Waiting for the VAM-PIP bridge to publish the current scene.",
+    };
+  }
+  if (!snapshot.vamRunning) {
+    return {
+      kind: "empty",
+      title: "VaM is closed",
+      message: "Start VaM and load a scene to discover its Timeline instances.",
+    };
+  }
+  if (snapshot.loading) {
+    return {
+      kind: "loading",
+      title: "Scene is loading",
+      message: "Timeline controls will unlock when VaM publishes the new scene.",
+    };
+  }
+  if (snapshot.stale) {
+    return {
+      kind: "warning",
+      title: "Timeline state is stale",
+      message:
+        "The bridge has stopped updating. Controls are disabled until a fresh scene snapshot arrives.",
+    };
+  }
+  if (!snapshot.available) {
+    return {
+      kind: "warning",
+      title: "Timeline bridge is unavailable",
+      message:
+        timelineProperty(snapshot.bridge, "message", "detail") ||
+        "Reload the VAM-PIP session bridge in VaM, then retry.",
+    };
+  }
+  if (!snapshot.instances.length) {
+    return {
+      kind: "empty",
+      title: "No Timeline instance in this scene",
+      message:
+        "Add VamTimeline.AtomPlugin to an atom in VaM. It will appear here automatically.",
+    };
+  }
+  return null;
+}
+
+function setTimelineStatePanel(state) {
+  const panel = elements.timelineStatePanel;
+  panel.classList.remove("is-error", "is-warning", "is-empty", "is-loading");
+  if (!state) {
+    panel.hidden = true;
+    return;
+  }
+  panel.hidden = false;
+  panel.classList.add(`is-${state.kind}`);
+  elements.timelineStateTitle.textContent = state.title;
+  elements.timelineStateMessage.textContent = state.message;
+  elements.timelineRetryButton.hidden = state.kind === "loading";
+}
+
+function renderTimeline() {
+  const snapshot = app.timeline;
+  const state = timelineSnapshotState(snapshot);
+  const instance = selectedTimelineInstance();
+  const usableEditor = Boolean(instance);
+
+  elements.timelineTabCount.textContent = snapshot
+    ? formatCompact(snapshot.instances.length)
+    : "—";
+  elements.timelineInstance.replaceChildren();
+  if (snapshot?.instances.length) {
+    for (const candidate of snapshot.instances) {
+      const suffix = candidate.enhanced ? "" : " · transport only";
+      elements.timelineInstance.append(
+        new Option(
+          `${candidate.label}${candidate.atomUid ? ` · ${candidate.atomUid}` : ""}${suffix}`,
+          candidate.id,
+        ),
+      );
+    }
+    elements.timelineInstance.value = instance?.id || "";
+  } else {
+    elements.timelineInstance.append(
+      new Option(
+        app.timelineInFlight ? "Checking the scene…" : "No Timeline instances",
+        "",
+      ),
+    );
+  }
+  elements.timelineInstance.disabled =
+    !snapshot || snapshot.stale || snapshot.instances.length < 2;
+
+  const connected =
+    Boolean(snapshot?.available) &&
+    Boolean(snapshot?.vamRunning) &&
+    !snapshot?.stale;
+  elements.timelineConnectionState.classList.toggle(
+    "is-connected",
+    connected,
+  );
+  elements.timelineConnectionState.classList.toggle(
+    "is-error",
+    Boolean(app.timelineError),
+  );
+  elements.timelineConnectionLabel.textContent = app.timelineError
+    ? "Timeline unavailable"
+    : !snapshot
+      ? "Checking Timeline…"
+      : connected
+      ? `${snapshot.instances.length} live instance${snapshot.instances.length === 1 ? "" : "s"}`
+      : snapshot?.vamRunning
+        ? "Waiting for Timeline"
+        : "VaM closed";
+
+  setTimelineStatePanel(state);
+  elements.timelineEditor.hidden = !usableEditor;
+  if (!usableEditor) return;
+
+  renderTimelineSelectors(instance);
+  renderTimelineOutline(instance);
+  renderTimelineInspector(instance);
+  renderTimelineTransport(instance);
+  drawTimelineCanvas();
+  if (instance.transport.playing && !instance.transport.paused) {
+    startTimelineRenderLoop();
+  }
+
+  if (instance.error && !state) {
+    setTimelineStatePanel({
+      kind: "error",
+      title: `Timeline adapter error · ${instance.error.code}`,
+      message: instance.error.message,
+    });
+  } else if (!instance.enhanced && !state) {
+    setTimelineStatePanel({
+      kind: "warning",
+      title: "Transport-only Timeline",
+      message:
+        "Playback controls are available. Install and load the enhanced Timeline adapter for exact selections and graph data.",
+    });
+  } else if (!instance.ready && !state) {
+    setTimelineStatePanel({
+      kind: "warning",
+      title: "Timeline adapter is initializing",
+      message:
+        "The instance was found, but its external state is not ready. Controls remain disabled for now.",
+    });
+  } else if (
+    timelineCurrentOutsidePublishedWindow(instance, "clip") &&
+    !state
+  ) {
+    const currentLabel =
+      timelineCurrentIdentity(instance, "clip").label || "Unnamed clip";
+    setTimelineStatePanel({
+      kind: "warning",
+      title: "Current clip outside published window",
+      message:
+        `VaM is currently on “${currentLabel}”, which is beyond this bounded catalogue. ` +
+        "VAM-PIP has not selected a different clip in its place; choose a published clip explicitly to switch.",
+    });
+  } else if (
+    timelineDataIsTruncated(instance.truncated) &&
+    !state
+  ) {
+    const totalClips = timelineBoundedCount(
+      instance.counts.clips,
+      1_000_000,
+    );
+    const publishedClips = instance.clips.length;
+    const globalLimit =
+      instance.limits.maxClipsGlobally ||
+      app.timeline?.limits?.maxClipsGlobally ||
+      1024;
+    setTimelineStatePanel({
+      kind: "warning",
+      title: "Timeline catalogue is bounded",
+      message:
+        `${formatNumber(publishedClips)} of ${formatNumber(totalClips)} clips are published for this instance. ` +
+        `The shared catalogue limit is ${formatNumber(globalLimit)} clips; playback data and controls remain live.`,
+    });
+  }
+}
+
+function renderTimelineSelectors(instance) {
+  const segmentOutside = timelineCurrentOutsidePublishedWindow(
+    instance,
+    "segment",
+  );
+  fillTimelineSelect(
+    elements.timelineSegmentSelect,
+    instance.segments,
+    app.selectedTimelineSegmentId,
+    "No segments published",
+    instance.current.segmentId,
+    segmentOutside
+      ? timelineOutsideOptionLabel(instance, "segment")
+      : "",
+    "Choose a published segment",
+  );
+  const layers = timelineLayersForSegment(instance);
+  const layerOutside = timelineCurrentOutsidePublishedWindow(instance, "layer");
+  fillTimelineSelect(
+    elements.timelineLayerSelect,
+    layers,
+    app.selectedTimelineLayerId,
+    "No layers published",
+    instance.current.layerId,
+    layerOutside ? timelineOutsideOptionLabel(instance, "layer") : "",
+    "Choose a published layer",
+  );
+  const clips = timelineClipsForSelection(instance);
+  const clipOutside = timelineCurrentOutsidePublishedWindow(instance, "clip");
+  fillTimelineSelect(
+    elements.timelineClipSelect,
+    clips,
+    app.selectedTimelineClipId,
+    "No clips published",
+    instance.current.clipId,
+    clipOutside ? timelineOutsideOptionLabel(instance, "clip") : "",
+    "Choose a published clip",
+  );
+  const revision = instance.revision || "legacy";
+  elements.timelineRevision.textContent =
+    revision.length > 14
+      ? `${revision.slice(0, 8)}…${revision.slice(-4)}`
+      : revision;
+  elements.timelineRevision.title =
+    revision === "legacy" ? "No revision published" : revision;
+
+  const stale = Boolean(app.timeline?.stale);
+  const segmentSelected = instance.segments.some(
+    (segment) => segment.id === app.selectedTimelineSegmentId,
+  );
+  const layerSelected = layers.some(
+    (layer) => layer.id === app.selectedTimelineLayerId,
+  );
+  const clipSelected = clips.some(
+    (clip) => clip.id === app.selectedTimelineClipId,
+  );
+  elements.timelineSegmentSelect.disabled =
+    stale ||
+    app.timelineControlInFlight ||
+    instance.segments.length === 0 ||
+    (!segmentOutside && segmentSelected && instance.segments.length < 2);
+  elements.timelineLayerSelect.disabled =
+    stale ||
+    app.timelineControlInFlight ||
+    layers.length === 0 ||
+    (!layerOutside && layerSelected && layers.length < 2);
+  elements.timelineClipSelect.disabled =
+    stale ||
+    app.timelineControlInFlight ||
+    clips.length === 0 ||
+    (!clipOutside && clipSelected && clips.length < 2);
+}
+
+function fillTimelineSelect(
+  select,
+  items,
+  selectedId,
+  emptyLabel,
+  liveId,
+  outsideLabel = "",
+  unselectedLabel = "Choose a published item",
+) {
+  select.replaceChildren();
+  const selectedPublished = items.some((item) => item.id === selectedId);
+  if (outsideLabel) {
+    const outside = new Option(outsideLabel, "");
+    outside.disabled = true;
+    select.append(outside);
+  } else if (items.length && !selectedPublished) {
+    const unselected = new Option(unselectedLabel, "");
+    unselected.disabled = true;
+    select.append(unselected);
+  }
+  if (!items.length) {
+    if (!outsideLabel) select.append(new Option(emptyLabel, ""));
+    select.value = "";
+    return;
+  }
+  for (const item of items) {
+    const live = item.id === liveId ? " · live" : "";
+    select.append(new Option(`${item.label}${live}`, item.id));
+  }
+  select.value = selectedPublished ? selectedId : "";
+}
+
+function renderTimelineOutline(instance) {
+  const clips = timelineClipsForSelection(instance);
+  elements.timelineClipCount.textContent = formatCompact(clips.length);
+  elements.timelineOutlineList.replaceChildren();
+  if (!clips.length) {
+    const empty = createElement("p", "timeline-inline-empty");
+    empty.textContent = instance.enhanced
+      ? "This selection has no clips."
+      : "Clip catalogue needs the enhanced adapter.";
+    elements.timelineOutlineList.append(empty);
+    return;
+  }
+
+  const grouped = new Map();
+  for (const clip of clips) {
+    const layer =
+      instance.layers.find((candidate) => candidate.id === clip.layerId) || null;
+    const key = layer?.id || "unassigned";
+    if (!grouped.has(key)) grouped.set(key, { layer, clips: [] });
+    grouped.get(key).clips.push(clip);
+  }
+  for (const { layer, clips: layerClips } of grouped.values()) {
+    const group = createElement("section", "timeline-outline-group");
+    const heading = createElement("div", "timeline-outline-group-heading");
+    const name = document.createElement("strong");
+    name.textContent = layer?.label || "Animation clips";
+    const count = document.createElement("span");
+    count.textContent = formatCompact(layerClips.length);
+    heading.append(name, count);
+    group.append(heading);
+    for (const clip of layerClips.slice(0, 120)) {
+      const clipButton = button(clip.label, "timeline-outline-clip");
+      clipButton.dataset.timelineClipId = clip.id;
+      clipButton.classList.toggle(
+        "is-selected",
+        clip.id === app.selectedTimelineClipId,
+      );
+      clipButton.classList.toggle("is-live", clip.id === instance.current.clipId);
+      const duration = createElement("small");
+      duration.textContent = formatTimelineTime(
+        clip.duration || instance.transport.duration,
+      );
+      clipButton.append(duration);
+      clipButton.addEventListener("click", () =>
+        selectTimelineClip(clip.id, { notifyVam: true }),
+      );
+      group.append(clipButton);
+    }
+    if (layerClips.length > 120) {
+      const limited = createElement("p", "timeline-outline-limit");
+      limited.textContent = `${formatNumber(layerClips.length - 120)} more clips are hidden in this bounded view.`;
+      group.append(limited);
+    }
+    elements.timelineOutlineList.append(group);
+  }
+}
+
+function renderTimelineInspector(instance) {
+  const clip = selectedTimelineClip(instance);
+  const clipOutside = timelineCurrentOutsidePublishedWindow(instance, "clip");
+  const outsideLabel = timelineCurrentIdentity(instance, "clip").label;
+  const tracks = timelineTracksForSelection(instance);
+  const publishedTrackCount = Math.max(
+    tracks.length,
+    timelineNumber(
+      timelineProperty(clip, "targetCount", "target_count", "trackCount"),
+      0,
+    ),
+  );
+  const facts = [
+    ["Atom", instance.atomUid || "Unknown"],
+    [
+      "Clip",
+      clip?.label ||
+        (clipOutside && outsideLabel
+          ? `${outsideLabel} · outside published window`
+          : "No clip selected"),
+    ],
+    ["Duration", formatTimelineTime(clip?.duration || instance.transport.duration)],
+    ["Targets", formatNumber(publishedTrackCount)],
+    [
+      "Catalogue",
+      `${formatNumber(instance.clips.length)} of ${formatNumber(
+        timelineBoundedCount(instance.counts.clips, 1_000_000),
+      )} clips`,
+    ],
+    ["Adapter", instance.enhanced ? instance.adapterVersion || "Enhanced" : "Legacy"],
+  ];
+  elements.timelineInspectorFacts.replaceChildren();
+  for (const [label, value] of facts) {
+    const term = document.createElement("dt");
+    term.textContent = label;
+    const description = document.createElement("dd");
+    description.textContent = value;
+    elements.timelineInspectorFacts.append(term, description);
+  }
+
+  const capabilities = [
+    ["Transport", timelineControlAllowed(instance, "play")],
+    ["Exact selection", timelineControlAllowed(instance, "selectClip")],
+    ["Graph overview", tracks.length > 0],
+    [
+      "Keyframe editing",
+      instance.capabilities.has("timeline-model-edit"),
+    ],
+  ];
+  elements.timelineCapabilityList.replaceChildren();
+  for (const [label, available] of capabilities) {
+    const row = createElement(
+      "span",
+      `timeline-capability ${available ? "is-available" : ""}`,
+    );
+    row.append(createElement("i"));
+    row.append(document.createTextNode(label));
+    elements.timelineCapabilityList.append(row);
+  }
+}
+
+function timelineOpKey(value) {
+  return String(value || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, "");
+}
+
+function timelineControlAllowed(instance, op) {
+  if (
+    !instance ||
+    !instance.ready ||
+    !instance.revision ||
+    app.timeline?.stale ||
+    app.timeline?.loading ||
+    !app.timeline?.vamRunning
+  ) {
+    return false;
+  }
+  const requested = timelineOpKey(op);
+  if (instance.controls.size) {
+    return Array.from(instance.controls).some(
+      (candidate) => timelineOpKey(candidate) === requested,
+    );
+  }
+  const selectionOps = new Set([
+    "selectsegment",
+    "selectlayer",
+    "selectclip",
+  ]);
+  if (selectionOps.has(requested)) {
+    return instance.enhanced || instance.capabilities.has("timeline-selection");
+  }
+  return instance.capabilities.has("timeline-transport");
+}
+
+function timelineControlTargetIsPublished(instance, op, fields = {}) {
+  const requested = timelineOpKey(op);
+  if (requested === "selectclip" || requested === "playclip") {
+    const clipId = timelineId(fields.clipId);
+    return Boolean(
+      clipId && instance?.clips.some((clip) => clip.id === clipId),
+    );
+  }
+  if (requested === "selectsegment") {
+    const segmentId = timelineId(fields.segmentId);
+    return Boolean(
+      segmentId &&
+        instance?.segments.some((segment) => segment.id === segmentId),
+    );
+  }
+  if (requested === "selectlayer") {
+    const layerId = timelineId(fields.layerId);
+    return Boolean(
+      layerId && instance?.layers.some((layer) => layer.id === layerId),
+    );
+  }
+  return true;
+}
+
+function renderTimelineTransport(instance) {
+  const time = currentTimelineTime(instance);
+  const clip = selectedTimelineClip(instance);
+  const duration = Math.max(
+    clip?.duration || 0,
+    instance.transport.duration || 0,
+    0.001,
+  );
+  const playing = instance.transport.playing && !instance.transport.paused;
+
+  elements.timelinePlayPause.dataset.timelineOp = playing ? "pause" : "play";
+  elements.timelinePlayPause.classList.toggle("is-playing", playing);
+  elements.timelinePlayPause.setAttribute(
+    "aria-label",
+    playing ? "Pause" : "Play",
+  );
+  elements.timelinePlayPause.title = playing ? "Pause" : "Play";
+
+  const controlMap = [
+    [elements.timelinePreviousFrame, "previousFrame"],
+    [elements.timelineReset, "reset"],
+    [elements.timelinePlayPause, playing ? "pause" : "play"],
+    [elements.timelineStop, "stop"],
+    [elements.timelineNextFrame, "nextFrame"],
+  ];
+  for (const [control, operation] of controlMap) {
+    control.disabled =
+      app.timelineControlInFlight ||
+      !timelineControlAllowed(instance, operation);
+  }
+
+  if (
+    document.activeElement !== elements.timelineScrubber ||
+    app.timelinePreviewTime === null
+  ) {
+    elements.timelineScrubber.value = String(Math.min(time, duration));
+  }
+  elements.timelineScrubber.max = String(duration);
+  elements.timelineScrubber.disabled =
+    !timelineControlAllowed(instance, "setTime");
+  elements.timelineTimecode.value = formatTimelineTime(
+    app.timelinePreviewTime ?? time,
+  );
+  elements.timelineDurationTimecode.textContent =
+    `/ ${formatTimelineTime(duration)}`;
+
+  elements.timelineSpeed.value = String(instance.transport.speed);
+  elements.timelineSpeedValue.value = `${instance.transport.speed.toFixed(2)}×`;
+  elements.timelineSpeed.disabled =
+    app.timelineControlInFlight ||
+    !timelineControlAllowed(instance, "setSpeed");
+  elements.timelineWeight.value = String(instance.transport.weight);
+  elements.timelineWeightValue.value =
+    `${Math.round(instance.transport.weight * 100)}%`;
+  elements.timelineWeight.disabled =
+    app.timelineControlInFlight ||
+    !timelineControlAllowed(instance, "setWeight");
+  elements.timelineLock.checked = instance.transport.locked;
+  elements.timelineLock.disabled =
+    app.timelineControlInFlight ||
+    !timelineControlAllowed(instance, "setLocked");
+}
+
+function currentTimelineTime(instance = selectedTimelineInstance()) {
+  if (!instance) return 0;
+  if (app.timelinePreviewTime !== null) return app.timelinePreviewTime;
+  let time = instance.transport.time;
+  if (instance.transport.playing && !instance.transport.paused) {
+    const elapsed = Math.max(0, performance.now() - app.timelineReceivedAt) / 1000;
+    time += elapsed * instance.transport.speed;
+  }
+  const clip = selectedTimelineClip(instance);
+  const duration = clip?.duration || instance.transport.duration;
+  return duration > 0
+    ? Math.min(duration, Math.max(0, time))
+    : Math.max(0, time);
+}
+
+function formatTimelineTime(value) {
+  const seconds = Math.max(0, timelineNumber(value, 0));
+  const minutes = Math.floor(seconds / 60);
+  const remainder = seconds - minutes * 60;
+  return `${String(minutes).padStart(2, "0")}:${remainder
+    .toFixed(3)
+    .padStart(6, "0")}`;
+}
+
+function startTimelineRenderLoop() {
+  if (app.timelineRenderFrame !== null || app.view !== "timeline") return;
+  const tick = (timestamp) => {
+    app.timelineRenderFrame = null;
+    if (app.view !== "timeline") return;
+    const instance = selectedTimelineInstance();
+    let keepRendering = false;
+    if (instance && app.timelinePreviewTime === null) {
+      const time = currentTimelineTime(instance);
+      const duration =
+        selectedTimelineClip(instance)?.duration ||
+        instance.transport.duration ||
+        0.001;
+      elements.timelineTimecode.value = formatTimelineTime(time);
+      if (document.activeElement !== elements.timelineScrubber) {
+        elements.timelineScrubber.value = String(
+          Math.min(duration, Math.max(0, time)),
+        );
+      }
+      if (
+        instance.transport.playing &&
+        !instance.transport.paused &&
+        timestamp - app.timelineLastCanvasDrawAt >= 33
+      ) {
+        keepRendering = true;
+        app.timelineLastCanvasDrawAt = timestamp;
+        drawTimelineCanvas(time);
+      } else if (instance.transport.playing && !instance.transport.paused) {
+        keepRendering = true;
+      }
+    }
+    if (keepRendering) {
+      app.timelineRenderFrame = window.requestAnimationFrame(tick);
+    }
+  };
+  app.timelineRenderFrame = window.requestAnimationFrame(tick);
+}
+
+function timelineTrackKeys(track) {
+  const keys = timelineProperty(
+    track,
+    "keyframes",
+    "keys",
+    "frames",
+    "points",
+  );
+  return timelineCollection(keys);
+}
+
+function timelineKeyTime(key, index) {
+  if (Array.isArray(key)) return Math.max(0, timelineNumber(key[0], 0));
+  if (typeof key === "number") return Math.max(0, key);
+  return Math.max(
+    0,
+    timelineNumber(
+      timelineProperty(key, "time", "t", "x", "seconds", "position"),
+      index,
+    ),
+  );
+}
+
+function timelineTrackLabel(track, index) {
+  return String(
+    timelineProperty(
+      track,
+      "label",
+      "name",
+      "target",
+      "storable",
+      "property",
+      "id",
+    ) || `Track ${index + 1}`,
+  );
+}
+
+function drawTimelineCanvas(playhead = null) {
+  const canvas = elements.timelineCanvas;
+  const scroll = elements.timelineCanvasScroll;
+  const context = canvas?.getContext("2d");
+  const instance = selectedTimelineInstance();
+  if (!canvas || !scroll || !context || !instance) return;
+
+  const tracks = timelineTracksForSelection(instance);
+  const clip = selectedTimelineClip(instance);
+  const duration = Math.max(
+    clip?.duration || 0,
+    instance.transport.duration || 0,
+    0.001,
+  );
+  const rowHeight = 31;
+  const rulerHeight = 29;
+  const cssWidth = Math.max(640, Math.floor(scroll.clientWidth || 960));
+  const cssHeight = Math.max(
+    220,
+    rulerHeight + Math.max(1, tracks.length) * rowHeight,
+  );
+  const ratio = Math.min(window.devicePixelRatio || 1, 2);
+  const pixelWidth = Math.floor(cssWidth * ratio);
+  const pixelHeight = Math.floor(cssHeight * ratio);
+  if (canvas.width !== pixelWidth || canvas.height !== pixelHeight) {
+    canvas.width = pixelWidth;
+    canvas.height = pixelHeight;
+    canvas.style.width = `${cssWidth}px`;
+    canvas.style.height = `${cssHeight}px`;
+  }
+  context.setTransform(ratio, 0, 0, ratio, 0, 0);
+  context.clearRect(0, 0, cssWidth, cssHeight);
+
+  const labelWidth = Math.min(205, Math.max(145, cssWidth * 0.24));
+  const graphWidth = Math.max(1, cssWidth - labelWidth);
+  context.fillStyle = "#111419";
+  context.fillRect(0, 0, cssWidth, cssHeight);
+  context.fillStyle = "#171b20";
+  context.fillRect(0, 0, labelWidth, cssHeight);
+  context.fillStyle = "#1d2228";
+  context.fillRect(labelWidth, 0, graphWidth, rulerHeight);
+
+  const majorTicks = Math.max(2, Math.min(12, Math.floor(graphWidth / 90)));
+  context.font =
+    '10px ui-monospace, "SFMono-Regular", Consolas, monospace';
+  context.textBaseline = "middle";
+  for (let tick = 0; tick <= majorTicks; tick += 1) {
+    const fraction = tick / majorTicks;
+    const x = labelWidth + graphWidth * fraction;
+    context.strokeStyle = tick === 0 ? "#39424c" : "#252b32";
+    context.lineWidth = 1;
+    context.beginPath();
+    context.moveTo(Math.round(x) + 0.5, 0);
+    context.lineTo(Math.round(x) + 0.5, cssHeight);
+    context.stroke();
+    context.fillStyle = "#8d98a3";
+    context.textAlign =
+      tick === 0 ? "left" : tick === majorTicks ? "right" : "center";
+    context.fillText(
+      formatTimelineTime(duration * fraction),
+      tick === 0 ? x + 5 : tick === majorTicks ? cssWidth - 6 : x,
+      rulerHeight / 2,
+    );
+  }
+  context.textAlign = "left";
+
+  let renderedKeys = 0;
+  let clippedKeys = false;
+  for (let trackIndex = 0; trackIndex < tracks.length; trackIndex += 1) {
+    const track = tracks[trackIndex];
+    const top = rulerHeight + trackIndex * rowHeight;
+    if (trackIndex % 2 === 1) {
+      context.fillStyle = "rgba(255, 255, 255, 0.014)";
+      context.fillRect(0, top, cssWidth, rowHeight);
+    }
+    context.strokeStyle = "#20262d";
+    context.beginPath();
+    context.moveTo(0, top + rowHeight + 0.5);
+    context.lineTo(cssWidth, top + rowHeight + 0.5);
+    context.stroke();
+    context.fillStyle = "#a6afb9";
+    context.font = '11px Inter, ui-sans-serif, system-ui, sans-serif';
+    context.fillText(
+      timelineTrackLabel(track, trackIndex),
+      12,
+      top + rowHeight / 2,
+      labelWidth - 24,
+    );
+
+    const allKeys = timelineTrackKeys(track);
+    const trackKeys = allKeys.slice(0, MAX_TIMELINE_KEYS_PER_TRACK);
+    if (allKeys.length > trackKeys.length) clippedKeys = true;
+    for (let keyIndex = 0; keyIndex < trackKeys.length; keyIndex += 1) {
+      if (renderedKeys >= MAX_TIMELINE_KEYS) {
+        clippedKeys = true;
+        break;
+      }
+      const time = timelineKeyTime(trackKeys[keyIndex], keyIndex);
+      const x =
+        labelWidth + Math.min(1, Math.max(0, time / duration)) * graphWidth;
+      const y = top + rowHeight / 2;
+      context.save();
+      context.translate(Math.round(x), Math.round(y));
+      context.rotate(Math.PI / 4);
+      context.fillStyle = "#86e6b0";
+      context.fillRect(-3, -3, 6, 6);
+      context.restore();
+      renderedKeys += 1;
+    }
+    if (renderedKeys >= MAX_TIMELINE_KEYS) break;
+  }
+
+  const current = playhead ?? currentTimelineTime(instance);
+  const playheadX =
+    labelWidth +
+    Math.min(1, Math.max(0, current / duration)) * graphWidth;
+  context.strokeStyle = "#ff858d";
+  context.lineWidth = 1.5;
+  context.beginPath();
+  context.moveTo(playheadX, 0);
+  context.lineTo(playheadX, cssHeight);
+  context.stroke();
+  context.fillStyle = "#ff858d";
+  context.beginPath();
+  context.moveTo(playheadX - 5, 0);
+  context.lineTo(playheadX + 5, 0);
+  context.lineTo(playheadX, 8);
+  context.closePath();
+  context.fill();
+
+  elements.timelineCanvasEmpty.hidden = tracks.length > 0;
+  elements.timelineTrackSummary.textContent = tracks.length
+    ? `${formatNumber(tracks.length)} ${plural("track", tracks.length)} · ${formatNumber(renderedKeys)} ${plural("key", renderedKeys)}`
+    : "No tracks";
+  elements.timelineDurationSummary.textContent = formatTimelineTime(duration);
+  const trackSourceCount = Math.max(
+    instance.tracks.length,
+    clip?.tracks.length || 0,
+    timelineNumber(instance.counts.tracks, 0),
+  );
+  const limited =
+    timelineDataIsTruncated(instance.truncated) ||
+    timelineDataIsTruncated(app.timeline?.truncated) ||
+    trackSourceCount > tracks.length ||
+    clippedKeys;
+  elements.timelineLimitNote.hidden = !limited;
+  elements.timelineLimitNote.textContent = limited
+    ? `This overview is bounded to ${MAX_TIMELINE_TRACKS} tracks and ${formatNumber(MAX_TIMELINE_KEYS)} keys; the Timeline data in VaM is unchanged.`
+    : "";
+}
+
+function handleTimelineCanvasClick(event) {
+  const instance = selectedTimelineInstance();
+  if (!timelineControlAllowed(instance, "setTime")) return;
+  const canvas = elements.timelineCanvas;
+  const bounds = canvas.getBoundingClientRect();
+  const cssWidth = bounds.width;
+  const labelWidth = Math.min(205, Math.max(145, cssWidth * 0.24));
+  const x = event.clientX - bounds.left;
+  if (x < labelWidth) return;
+  const duration =
+    selectedTimelineClip(instance)?.duration ||
+    instance.transport.duration ||
+    0;
+  const value =
+    ((x - labelWidth) / Math.max(1, cssWidth - labelWidth)) * duration;
+  elements.timelineScrubber.value = String(value);
+  handleTimelineScrubInput();
+  handleTimelineScrubCommit();
+}
+
+function handleTimelineScrubInput() {
+  const value = Math.max(0, timelineNumber(elements.timelineScrubber.value, 0));
+  app.timelinePreviewTime = value;
+  elements.timelineTimecode.value = formatTimelineTime(value);
+  drawTimelineCanvas(value);
+}
+
+function handleTimelineScrubCommit() {
+  const value = Math.max(0, timelineNumber(elements.timelineScrubber.value, 0));
+  queueTimelineSeek(value);
+}
+
+async function queueTimelineSeek(value) {
+  const instance = selectedTimelineInstance();
+  if (!timelineControlAllowed(instance, "setTime")) return;
+  if (app.timelineSeekInFlight) {
+    app.timelinePendingSeek = value;
+    return;
+  }
+  app.timelineSeekInFlight = true;
+  app.timelinePendingSeek = null;
+  try {
+    await TimelineClient.control({
+      timelineId: instance.id,
+      expectedRevision: instance.revision,
+      op: "setTime",
+      value,
+    });
+    instance.transport.time = value;
+    app.timelineReceivedAt = performance.now();
+  } catch (error) {
+    toast("Could not seek Timeline", errorMessage(error), "error");
+  } finally {
+    app.timelineSeekInFlight = false;
+    const pending = app.timelinePendingSeek;
+    app.timelinePendingSeek = null;
+    if (pending !== null) {
+      queueTimelineSeek(pending);
+    } else {
+      app.timelinePreviewTime = null;
+      scheduleTimelinePoll(80);
+    }
+  }
+}
+
+async function sendTimelineControl(op, fields = {}) {
+  const instance = selectedTimelineInstance();
+  if (!timelineControlTargetIsPublished(instance, op, fields)) {
+    toast(
+      "Selection is outside the published window",
+      "Choose an item that is present in the bounded Timeline catalogue before sending this control.",
+      "error",
+    );
+    return;
+  }
+  if (!timelineControlAllowed(instance, op) || app.timelineControlInFlight) {
+    if (!timelineControlAllowed(instance, op)) {
+      toast(
+        "Control is unavailable",
+        "This Timeline instance does not publish that external control.",
+        "error",
+      );
+    }
+    return;
+  }
+  app.timelineControlInFlight = true;
+  renderTimelineSelectors(instance);
+  renderTimelineTransport(instance);
+  try {
+    const result = await TimelineClient.control({
+      timelineId: instance.id,
+      expectedRevision: instance.revision,
+      op,
+      ...fields,
+    });
+    if (
+      result &&
+      typeof result === "object" &&
+      (result.instances || result.timeline?.instances)
+    ) {
+      acceptTimelineSnapshot(normalizeTimelineSnapshot(result));
+      renderTimeline();
+    } else {
+      await loadTimeline({ quiet: true, force: true });
+    }
+  } catch (error) {
+    toast("Timeline control failed", errorMessage(error), "error");
+    await loadTimeline({ quiet: true, force: true });
+  } finally {
+    app.timelineControlInFlight = false;
+    const refreshed = selectedTimelineInstance();
+    if (refreshed) renderTimeline();
+    scheduleTimelinePoll(150);
+  }
+}
+
+function handleTimelineInstanceChange() {
+  app.selectedTimelineId = elements.timelineInstance.value;
+  syncTimelineSelectionFromInstance(selectedTimelineInstance());
+  app.timelinePreviewTime = null;
+  renderTimeline();
+}
+
+function handleTimelineSegmentChange() {
+  const instance = selectedTimelineInstance();
+  const segmentId = timelineId(elements.timelineSegmentSelect.value);
+  if (!instance?.segments.some((segment) => segment.id === segmentId)) {
+    renderTimeline();
+    return;
+  }
+  app.selectedTimelineSegmentId = segmentId;
+  const layers = timelineLayersForSegment(instance);
+  app.selectedTimelineLayerId = layers.some(
+    (layer) => layer.id === instance.current.layerId,
+  )
+    ? instance.current.layerId
+    : "";
+  const clips = timelineClipsForSelection(instance);
+  app.selectedTimelineClipId = clips.some(
+    (clip) => clip.id === instance.current.clipId,
+  )
+    ? instance.current.clipId
+    : "";
+  renderTimeline();
+  if (
+    app.selectedTimelineSegmentId &&
+    timelineControlAllowed(instance, "selectSegment")
+  ) {
+    sendTimelineControl("selectSegment", {
+      segmentId: app.selectedTimelineSegmentId,
+    });
+  }
+}
+
+function handleTimelineLayerChange() {
+  const instance = selectedTimelineInstance();
+  const layerId = timelineId(elements.timelineLayerSelect.value);
+  if (!instance?.layers.some((layer) => layer.id === layerId)) {
+    renderTimeline();
+    return;
+  }
+  app.selectedTimelineLayerId = layerId;
+  const clips = timelineClipsForSelection(instance);
+  app.selectedTimelineClipId = clips.some(
+    (clip) => clip.id === instance.current.clipId,
+  )
+    ? instance.current.clipId
+    : "";
+  renderTimeline();
+  if (
+    app.selectedTimelineLayerId &&
+    timelineControlAllowed(instance, "selectLayer")
+  ) {
+    sendTimelineControl("selectLayer", {
+      layerId: app.selectedTimelineLayerId,
+    });
+  }
+}
+
+function handleTimelineClipChange() {
+  selectTimelineClip(elements.timelineClipSelect.value, { notifyVam: true });
+}
+
+function selectTimelineClip(clipId, { notifyVam = false } = {}) {
+  const instance = selectedTimelineInstance();
+  const requestedId = timelineId(clipId);
+  if (!instance?.clips.some((clip) => clip.id === requestedId)) {
+    renderTimeline();
+    return;
+  }
+  app.selectedTimelineClipId = requestedId;
+  app.timelinePreviewTime = null;
+  renderTimeline();
+  if (
+    notifyVam &&
+    app.selectedTimelineClipId &&
+    timelineControlAllowed(instance, "selectClip")
+  ) {
+    sendTimelineControl("selectClip", {
+      clipId: app.selectedTimelineClipId,
+    });
+  }
+}
+
 async function loadStatus() {
   if (operationIsBusy()) {
     await loadActivity({ refreshOnTerminal: false });
@@ -7676,7 +9528,7 @@ async function updateAutoReconcile() {
 
 function setView(view) {
   if (
-    !["resources", "workspace", "packages", "access"].includes(view) ||
+    !["resources", "workspace", "timeline", "packages", "access"].includes(view) ||
     app.view === view
   ) {
     return;
@@ -7694,14 +9546,26 @@ function setView(view) {
 
   const isAccess = view === "access";
   const isWorkspace = view === "workspace";
-  elements.libraryView.hidden = isAccess;
+  const isTimeline = view === "timeline";
+  elements.libraryView.hidden = isAccess || isTimeline;
   elements.accessView.hidden = !isAccess;
+  elements.timelineView.hidden = !isTimeline;
   elements.assetWorkspace.hidden = !isWorkspace;
+  updateViewRoute(view);
   if (isAccess) {
+    stopTimelinePolling();
     renderAccess();
     return;
   }
+  if (isTimeline) {
+    renderTimeline();
+    startTimelinePolling();
+    startTimelineRenderLoop();
+    loadTimeline({ quiet: Boolean(app.timeline) });
+    return;
+  }
 
+  stopTimelinePolling();
   elements.typeFilterWrap.hidden = view !== "resources";
   updateWorkspaceSearchPlaceholder();
   configureStateFilter();

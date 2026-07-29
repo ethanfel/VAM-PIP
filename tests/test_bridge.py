@@ -14,6 +14,7 @@ from vampip.bridge import (
     read_bridge_request,
     read_bridge_status,
     read_scene_status,
+    read_timeline_status,
     request_add_atom,
     request_add_person,
     request_atom_preset,
@@ -27,6 +28,7 @@ from vampip.bridge import (
     request_select_atom,
     request_select_person,
     request_subscene_load,
+    request_timeline_control,
 )
 
 
@@ -54,6 +56,162 @@ class BridgeProtocolTests(unittest.TestCase):
         self.assertEqual(request["command"], "rescan")
         self.assertEqual(request["browserAssist"], "off")
         self.assertIn("createdAtUtc", request)
+
+    def test_timeline_control_uses_only_opaque_revision_bound_fields(self) -> None:
+        request_id = request_timeline_control(
+            self.vam_root,
+            timeline_id="a" * 32,
+            expected_revision="B" * 32,
+            operation="selectClip",
+            item_id="c" * 32,
+        )
+
+        request = self.read_request()
+        self.assertEqual(request["requestId"], request_id)
+        self.assertEqual(request["command"], "controlTimeline")
+        self.assertEqual(request["timelineId"], "a" * 32)
+        self.assertEqual(request["expectedRevision"], "b" * 32)
+        self.assertEqual(request["operation"], "selectClip")
+        self.assertEqual(request["clipId"], "c" * 32)
+        self.assertEqual(
+            set(request) - {"protocol", "requestId", "createdAtUtc"},
+            {
+                "command",
+                "timelineId",
+                "expectedRevision",
+                "operation",
+                "clipId",
+            },
+        )
+        serialized = json.dumps(request)
+        self.assertNotIn("targetUid", serialized)
+        self.assertNotIn("storable", serialized.casefold())
+        self.assertNotIn("actionName", serialized)
+
+    def test_timeline_setters_are_strictly_bounded(self) -> None:
+        for operation, value in (
+            ("setTime", 12.5),
+            ("setSpeed", -0.5),
+            ("setWeight", 0.75),
+            ("setLocked", True),
+        ):
+            with self.subTest(operation=operation):
+                request_timeline_control(
+                    self.vam_root,
+                    timeline_id="1" * 32,
+                    expected_revision="2" * 32,
+                    operation=operation,
+                    value=value,
+                )
+                self.assertEqual(
+                    self.read_request()["value"],
+                    value,
+                )
+
+        invalid_cases = (
+            ("setTime", -1),
+            ("setTime", float("inf")),
+            ("setSpeed", 6),
+            ("setWeight", 1.1),
+            ("setLocked", 1),
+        )
+        for operation, value in invalid_cases:
+            with self.subTest(operation=operation, value=value):
+                with self.assertRaises((TypeError, ValueError)):
+                    request_timeline_control(
+                        self.vam_root,
+                        timeline_id="1" * 32,
+                        expected_revision="2" * 32,
+                        operation=operation,
+                        value=value,
+                    )
+
+    def test_timeline_control_rejects_names_and_mismatched_fields(self) -> None:
+        with self.assertRaises(ValueError):
+            request_timeline_control(
+                self.vam_root,
+                timeline_id="Person",
+                expected_revision="2" * 32,
+                operation="play",
+            )
+        with self.assertRaises(ValueError):
+            request_timeline_control(
+                self.vam_root,
+                timeline_id="1" * 32,
+                expected_revision="2" * 32,
+                operation="CallAction",
+            )
+        with self.assertRaises(ValueError):
+            request_timeline_control(
+                self.vam_root,
+                timeline_id="1" * 32,
+                expected_revision="2" * 32,
+                operation="play",
+                item_id="3" * 32,
+            )
+
+    def test_timeline_status_normalizes_vam_simplejson_scalars(self) -> None:
+        directory = bridge_directory(self.vam_root)
+        directory.mkdir(parents=True)
+        (directory / "timeline.json").write_text(
+            json.dumps(
+                {
+                    "protocol": "2",
+                    "timelineProtocol": "1",
+                    "loading": "false",
+                    "truncated": "true",
+                    "counts": {
+                        "instances": "5",
+                        "publishedInstances": "5",
+                        "clips": "1280",
+                        "publishedClips": "1024",
+                    },
+                    "limits": {
+                        "maxInstances": "32",
+                        "maxClips": "256",
+                        "maxClipsGlobally": "1024",
+                    },
+                    "instances": [
+                        {
+                            "id": "1" * 32,
+                            "revision": "2" * 32,
+                            "enhanced": "true",
+                            "ready": "true",
+                            "selected": "false",
+                            "playing": "true",
+                            "stateSequence": "12",
+                            "limits": {
+                                "maxSegments": "64",
+                                "maxLayers": "128",
+                                "maxClips": "256",
+                                "maxClipsGlobally": "1024",
+                                "allocatedClips": "0",
+                            },
+                            "clips": [
+                                {
+                                    "id": "3" * 32,
+                                    "selected": "true",
+                                }
+                            ],
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        document = read_timeline_status(self.vam_root)
+        self.assertIsNotNone(document)
+        assert document is not None
+        self.assertIs(document["loading"], False)
+        self.assertIs(document["truncated"], True)
+        self.assertEqual(document["counts"]["publishedClips"], 1024)
+        self.assertEqual(document["limits"]["maxClipsGlobally"], 1024)
+        instance = document["instances"][0]
+        self.assertIs(instance["enhanced"], True)
+        self.assertEqual(instance["stateSequence"], 12)
+        self.assertEqual(instance["limits"]["maxLayers"], 128)
+        self.assertIs(instance["clips"][0]["selected"], True)
 
     def test_person_hair_request_writes_allowlisted_fields(self) -> None:
         resource_ref = (
@@ -941,7 +1099,18 @@ class BridgeSourceTests(unittest.TestCase):
             repository / "src" / "vampip" / "bridge_assets" / "VAMPipBridge.cs"
         ).read_text(encoding="utf-8")
         self.assertIn("ProtocolVersion = 2", source)
-        self.assertIn('BridgeVersion = "0.8.1"', source)
+        self.assertIn('BridgeVersion = "0.9.0"', source)
+        self.assertIn("TimelineProtocolVersion = 1", source)
+        self.assertIn("MaximumTimelineClipsGlobally = 1024", source)
+        self.assertIn("TimelinePublishIntervalSeconds = 1.0f", source)
+        self.assertIn("List<TimelineCandidate> prioritized", source)
+        self.assertIn("if (instanceClipBudget > 0)", source)
+        self.assertIn('":published:" +', source)
+        self.assertIn('"legacy:published:" + clipLimit', source)
+        self.assertIn(
+            "do not invoke the adapter's full catalog",
+            source,
+        )
         self.assertIn("IgnoreCompletedLegacyRequest();", source)
         self.assertIn(
             "Ignored completed protocol-",
@@ -956,6 +1125,7 @@ class BridgeSourceTests(unittest.TestCase):
         self.assertIn('"setPersonClothingResource"', source)
         self.assertIn('"loadScene"', source)
         self.assertIn('"selectAtom"', source)
+        self.assertIn('"controlTimeline"', source)
         self.assertIn('"atom-roster"', source)
         self.assertIn('"atom-select"', source)
         self.assertIn('"atom-add"', source)
@@ -967,6 +1137,12 @@ class BridgeSourceTests(unittest.TestCase):
         self.assertIn('"person-roster"', source)
         self.assertIn('"person-preset-apply"', source)
         self.assertIn('"person-clothing-item-toggle"', source)
+        self.assertIn('"timeline-roster"', source)
+        self.assertIn('"timeline-transport"', source)
+        self.assertIn('"timeline-animation-play"', source)
+        self.assertIn('"timeline-adapter-v1"', source)
+        self.assertIn('"VAM-PIP External State"', source)
+        self.assertIn('"VAM-PIP Execute External Command"', source)
         for capability in (
             "person-preset-appearance",
             "person-preset-animation",

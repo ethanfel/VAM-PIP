@@ -17,7 +17,8 @@ namespace VAMPip
     public class VAMPipBridge : MVRScript
     {
         private const int ProtocolVersion = 2;
-        private const string BridgeVersion = "0.8.1";
+        private const string BridgeVersion = "0.9.0";
+        private const int TimelineProtocolVersion = 1;
 
         private const string PluginDataRoot = "Saves\\PluginData";
         private const string DataRoot = "Saves\\PluginData\\VAMPip";
@@ -25,6 +26,7 @@ namespace VAMPip
         private const string RequestPath = BridgeRoot + "\\request.json";
         private const string StatusPath = BridgeRoot + "\\status.json";
         private const string ScenePath = BridgeRoot + "\\scene.json";
+        private const string TimelinePath = BridgeRoot + "\\timeline.json";
 
         private const int MaximumResourceRefLength = 1000;
         private const int MaximumCuaChoicesPerAtom = 128;
@@ -37,8 +39,16 @@ namespace VAMPip
         private const int MaximumRosterDisplayNameLength = 256;
         private const int MaximumRosterTagLength = 100;
         private const int MaximumRosterTagsPerItem = 32;
+        private const int MaximumTimelineInstances = 32;
+        private const int MaximumTimelineSegments = 64;
+        private const int MaximumTimelineLayers = 128;
+        private const int MaximumTimelineClips = 256;
+        private const int MaximumTimelineClipsGlobally = 1024;
+        private const int MaximumTimelineLabelLength = 256;
+        private const int MaximumTimelineQualifiedLength = 512;
         private const float PollIntervalSeconds = 0.5f;
         private const float ScenePublishIntervalSeconds = 1.0f;
+        private const float TimelinePublishIntervalSeconds = 1.0f;
         private const float MinimumRescanIntervalSeconds = 5.0f;
         private const float MaximumOperationWaitSeconds = 120.0f;
 
@@ -59,6 +69,17 @@ namespace VAMPip
         private const string CommandSelectPerson = "selectPerson";
         private const string CommandSelectAtom = "selectAtom";
         private const string CommandLoadScene = "loadScene";
+        private const string CommandControlTimeline = "controlTimeline";
+        private const string TimelineExternalState =
+            "VAM-PIP External State";
+        private const string TimelineExternalCommand =
+            "VAM-PIP External Command";
+        private const string TimelineExternalResult =
+            "VAM-PIP External Result";
+        private const string TimelineRefreshExternalState =
+            "VAM-PIP Refresh External State";
+        private const string TimelineExecuteExternalCommand =
+            "VAM-PIP Execute External Command";
         private const string StateQueued = "queued";
         private const string StateDeferredLoading = "deferred-loading";
         private const string StateRescanning = "rescanning";
@@ -140,6 +161,13 @@ namespace VAMPip
             public string ClothingRevision;
             public string HairRevision;
             public string HairActionToken;
+            public string TimelineId;
+            public string TimelineRevision;
+            public string TimelineOperation;
+            public string TimelineItemToken;
+            public float TimelineNumberValue;
+            public bool TimelineBoolValue;
+            public bool HasTimelineValue;
         }
 
         private sealed class AtomCreationResult
@@ -216,11 +244,62 @@ namespace VAMPip
             public int PublishedCount;
         }
 
+        private sealed class TimelineItemSnapshot
+        {
+            public string Token;
+            public int AdapterId;
+            public int AdapterSegmentId;
+            public int AdapterLayerId;
+            public string Name;
+            public string RawName;
+            public string Qualified;
+            public float Length;
+            public float Time;
+            public float Speed;
+            public float Weight;
+            public int TargetCount;
+            public bool Loop;
+            public bool Playing;
+            public bool Main;
+            public bool Selected;
+        }
+
+        private sealed class TimelineSnapshot
+        {
+            public Atom Atom;
+            public MVRScript Plugin;
+            public string StorableId;
+            public string TimelineId;
+            public string Revision;
+            public string GenerationKey;
+            public bool Enhanced;
+            public int CatalogRevision;
+            public List<TimelineItemSnapshot> Segments;
+            public List<TimelineItemSnapshot> Layers;
+            public List<TimelineItemSnapshot> Clips;
+        }
+
+        private sealed class TimelineCandidate
+        {
+            public int ScanIndex;
+            public string Key;
+            public Atom Atom;
+            public MVRScript Plugin;
+            public string StorableId;
+            public bool Selected;
+            public bool Playing;
+            public bool AdapterAvailable;
+            public JSONStorableString AdapterState;
+            public JSONStorableAction AdapterRefresh;
+            public JSONClass Result;
+        }
+
         private bool _operational;
         private bool _requestInProgress;
         private bool _skipPendingProcessing;
         private float _nextPollAt;
         private float _nextScenePublishAt;
+        private float _nextTimelinePublishAt;
         private float _nextAllowedRescanAt;
         private string _instanceId = "";
         private string _lastRequestPayload;
@@ -239,6 +318,9 @@ namespace VAMPip
         private readonly Dictionary<string, PersonHairSnapshot>
             _personHairSnapshots =
                 new Dictionary<string, PersonHairSnapshot>();
+        private readonly Dictionary<string, TimelineSnapshot>
+            _timelineSnapshots =
+                new Dictionary<string, TimelineSnapshot>();
 
         public override void Init()
         {
@@ -263,6 +345,7 @@ namespace VAMPip
                 _operational = true;
                 _nextPollAt = Time.realtimeSinceStartup + 0.25f;
                 _nextScenePublishAt = Time.realtimeSinceStartup;
+                _nextTimelinePublishAt = Time.realtimeSinceStartup;
                 PublishStatus(
                     StateOk,
                     _lastCompletedRequestId,
@@ -271,6 +354,7 @@ namespace VAMPip
                     "",
                     "Bridge ready.");
                 PublishSceneStatus();
+                PublishTimelineStatus();
                 SuperController.LogMessage(
                     "[VAM-PIP Bridge] Ready. Watching " + RequestPath + ".");
             }
@@ -295,6 +379,12 @@ namespace VAMPip
             {
                 _nextScenePublishAt = now + ScenePublishIntervalSeconds;
                 PublishSceneStatus();
+            }
+            if (now >= _nextTimelinePublishAt)
+            {
+                _nextTimelinePublishAt =
+                    now + TimelinePublishIntervalSeconds;
+                PublishTimelineStatus();
             }
 
             if (now < _nextPollAt)
@@ -502,6 +592,10 @@ namespace VAMPip
                 parsed.ClothingRevision = "";
                 parsed.HairRevision = "";
                 parsed.HairActionToken = "";
+                parsed.TimelineId = "";
+                parsed.TimelineRevision = "";
+                parsed.TimelineOperation = "";
+                parsed.TimelineItemToken = "";
 
                 if (command == CommandRescan)
                 {
@@ -726,6 +820,46 @@ namespace VAMPip
                         return;
                     }
                 }
+                else if (command == CommandControlTimeline)
+                {
+                    parsed.TimelineId =
+                        ((string)request["timelineId"] ?? "").Trim();
+                    parsed.TimelineRevision =
+                        ((string)request["expectedRevision"] ?? "").Trim();
+                    parsed.TimelineOperation =
+                        ((string)request["operation"] ?? "").Trim();
+                    parsed.RescanRequired = false;
+                    parsed.HasTimelineValue = request.HasKey("value");
+
+                    string itemField =
+                        TimelineItemField(parsed.TimelineOperation);
+                    if (itemField.Length != 0)
+                    {
+                        parsed.TimelineItemToken =
+                            ((string)request[itemField] ?? "").Trim();
+                    }
+                    if (parsed.TimelineOperation == "setLocked")
+                    {
+                        parsed.TimelineBoolValue =
+                            request["value"].AsBool;
+                    }
+                    else if (
+                        parsed.TimelineOperation == "setTime" ||
+                        parsed.TimelineOperation == "setSpeed" ||
+                        parsed.TimelineOperation == "setWeight")
+                    {
+                        parsed.TimelineNumberValue =
+                            request["value"].AsFloat;
+                    }
+
+                    string validationError =
+                        ValidateTimelineRequest(parsed);
+                    if (validationError.Length != 0)
+                    {
+                        RejectRequest(requestId, validationError);
+                        return;
+                    }
+                }
                 else
                 {
                     RejectRequest(
@@ -737,7 +871,7 @@ namespace VAMPip
                         "'selectCustomUnityAssetChoice', " +
                         "'setPersonClothingResource', 'setPersonHairItem', " +
                         "'selectPerson', " +
-                        "'selectAtom', and 'loadScene'.");
+                        "'selectAtom', 'loadScene', and 'controlTimeline'.");
                     return;
                 }
 
@@ -1012,6 +1146,94 @@ namespace VAMPip
                 }
             }
             return true;
+        }
+
+        private static string TimelineItemField(string operation)
+        {
+            if (operation == "selectClip" || operation == "playClip")
+            {
+                return "clipId";
+            }
+            if (operation == "selectSegment")
+            {
+                return "segmentId";
+            }
+            if (operation == "selectLayer")
+            {
+                return "layerId";
+            }
+            return "";
+        }
+
+        private static bool IsTimelineOperation(string operation)
+        {
+            return
+                operation == "play" ||
+                operation == "pause" ||
+                operation == "stop" ||
+                operation == "reset" ||
+                operation == "nextFrame" ||
+                operation == "previousFrame" ||
+                operation == "selectClip" ||
+                operation == "playClip" ||
+                operation == "selectSegment" ||
+                operation == "selectLayer" ||
+                operation == "setTime" ||
+                operation == "setSpeed" ||
+                operation == "setWeight" ||
+                operation == "setLocked";
+        }
+
+        private static string ValidateTimelineRequest(
+            BridgeRequest request)
+        {
+            if (!IsHexToken(request.TimelineId))
+            {
+                return "timelineId must contain exactly 32 hexadecimal characters.";
+            }
+            if (!IsHexToken(request.TimelineRevision))
+            {
+                return "expectedRevision must contain exactly 32 hexadecimal characters.";
+            }
+            if (!IsTimelineOperation(request.TimelineOperation))
+            {
+                return "operation is not an allowlisted Timeline control.";
+            }
+            if (TimelineItemField(request.TimelineOperation).Length != 0 &&
+                !IsHexToken(request.TimelineItemToken))
+            {
+                return "Timeline item ID must contain exactly 32 hexadecimal characters.";
+            }
+            if ((request.TimelineOperation == "setTime" ||
+                 request.TimelineOperation == "setSpeed" ||
+                 request.TimelineOperation == "setWeight" ||
+                 request.TimelineOperation == "setLocked") &&
+                !request.HasTimelineValue)
+            {
+                return "Timeline setter operation requires value.";
+            }
+            float value = request.TimelineNumberValue;
+            if (request.TimelineOperation == "setTime" &&
+                (!IsFinite(value) || value < 0f || value > 86400f))
+            {
+                return "setTime value must be between 0 and 86400.";
+            }
+            if (request.TimelineOperation == "setSpeed" &&
+                (!IsFinite(value) || value < -1f || value > 5f))
+            {
+                return "setSpeed value must be between -1 and 5.";
+            }
+            if (request.TimelineOperation == "setWeight" &&
+                (!IsFinite(value) || value < 0f || value > 1f))
+            {
+                return "setWeight value must be between 0 and 1.";
+            }
+            return "";
+        }
+
+        private static bool IsFinite(float value)
+        {
+            return !float.IsNaN(value) && !float.IsInfinity(value);
         }
 
         private static string ValidateTargetUid(string targetUid)
@@ -1387,6 +1609,10 @@ namespace VAMPip
             else if (request.Command == CommandSetPersonHairItem)
             {
                 ExecuteSetPersonHairItem(request);
+            }
+            else if (request.Command == CommandControlTimeline)
+            {
+                ExecuteTimelineControl(request);
             }
             else
             {
@@ -3252,6 +3478,386 @@ namespace VAMPip
                 "Custom Unity Asset choice loaded.");
         }
 
+        private TimelineSnapshot FindTimelineSnapshot(string timelineId)
+        {
+            foreach (
+                KeyValuePair<string, TimelineSnapshot> entry
+                in _timelineSnapshots)
+            {
+                TimelineSnapshot snapshot = entry.Value;
+                if (snapshot != null &&
+                    string.Equals(
+                        snapshot.TimelineId,
+                        timelineId,
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    return snapshot;
+                }
+            }
+            return null;
+        }
+
+        private static TimelineItemSnapshot FindTimelineItem(
+            List<TimelineItemSnapshot> items,
+            string token)
+        {
+            if (items == null)
+            {
+                return null;
+            }
+            int index;
+            for (index = 0; index < items.Count; index++)
+            {
+                TimelineItemSnapshot item = items[index];
+                if (item != null &&
+                    string.Equals(
+                        item.Token,
+                        token,
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    return item;
+                }
+            }
+            return null;
+        }
+
+        private void ExecuteTimelineControl(BridgeRequest request)
+        {
+            string startedAt = UtcNow();
+            PublishStatus(
+                StateApplying,
+                request.RequestId,
+                startedAt,
+                "",
+                "",
+                "Applying an allowlisted Timeline control.");
+            try
+            {
+                TimelineSnapshot snapshot =
+                    FindTimelineSnapshot(request.TimelineId);
+                if (snapshot == null ||
+                    snapshot.Atom == null ||
+                    snapshot.Plugin == null)
+                {
+                    throw new Exception(
+                        "Timeline instance is no longer available.");
+                }
+                if (!string.Equals(
+                        snapshot.Revision,
+                        request.TimelineRevision,
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    throw new Exception(
+                        "Timeline catalog changed; refresh before controlling it.");
+                }
+                JSONStorable live =
+                    snapshot.Atom.GetStorableByID(snapshot.StorableId);
+                if (!object.ReferenceEquals(live, snapshot.Plugin))
+                {
+                    throw new Exception(
+                        "Timeline plugin instance changed; refresh the roster.");
+                }
+
+                if (snapshot.Enhanced)
+                {
+                    ExecuteEnhancedTimelineControl(snapshot, request);
+                }
+                else
+                {
+                    ExecuteBasicTimelineControl(snapshot, request);
+                }
+
+                CompleteRequest(request.RequestId);
+                PublishTimelineStatus();
+                PublishStatus(
+                    StateOk,
+                    request.RequestId,
+                    startedAt,
+                    UtcNow(),
+                    snapshot.Enhanced
+                    ? "timeline-adapter-v1"
+                    : "timeline-storables",
+                    "Timeline control applied.");
+            }
+            catch (Exception exception)
+            {
+                FailRequest(
+                    request,
+                    startedAt,
+                    "Could not control Timeline: " +
+                    DescribeException(exception));
+            }
+        }
+
+        private static void ExecuteEnhancedTimelineControl(
+            TimelineSnapshot snapshot,
+            BridgeRequest request)
+        {
+            JSONStorableString commandParam =
+                snapshot.Plugin.GetStringJSONParam(
+                    TimelineExternalCommand);
+            JSONStorableString resultParam =
+                snapshot.Plugin.GetStringJSONParam(
+                    TimelineExternalResult);
+            JSONStorableAction execute =
+                snapshot.Plugin.GetAction(
+                    TimelineExecuteExternalCommand);
+            if (commandParam == null ||
+                resultParam == null ||
+                execute == null ||
+                execute.actionCallback == null)
+            {
+                throw new Exception(
+                    "Timeline external adapter controls are unavailable.");
+            }
+
+            JSONClass command = new JSONClass();
+            command["protocol"].AsInt = TimelineProtocolVersion;
+            command["requestId"] = request.RequestId;
+            command["expectedCatalogRevision"].AsInt =
+                snapshot.CatalogRevision;
+            command["op"] = request.TimelineOperation;
+
+            TimelineItemSnapshot item = null;
+            if (request.TimelineOperation == "selectClip" ||
+                request.TimelineOperation == "playClip")
+            {
+                item = FindTimelineItem(
+                    snapshot.Clips,
+                    request.TimelineItemToken);
+                if (item == null)
+                {
+                    throw new Exception(
+                        "Clip ID was not published for this revision.");
+                }
+                command["clipId"].AsInt = item.AdapterId;
+            }
+            else if (request.TimelineOperation == "selectSegment")
+            {
+                item = FindTimelineItem(
+                    snapshot.Segments,
+                    request.TimelineItemToken);
+                if (item == null)
+                {
+                    throw new Exception(
+                        "Segment ID was not published for this revision.");
+                }
+                command["segmentId"].AsInt = item.AdapterId;
+            }
+            else if (request.TimelineOperation == "selectLayer")
+            {
+                item = FindTimelineItem(
+                    snapshot.Layers,
+                    request.TimelineItemToken);
+                if (item == null)
+                {
+                    throw new Exception(
+                        "Layer ID was not published for this revision.");
+                }
+                command["layerId"].AsInt = item.AdapterId;
+            }
+            else if (request.TimelineOperation == "setLocked")
+            {
+                command["value"].AsBool =
+                    request.TimelineBoolValue;
+            }
+            else if (
+                request.TimelineOperation == "setTime" ||
+                request.TimelineOperation == "setSpeed" ||
+                request.TimelineOperation == "setWeight")
+            {
+                command["value"].AsFloat =
+                    request.TimelineNumberValue;
+            }
+
+            commandParam.val = command.ToString();
+            execute.actionCallback();
+
+            JSONClass result =
+                JSON.Parse(resultParam.val ?? "").AsObject;
+            if (result == null ||
+                result["protocol"].AsInt != TimelineProtocolVersion ||
+                !string.Equals(
+                    ((string)result["requestId"] ?? "").Trim(),
+                    request.RequestId,
+                    StringComparison.Ordinal))
+            {
+                throw new Exception(
+                    "Timeline adapter returned no matching result.");
+            }
+            if (!result["ok"].AsBool)
+            {
+                string code = SanitizeTimelineText(
+                    (string)result["code"],
+                    64);
+                string message = SanitizeTimelineText(
+                    (string)result["message"],
+                    500);
+                throw new Exception(
+                    "Timeline adapter rejected the command" +
+                    (code.Length == 0 ? "" : " (" + code + ")") +
+                    (message.Length == 0 ? "." : ": " + message));
+            }
+        }
+
+        private static void InvokeTimelineAction(
+            MVRScript plugin,
+            string actionName)
+        {
+            if (actionName != "Play If Not Playing" &&
+                actionName != "Stop If Playing" &&
+                actionName != "Stop And Reset" &&
+                actionName != "Next Frame" &&
+                actionName != "Previous Frame" &&
+                actionName != "Play Current Clip")
+            {
+                throw new Exception(
+                    "Timeline action is not allowlisted.");
+            }
+            JSONStorableAction action = plugin.GetAction(actionName);
+            if (action == null || action.actionCallback == null)
+            {
+                throw new Exception(
+                    "Timeline does not provide the requested control.");
+            }
+            action.actionCallback();
+        }
+
+        private static void ExecuteBasicTimelineControl(
+            TimelineSnapshot snapshot,
+            BridgeRequest request)
+        {
+            MVRScript plugin = snapshot.Plugin;
+            string operation = request.TimelineOperation;
+            if (operation == "play")
+            {
+                JSONStorableBool paused =
+                    plugin.GetBoolJSONParam("Paused");
+                if (paused != null)
+                {
+                    paused.val = false;
+                }
+                InvokeTimelineAction(plugin, "Play If Not Playing");
+                return;
+            }
+            if (operation == "pause")
+            {
+                JSONStorableBool paused =
+                    plugin.GetBoolJSONParam("Paused");
+                if (paused == null)
+                {
+                    throw new Exception(
+                        "Timeline pause control is unavailable.");
+                }
+                paused.val = true;
+                return;
+            }
+            if (operation == "stop")
+            {
+                InvokeTimelineAction(plugin, "Stop If Playing");
+                return;
+            }
+            if (operation == "reset")
+            {
+                InvokeTimelineAction(plugin, "Stop And Reset");
+                return;
+            }
+            if (operation == "nextFrame")
+            {
+                InvokeTimelineAction(plugin, "Next Frame");
+                return;
+            }
+            if (operation == "previousFrame")
+            {
+                InvokeTimelineAction(plugin, "Previous Frame");
+                return;
+            }
+            if (operation == "selectClip" || operation == "playClip")
+            {
+                TimelineItemSnapshot item =
+                    FindTimelineItem(
+                        snapshot.Clips,
+                        request.TimelineItemToken);
+                JSONStorableStringChooser chooser =
+                    plugin.GetStringChooserJSONParam("Animation");
+                if (item == null ||
+                    chooser == null ||
+                    chooser.choices == null ||
+                    item.AdapterId < 0 ||
+                    item.AdapterId >= chooser.choices.Count ||
+                    !string.Equals(
+                        chooser.choices[item.AdapterId],
+                        item.RawName,
+                        StringComparison.Ordinal))
+                {
+                    throw new Exception(
+                        "Timeline clip list changed; refresh the roster.");
+                }
+                chooser.val = item.RawName;
+                if (operation == "playClip")
+                {
+                    InvokeTimelineAction(plugin, "Play Current Clip");
+                }
+                return;
+            }
+            if (operation == "selectSegment" ||
+                operation == "selectLayer")
+            {
+                throw new Exception(
+                    "This Timeline version needs the VAM-PIP adapter " +
+                    "for segment and layer selection.");
+            }
+            if (operation == "setTime")
+            {
+                JSONStorableFloat parameter =
+                    plugin.GetFloatJSONParam("Set Time");
+                if (parameter == null)
+                {
+                    throw new Exception(
+                        "Timeline time control is unavailable.");
+                }
+                parameter.val = request.TimelineNumberValue;
+                return;
+            }
+            if (operation == "setSpeed")
+            {
+                JSONStorableFloat parameter =
+                    plugin.GetFloatJSONParam("Speed");
+                if (parameter == null)
+                {
+                    throw new Exception(
+                        "Timeline speed control is unavailable.");
+                }
+                parameter.val = request.TimelineNumberValue;
+                return;
+            }
+            if (operation == "setWeight")
+            {
+                JSONStorableFloat parameter =
+                    plugin.GetFloatJSONParam("Weight");
+                if (parameter == null)
+                {
+                    throw new Exception(
+                        "Timeline weight control is unavailable.");
+                }
+                parameter.val = request.TimelineNumberValue;
+                return;
+            }
+            if (operation == "setLocked")
+            {
+                JSONStorableBool parameter =
+                    plugin.GetBoolJSONParam("Locked");
+                if (parameter == null)
+                {
+                    throw new Exception(
+                        "Timeline lock control is unavailable.");
+                }
+                parameter.val = request.TimelineBoolValue;
+                return;
+            }
+            throw new Exception("Unsupported Timeline control.");
+        }
+
         private void ExecuteSelectAtom(
             BridgeRequest request,
             bool requirePerson)
@@ -4133,6 +4739,1225 @@ namespace VAMPip
             return cua;
         }
 
+        private static string SanitizeTimelineText(
+            string value,
+            int maximumLength)
+        {
+            if (value == null)
+            {
+                return "";
+            }
+            char[] characters = value.ToCharArray();
+            int index;
+            for (index = 0; index < characters.Length; index++)
+            {
+                if (characters[index] < ' ' ||
+                    characters[index] == '\u007f')
+                {
+                    characters[index] = ' ';
+                }
+            }
+            string result = new string(characters).Trim();
+            if (result.Length > maximumLength)
+            {
+                result = result.Substring(0, maximumLength);
+            }
+            return result;
+        }
+
+        private static float BoundedTimelineFloat(
+            float value,
+            float minimum,
+            float maximum,
+            float fallback)
+        {
+            if (!IsFinite(value))
+            {
+                return fallback;
+            }
+            return Mathf.Clamp(value, minimum, maximum);
+        }
+
+        private static TimelineItemSnapshot FindTimelineItemByAdapterId(
+            List<TimelineItemSnapshot> items,
+            int adapterId)
+        {
+            if (items == null)
+            {
+                return null;
+            }
+            int index;
+            for (index = 0; index < items.Count; index++)
+            {
+                TimelineItemSnapshot item = items[index];
+                if (item != null && item.AdapterId == adapterId)
+                {
+                    return item;
+                }
+            }
+            return null;
+        }
+
+        private static string TimelineTokenForAdapterId(
+            List<TimelineItemSnapshot> items,
+            int adapterId)
+        {
+            TimelineItemSnapshot item =
+                FindTimelineItemByAdapterId(items, adapterId);
+            return item == null ? "" : item.Token;
+        }
+
+        private static string ReuseTimelineItemToken(
+            List<TimelineItemSnapshot> previousItems,
+            int adapterId)
+        {
+            TimelineItemSnapshot previous =
+                FindTimelineItemByAdapterId(previousItems, adapterId);
+            return previous == null
+                ? Guid.NewGuid().ToString("N")
+                : previous.Token;
+        }
+
+        private static JSONArray TimelineControls(bool enhanced)
+        {
+            JSONArray controls = new JSONArray();
+            controls.Add("play");
+            controls.Add("pause");
+            controls.Add("stop");
+            controls.Add("reset");
+            controls.Add("nextFrame");
+            controls.Add("previousFrame");
+            controls.Add("selectClip");
+            controls.Add("playClip");
+            if (enhanced)
+            {
+                controls.Add("selectSegment");
+                controls.Add("selectLayer");
+            }
+            controls.Add("setTime");
+            controls.Add("setSpeed");
+            controls.Add("setWeight");
+            controls.Add("setLocked");
+            return controls;
+        }
+
+        private static JSONArray BasicTimelineControls(
+            MVRScript plugin,
+            bool hasPublishedClips)
+        {
+            JSONArray controls = new JSONArray();
+            if (plugin.GetAction("Play If Not Playing") != null)
+                controls.Add("play");
+            if (plugin.GetBoolJSONParam("Paused") != null)
+                controls.Add("pause");
+            if (plugin.GetAction("Stop If Playing") != null)
+                controls.Add("stop");
+            if (plugin.GetAction("Stop And Reset") != null)
+                controls.Add("reset");
+            if (plugin.GetAction("Next Frame") != null)
+                controls.Add("nextFrame");
+            if (plugin.GetAction("Previous Frame") != null)
+                controls.Add("previousFrame");
+            if (hasPublishedClips)
+            {
+                controls.Add("selectClip");
+                if (plugin.GetAction("Play Current Clip") != null)
+                    controls.Add("playClip");
+            }
+            if (plugin.GetFloatJSONParam("Set Time") != null)
+                controls.Add("setTime");
+            if (plugin.GetFloatJSONParam("Speed") != null)
+                controls.Add("setSpeed");
+            if (plugin.GetFloatJSONParam("Weight") != null)
+                controls.Add("setWeight");
+            if (plugin.GetBoolJSONParam("Locked") != null)
+                controls.Add("setLocked");
+            return controls;
+        }
+
+        private TimelineSnapshot CreateTimelineSnapshot(
+            string key,
+            Atom atom,
+            MVRScript plugin,
+            string storableId,
+            string generationKey,
+            bool enhanced,
+            int catalogRevision,
+            out TimelineSnapshot previousForTokens)
+        {
+            TimelineSnapshot previous = null;
+            _timelineSnapshots.TryGetValue(key, out previous);
+            bool sameIdentity =
+                previous != null &&
+                object.ReferenceEquals(previous.Atom, atom) &&
+                object.ReferenceEquals(previous.Plugin, plugin);
+            bool sameGeneration =
+                sameIdentity &&
+                string.Equals(
+                    previous.GenerationKey,
+                    generationKey,
+                    StringComparison.Ordinal);
+            previousForTokens = sameGeneration ? previous : null;
+
+            TimelineSnapshot snapshot = new TimelineSnapshot();
+            snapshot.Atom = atom;
+            snapshot.Plugin = plugin;
+            snapshot.StorableId = storableId;
+            snapshot.TimelineId =
+                sameIdentity
+                ? previous.TimelineId
+                : Guid.NewGuid().ToString("N");
+            snapshot.Revision =
+                sameGeneration
+                ? previous.Revision
+                : Guid.NewGuid().ToString("N");
+            snapshot.GenerationKey = generationKey;
+            snapshot.Enhanced = enhanced;
+            snapshot.CatalogRevision = catalogRevision;
+            snapshot.Segments = new List<TimelineItemSnapshot>();
+            snapshot.Layers = new List<TimelineItemSnapshot>();
+            snapshot.Clips = new List<TimelineItemSnapshot>();
+            _timelineSnapshots[key] = snapshot;
+            return snapshot;
+        }
+
+        private static JSONClass TimelineItemJson(
+            TimelineItemSnapshot item,
+            string segmentToken,
+            string layerToken,
+            bool includeClipDetails)
+        {
+            JSONClass result = new JSONClass();
+            result["id"] = item.Token;
+            result["name"] = item.Name;
+            result["selected"].AsBool = item.Selected;
+            if (segmentToken.Length != 0)
+            {
+                result["segmentId"] = segmentToken;
+            }
+            if (includeClipDetails)
+            {
+                if (layerToken.Length != 0)
+                {
+                    result["layerId"] = layerToken;
+                }
+                result["qualified"] = item.Qualified;
+                result["length"].AsFloat = item.Length;
+                result["loop"].AsBool = item.Loop;
+                result["playing"].AsBool = item.Playing;
+                result["main"].AsBool = item.Main;
+                result["time"].AsFloat = item.Time;
+                result["speed"].AsFloat = item.Speed;
+                result["weight"].AsFloat = item.Weight;
+                result["targetCount"].AsInt = item.TargetCount;
+            }
+            return result;
+        }
+
+        private static int BoundedTimelineCount(int value)
+        {
+            if (value < 0)
+            {
+                return 0;
+            }
+            return Math.Min(value, 1000000);
+        }
+
+        private static int TimelineStateCount(
+            JSONClass state,
+            string key,
+            int fallback)
+        {
+            JSONClass counts =
+                state == null ? null : state["counts"].AsObject;
+            if (counts == null || !counts.HasKey(key))
+            {
+                return BoundedTimelineCount(fallback);
+            }
+            return BoundedTimelineCount(counts[key].AsInt);
+        }
+
+        private static int TimelineStateLimit(
+            JSONClass state,
+            string key,
+            int fallback)
+        {
+            JSONClass limits =
+                state == null ? null : state["limits"].AsObject;
+            int value =
+                limits == null || !limits.HasKey(key)
+                ? fallback
+                : BoundedTimelineCount(limits[key].AsInt);
+            if (value <= 0)
+            {
+                value = fallback;
+            }
+            return Math.Min(value, fallback);
+        }
+
+        private static JSONClass TimelineLimitsJson(
+            JSONClass state,
+            int allocatedClips)
+        {
+            JSONClass limits = new JSONClass();
+            limits["maxSegments"].AsInt =
+                TimelineStateLimit(
+                    state,
+                    "maxSegments",
+                    MaximumTimelineSegments);
+            limits["maxLayers"].AsInt =
+                TimelineStateLimit(
+                    state,
+                    "maxLayers",
+                    MaximumTimelineLayers);
+            limits["maxClips"].AsInt =
+                TimelineStateLimit(
+                    state,
+                    "maxClips",
+                    MaximumTimelineClips);
+            limits["maxClipsGlobally"].AsInt =
+                MaximumTimelineClipsGlobally;
+            limits["allocatedClips"].AsInt =
+                Math.Max(
+                    0,
+                    Math.Min(
+                        allocatedClips,
+                        MaximumTimelineClips));
+            return limits;
+        }
+
+        private static string SanitizeTimelineErrorCode(string value)
+        {
+            value = (value ?? "").Trim().ToLowerInvariant();
+            string result = "";
+            int index;
+            for (index = 0;
+                 index < value.Length && result.Length < 64;
+                 index++)
+            {
+                char character = value[index];
+                if ((character >= 'a' && character <= 'z') ||
+                    (character >= '0' && character <= '9') ||
+                    character == '-')
+                {
+                    result += character;
+                }
+            }
+            return result;
+        }
+
+        private static JSONClass TimelineAdapterErrorJson(
+            JSONClass state)
+        {
+            JSONClass source =
+                state == null ? null : state["error"].AsObject;
+            if (source == null)
+            {
+                return null;
+            }
+            string code =
+                SanitizeTimelineErrorCode((string)source["code"]);
+            string message =
+                SanitizeTimelineText(
+                    (string)source["message"],
+                    500);
+            if (code.Length == 0 && message.Length == 0)
+            {
+                return null;
+            }
+            JSONClass error = new JSONClass();
+            error["code"] =
+                code.Length == 0 ? "adapter-error" : code;
+            error["message"] =
+                message.Length == 0
+                ? "Timeline adapter reported an error."
+                : message;
+            return error;
+        }
+
+        private static JSONClass TimelineAdapterErrorJson(
+            string code,
+            string message)
+        {
+            JSONClass state = new JSONClass();
+            JSONClass error = new JSONClass();
+            error["code"] = code;
+            error["message"] = message;
+            state["error"] = error;
+            return TimelineAdapterErrorJson(state);
+        }
+
+        private JSONClass BuildEnhancedTimelineStatus(
+            string key,
+            Atom atom,
+            MVRScript plugin,
+            string storableId,
+            JSONClass state,
+            bool selected,
+            int clipBudget)
+        {
+            int catalogRevision =
+                Math.Max(0, state["catalogRevision"].AsInt);
+            JSONArray rawSegments = state["segments"].AsArray;
+            JSONArray rawLayers = state["layers"].AsArray;
+            JSONArray rawClips = state["clips"].AsArray;
+            int clipLimit =
+                rawClips == null
+                ? 0
+                : Math.Min(
+                    rawClips.Count,
+                    Math.Min(
+                        MaximumTimelineClips,
+                        Math.Max(0, clipBudget)));
+            string generationKey =
+                "adapter:" +
+                catalogRevision +
+                ":" +
+                (rawSegments == null ? 0 : rawSegments.Count) +
+                ":" +
+                (rawLayers == null ? 0 : rawLayers.Count) +
+                ":" +
+                (rawClips == null ? 0 : rawClips.Count) +
+                ":published:" +
+                clipLimit;
+            TimelineSnapshot previous;
+            TimelineSnapshot snapshot =
+                CreateTimelineSnapshot(
+                    key,
+                    atom,
+                    plugin,
+                    storableId,
+                    generationKey,
+                    true,
+                    catalogRevision,
+                    out previous);
+
+            int index;
+            int segmentLimit =
+                rawSegments == null
+                ? 0
+                : Math.Min(rawSegments.Count, MaximumTimelineSegments);
+            for (index = 0; index < segmentLimit; index++)
+            {
+                JSONClass source = rawSegments[index].AsObject;
+                if (source == null)
+                {
+                    continue;
+                }
+                if (!source.HasKey("id"))
+                {
+                    continue;
+                }
+                int adapterId = source["id"].AsInt;
+                if (adapterId < 0 ||
+                    FindTimelineItemByAdapterId(
+                        snapshot.Segments,
+                        adapterId) != null)
+                {
+                    continue;
+                }
+                TimelineItemSnapshot item =
+                    new TimelineItemSnapshot();
+                item.Token = ReuseTimelineItemToken(
+                    previous == null ? null : previous.Segments,
+                    adapterId);
+                item.AdapterId = adapterId;
+                item.AdapterSegmentId = adapterId;
+                item.AdapterLayerId = -1;
+                item.Name = SanitizeTimelineText(
+                    (string)source["name"],
+                    MaximumTimelineLabelLength);
+                item.RawName = item.Name;
+                snapshot.Segments.Add(item);
+            }
+
+            int layerLimit =
+                rawLayers == null
+                ? 0
+                : Math.Min(rawLayers.Count, MaximumTimelineLayers);
+            for (index = 0; index < layerLimit; index++)
+            {
+                JSONClass source = rawLayers[index].AsObject;
+                if (source == null)
+                {
+                    continue;
+                }
+                if (!source.HasKey("id") ||
+                    !source.HasKey("segmentId"))
+                {
+                    continue;
+                }
+                int adapterId = source["id"].AsInt;
+                int segmentId = source["segmentId"].AsInt;
+                if (adapterId < 0 ||
+                    FindTimelineItemByAdapterId(
+                        snapshot.Layers,
+                        adapterId) != null ||
+                    FindTimelineItemByAdapterId(
+                        snapshot.Segments,
+                        segmentId) == null)
+                {
+                    continue;
+                }
+                TimelineItemSnapshot item =
+                    new TimelineItemSnapshot();
+                item.Token = ReuseTimelineItemToken(
+                    previous == null ? null : previous.Layers,
+                    adapterId);
+                item.AdapterId = adapterId;
+                item.AdapterSegmentId = segmentId;
+                item.AdapterLayerId = adapterId;
+                item.Name = SanitizeTimelineText(
+                    (string)source["name"],
+                    MaximumTimelineLabelLength);
+                item.RawName = item.Name;
+                snapshot.Layers.Add(item);
+            }
+
+            for (index = 0; index < clipLimit; index++)
+            {
+                JSONClass source = rawClips[index].AsObject;
+                if (source == null)
+                {
+                    continue;
+                }
+                if (!source.HasKey("id") ||
+                    !source.HasKey("segmentId") ||
+                    !source.HasKey("layerId"))
+                {
+                    continue;
+                }
+                int adapterId = source["id"].AsInt;
+                int segmentId = source["segmentId"].AsInt;
+                int layerId = source["layerId"].AsInt;
+                if (adapterId < 0 ||
+                    FindTimelineItemByAdapterId(
+                        snapshot.Clips,
+                        adapterId) != null ||
+                    FindTimelineItemByAdapterId(
+                        snapshot.Segments,
+                        segmentId) == null ||
+                    FindTimelineItemByAdapterId(
+                        snapshot.Layers,
+                        layerId) == null)
+                {
+                    continue;
+                }
+                TimelineItemSnapshot item =
+                    new TimelineItemSnapshot();
+                item.Token = ReuseTimelineItemToken(
+                    previous == null ? null : previous.Clips,
+                    adapterId);
+                item.AdapterId = adapterId;
+                item.AdapterSegmentId = segmentId;
+                item.AdapterLayerId = layerId;
+                item.Name = SanitizeTimelineText(
+                    (string)source["name"],
+                    MaximumTimelineLabelLength);
+                item.RawName = item.Name;
+                item.Qualified = SanitizeTimelineText(
+                    (string)source["qualified"],
+                    MaximumTimelineQualifiedLength);
+                item.Length = BoundedTimelineFloat(
+                    source["length"].AsFloat,
+                    0f,
+                    86400f,
+                    0f);
+                item.Time = BoundedTimelineFloat(
+                    source["time"].AsFloat,
+                    0f,
+                    86400f,
+                    0f);
+                item.Speed = BoundedTimelineFloat(
+                    source["speed"].AsFloat,
+                    -1f,
+                    5f,
+                    1f);
+                item.Weight = BoundedTimelineFloat(
+                    source["weight"].AsFloat,
+                    0f,
+                    1f,
+                    1f);
+                item.TargetCount =
+                    BoundedTimelineCount(
+                        source["targetCount"].AsInt);
+                item.Loop = source["loop"].AsBool;
+                item.Playing = source["playing"].AsBool;
+                item.Main = source["main"].AsBool;
+                item.Selected = source["selected"].AsBool;
+                snapshot.Clips.Add(item);
+            }
+
+            JSONClass currentSource = state["current"].AsObject;
+            int currentClipId =
+                currentSource == null
+                ? -1
+                : currentSource["clipId"].AsInt;
+            int currentSegmentId =
+                currentSource == null
+                ? -1
+                : currentSource["segmentId"].AsInt;
+            int currentLayerId =
+                currentSource == null
+                ? -1
+                : currentSource["layerId"].AsInt;
+            TimelineItemSnapshot currentClip =
+                FindTimelineItemByAdapterId(
+                    snapshot.Clips,
+                    currentClipId);
+            TimelineItemSnapshot currentSegment =
+                FindTimelineItemByAdapterId(
+                    snapshot.Segments,
+                    currentSegmentId);
+            TimelineItemSnapshot currentLayer =
+                FindTimelineItemByAdapterId(
+                    snapshot.Layers,
+                    currentLayerId);
+            if (currentClip != null)
+            {
+                currentClip.Selected = true;
+            }
+            if (currentSegment != null)
+            {
+                currentSegment.Selected = true;
+            }
+            if (currentLayer != null)
+            {
+                currentLayer.Selected = true;
+            }
+
+            JSONClass result = new JSONClass();
+            result["id"] = snapshot.TimelineId;
+            result["revision"] = snapshot.Revision;
+            result["atomUid"] =
+                SanitizeTimelineText(atom.uid, 200);
+            string customLabel = "";
+            if (plugin.pluginLabelJSON != null)
+            {
+                customLabel = SanitizeTimelineText(
+                    plugin.pluginLabelJSON.val,
+                    MaximumTimelineLabelLength);
+            }
+            result["label"] =
+                customLabel.Length == 0
+                ? SanitizeTimelineText(
+                    atom.name,
+                    MaximumTimelineLabelLength)
+                : SanitizeTimelineText(
+                    atom.name + ": " + customLabel,
+                    MaximumTimelineLabelLength);
+            result["enhanced"].AsBool = true;
+            result["adapterVersion"] = SanitizeTimelineText(
+                (string)state["adapterVersion"],
+                64);
+            JSONClass adapterError =
+                TimelineAdapterErrorJson(state);
+            result["ready"].AsBool =
+                state["ready"].AsBool && adapterError == null;
+            result["selected"].AsBool = selected;
+            result["stateSequence"].AsInt =
+                BoundedTimelineCount(
+                    state["stateSequence"].AsInt);
+
+            JSONClass transportSource =
+                state["transport"].AsObject;
+            JSONClass transport = new JSONClass();
+            if (transportSource != null)
+            {
+                transport["playing"].AsBool =
+                    transportSource["playing"].AsBool;
+                transport["paused"].AsBool =
+                    transportSource["paused"].AsBool;
+                transport["time"].AsFloat =
+                    BoundedTimelineFloat(
+                        transportSource["time"].AsFloat,
+                        0f,
+                        86400f,
+                        0f);
+                transport["clipTime"].AsFloat =
+                    BoundedTimelineFloat(
+                        transportSource["clipTime"].AsFloat,
+                        0f,
+                        86400f,
+                        0f);
+                transport["speed"].AsFloat =
+                    BoundedTimelineFloat(
+                        transportSource["speed"].AsFloat,
+                        -1f,
+                        5f,
+                        1f);
+                transport["weight"].AsFloat =
+                    BoundedTimelineFloat(
+                        transportSource["weight"].AsFloat,
+                        0f,
+                        1f,
+                        1f);
+                transport["locked"].AsBool =
+                    transportSource["locked"].AsBool;
+            }
+            JSONStorableFloat legacyScrubber =
+                plugin.GetFloatJSONParam("Scrubber");
+            transport["duration"].AsFloat =
+                currentClip != null
+                ? currentClip.Length
+                : legacyScrubber == null
+                    ? 0f
+                    : BoundedTimelineFloat(
+                        legacyScrubber.max,
+                        0f,
+                        86400f,
+                        0f);
+            result["transport"] = transport;
+
+            JSONClass current = new JSONClass();
+            current["clipId"] =
+                currentClip == null ? "" : currentClip.Token;
+            current["segmentId"] =
+                currentSegment == null ? "" : currentSegment.Token;
+            current["layerId"] =
+                currentLayer == null ? "" : currentLayer.Token;
+            current["qualified"] = SanitizeTimelineText(
+                currentSource == null
+                ? ""
+                : (string)currentSource["qualified"],
+                MaximumTimelineQualifiedLength);
+            current["name"] = SanitizeTimelineText(
+                currentSource == null
+                ? ""
+                : (string)currentSource["name"],
+                MaximumTimelineLabelLength);
+            current["segment"] = SanitizeTimelineText(
+                currentSource == null
+                ? ""
+                : (string)currentSource["segment"],
+                MaximumTimelineLabelLength);
+            current["layer"] = SanitizeTimelineText(
+                currentSource == null
+                ? ""
+                : (string)currentSource["layer"],
+                MaximumTimelineLabelLength);
+            result["current"] = current;
+
+            JSONArray segments = new JSONArray();
+            for (index = 0; index < snapshot.Segments.Count; index++)
+            {
+                segments.Add(
+                    TimelineItemJson(
+                        snapshot.Segments[index],
+                        "",
+                        "",
+                        false));
+            }
+            JSONArray layers = new JSONArray();
+            for (index = 0; index < snapshot.Layers.Count; index++)
+            {
+                TimelineItemSnapshot item = snapshot.Layers[index];
+                layers.Add(
+                    TimelineItemJson(
+                        item,
+                        TimelineTokenForAdapterId(
+                            snapshot.Segments,
+                            item.AdapterSegmentId),
+                        "",
+                        false));
+            }
+            JSONArray clips = new JSONArray();
+            for (index = 0; index < snapshot.Clips.Count; index++)
+            {
+                TimelineItemSnapshot item = snapshot.Clips[index];
+                clips.Add(
+                    TimelineItemJson(
+                        item,
+                        TimelineTokenForAdapterId(
+                            snapshot.Segments,
+                            item.AdapterSegmentId),
+                        TimelineTokenForAdapterId(
+                            snapshot.Layers,
+                            item.AdapterLayerId),
+                        true));
+            }
+            result["segments"] = segments;
+            result["layers"] = layers;
+            result["clips"] = clips;
+
+            JSONClass countsSource = state["counts"].AsObject;
+            JSONClass counts = new JSONClass();
+            counts["segments"].AsInt =
+                countsSource == null
+                ? snapshot.Segments.Count
+                : BoundedTimelineCount(
+                    countsSource["segments"].AsInt);
+            counts["layers"].AsInt =
+                countsSource == null
+                ? snapshot.Layers.Count
+                : BoundedTimelineCount(
+                    countsSource["layers"].AsInt);
+            counts["clips"].AsInt =
+                countsSource == null
+                ? snapshot.Clips.Count
+                : BoundedTimelineCount(
+                    countsSource["clips"].AsInt);
+            counts["publishedSegments"].AsInt =
+                snapshot.Segments.Count;
+            counts["publishedLayers"].AsInt =
+                snapshot.Layers.Count;
+            counts["publishedClips"].AsInt =
+                snapshot.Clips.Count;
+            result["counts"] = counts;
+            result["limits"] =
+                TimelineLimitsJson(state, clipLimit);
+
+            JSONClass truncatedSource =
+                state["truncated"].AsObject;
+            JSONClass truncated = new JSONClass();
+            truncated["segments"].AsBool =
+                (truncatedSource != null &&
+                 truncatedSource["segments"].AsBool) ||
+                (rawSegments != null &&
+                 rawSegments.Count > MaximumTimelineSegments);
+            truncated["layers"].AsBool =
+                (truncatedSource != null &&
+                 truncatedSource["layers"].AsBool) ||
+                (rawLayers != null &&
+                 rawLayers.Count > MaximumTimelineLayers);
+            truncated["clips"].AsBool =
+                (truncatedSource != null &&
+                 truncatedSource["clips"].AsBool) ||
+                (rawClips != null &&
+                 rawClips.Count > snapshot.Clips.Count) ||
+                counts["clips"].AsInt >
+                    snapshot.Clips.Count;
+            result["truncated"] = truncated;
+            if (adapterError != null)
+            {
+                result["error"] = adapterError;
+            }
+            result["controls"] =
+                state["ready"].AsBool && adapterError == null
+                ? TimelineControls(true)
+                : new JSONArray();
+            return result;
+        }
+
+        private JSONClass BuildBasicTimelineStatus(
+            string key,
+            Atom atom,
+            MVRScript plugin,
+            string storableId,
+            bool selected,
+            int clipBudget,
+            bool adapterAvailable,
+            JSONClass adapterState,
+            JSONClass adapterError)
+        {
+            JSONStorableStringChooser animations =
+                plugin.GetStringChooserJSONParam("Animation");
+            JSONStorableStringChooser segmentsParam =
+                plugin.GetStringChooserJSONParam("Segment");
+            List<string> rawAnimations =
+                animations == null ? null : animations.choices;
+            List<string> rawSegments =
+                segmentsParam == null ? null : segmentsParam.choices;
+            int clipLimit =
+                rawAnimations == null
+                ? 0
+                : Math.Min(
+                    rawAnimations.Count,
+                    Math.Min(
+                        MaximumTimelineClips,
+                        Math.Max(0, clipBudget)));
+            string generationKey =
+                "legacy:published:" + clipLimit;
+            int index;
+            if (rawAnimations != null)
+            {
+                int limit = Math.Min(
+                    rawAnimations.Count,
+                    MaximumTimelineClips);
+                for (index = 0; index < limit; index++)
+                {
+                    string name =
+                        SanitizeTimelineText(
+                            rawAnimations[index],
+                            MaximumTimelineQualifiedLength);
+                    generationKey += "|c:" +
+                        name.Length +
+                        ":" +
+                        name;
+                }
+            }
+            if (rawSegments != null)
+            {
+                int limit = Math.Min(
+                    rawSegments.Count,
+                    MaximumTimelineSegments);
+                for (index = 0; index < limit; index++)
+                {
+                    string name =
+                        SanitizeTimelineText(
+                            rawSegments[index],
+                            MaximumTimelineQualifiedLength);
+                    generationKey += "|s:" +
+                        name.Length +
+                        ":" +
+                        name;
+                }
+            }
+
+            TimelineSnapshot previous;
+            TimelineSnapshot snapshot =
+                CreateTimelineSnapshot(
+                    key,
+                    atom,
+                    plugin,
+                    storableId,
+                    generationKey,
+                    false,
+                    0,
+                    out previous);
+
+            if (rawSegments != null)
+            {
+                int limit = Math.Min(
+                    rawSegments.Count,
+                    MaximumTimelineSegments);
+                for (index = 0; index < limit; index++)
+                {
+                    string rawName = rawSegments[index] ?? "";
+                    if (rawName.Length > MaximumTimelineQualifiedLength ||
+                        ContainsControlCharacter(rawName))
+                    {
+                        continue;
+                    }
+                    TimelineItemSnapshot item =
+                        new TimelineItemSnapshot();
+                    item.Token = ReuseTimelineItemToken(
+                        previous == null ? null : previous.Segments,
+                        index);
+                    item.AdapterId = index;
+                    item.AdapterSegmentId = index;
+                    item.AdapterLayerId = -1;
+                    item.RawName = rawName;
+                    item.Name = SanitizeTimelineText(
+                        rawName,
+                        MaximumTimelineLabelLength);
+                    item.Selected =
+                        segmentsParam != null &&
+                        string.Equals(
+                            segmentsParam.val,
+                            rawName,
+                            StringComparison.Ordinal);
+                    snapshot.Segments.Add(item);
+                }
+            }
+            if (rawAnimations != null)
+            {
+                int limit = clipLimit;
+                for (index = 0; index < limit; index++)
+                {
+                    string rawName = rawAnimations[index] ?? "";
+                    if (rawName.Length > MaximumTimelineQualifiedLength ||
+                        ContainsControlCharacter(rawName))
+                    {
+                        continue;
+                    }
+                    TimelineItemSnapshot item =
+                        new TimelineItemSnapshot();
+                    item.Token = ReuseTimelineItemToken(
+                        previous == null ? null : previous.Clips,
+                        index);
+                    item.AdapterId = index;
+                    item.AdapterSegmentId = -1;
+                    item.AdapterLayerId = -1;
+                    item.RawName = rawName;
+                    item.Name = SanitizeTimelineText(
+                        rawName,
+                        MaximumTimelineLabelLength);
+                    item.Qualified = SanitizeTimelineText(
+                        rawName,
+                        MaximumTimelineQualifiedLength);
+                    item.Speed = 1f;
+                    item.Weight = 1f;
+                    item.Selected =
+                        animations != null &&
+                        string.Equals(
+                            animations.val,
+                            rawName,
+                            StringComparison.Ordinal);
+                    snapshot.Clips.Add(item);
+                }
+            }
+
+            JSONStorableBool isPlaying =
+                plugin.GetBoolJSONParam("Is Playing");
+            JSONStorableBool paused =
+                plugin.GetBoolJSONParam("Paused");
+            JSONStorableBool locked =
+                plugin.GetBoolJSONParam("Locked");
+            JSONStorableFloat time =
+                plugin.GetFloatJSONParam("Set Time");
+            JSONStorableFloat scrubber =
+                plugin.GetFloatJSONParam("Scrubber");
+            JSONStorableFloat speed =
+                plugin.GetFloatJSONParam("Speed");
+            JSONStorableFloat weight =
+                plugin.GetFloatJSONParam("Weight");
+            bool ready =
+                plugin.isActiveAndEnabled &&
+                animations != null &&
+                isPlaying != null &&
+                time != null &&
+                plugin.GetAction("Play If Not Playing") != null &&
+                plugin.GetAction("Stop If Playing") != null;
+
+            JSONClass result = new JSONClass();
+            result["id"] = snapshot.TimelineId;
+            result["revision"] = snapshot.Revision;
+            result["atomUid"] =
+                SanitizeTimelineText(atom.uid, 200);
+            string customLabel = "";
+            if (plugin.pluginLabelJSON != null)
+            {
+                customLabel = SanitizeTimelineText(
+                    plugin.pluginLabelJSON.val,
+                    MaximumTimelineLabelLength);
+            }
+            result["label"] =
+                customLabel.Length == 0
+                ? SanitizeTimelineText(
+                    atom.name,
+                    MaximumTimelineLabelLength)
+                : SanitizeTimelineText(
+                    atom.name + ": " + customLabel,
+                    MaximumTimelineLabelLength);
+            result["enhanced"].AsBool = adapterAvailable;
+            result["adapterVersion"] =
+                adapterAvailable
+                ? SanitizeTimelineText(
+                    adapterState == null
+                    ? ""
+                    : (string)adapterState["adapterVersion"],
+                    64)
+                : "";
+            result["ready"].AsBool = ready;
+            result["selected"].AsBool = selected;
+            result["stateSequence"].AsInt =
+                adapterState == null
+                ? 0
+                : BoundedTimelineCount(
+                    adapterState["stateSequence"].AsInt);
+
+            JSONClass transport = new JSONClass();
+            transport["playing"].AsBool =
+                isPlaying != null && isPlaying.val;
+            transport["paused"].AsBool =
+                paused != null && paused.val;
+            transport["time"].AsFloat =
+                time == null
+                ? 0f
+                : BoundedTimelineFloat(
+                    time.val,
+                    0f,
+                    86400f,
+                    0f);
+            transport["clipTime"].AsFloat =
+                scrubber == null
+                ? 0f
+                : BoundedTimelineFloat(
+                    scrubber.val,
+                    0f,
+                    86400f,
+                    0f);
+            transport["duration"].AsFloat =
+                scrubber == null
+                ? 0f
+                : BoundedTimelineFloat(
+                    scrubber.max,
+                    0f,
+                    86400f,
+                    0f);
+            transport["speed"].AsFloat =
+                speed == null
+                ? 1f
+                : BoundedTimelineFloat(
+                    speed.val,
+                    -1f,
+                    5f,
+                    1f);
+            transport["weight"].AsFloat =
+                weight == null
+                ? 1f
+                : BoundedTimelineFloat(
+                    weight.val,
+                    0f,
+                    1f,
+                    1f);
+            transport["locked"].AsBool =
+                locked != null && locked.val;
+            result["transport"] = transport;
+
+            JSONClass current = new JSONClass();
+            string currentClipToken = "";
+            for (index = 0;
+                 index < snapshot.Clips.Count;
+                 index++)
+            {
+                if (snapshot.Clips[index].Selected)
+                {
+                    currentClipToken =
+                        snapshot.Clips[index].Token;
+                    break;
+                }
+            }
+            current["clipId"] = currentClipToken;
+            string currentSegmentToken = "";
+            for (index = 0;
+                 index < snapshot.Segments.Count;
+                 index++)
+            {
+                if (snapshot.Segments[index].Selected)
+                {
+                    currentSegmentToken =
+                        snapshot.Segments[index].Token;
+                    break;
+                }
+            }
+            current["segmentId"] = currentSegmentToken;
+            current["layerId"] = "";
+            JSONClass adapterCurrent =
+                adapterState == null
+                ? null
+                : adapterState["current"].AsObject;
+            string legacyAnimation =
+                animations == null
+                ? ""
+                : SanitizeTimelineText(
+                    animations.val,
+                    MaximumTimelineQualifiedLength);
+            string adapterQualified =
+                adapterCurrent == null
+                ? ""
+                : SanitizeTimelineText(
+                    (string)adapterCurrent["qualified"],
+                    MaximumTimelineQualifiedLength);
+            string adapterName =
+                adapterCurrent == null
+                ? ""
+                : SanitizeTimelineText(
+                    (string)adapterCurrent["name"],
+                    MaximumTimelineLabelLength);
+            string adapterSegment =
+                adapterCurrent == null
+                ? ""
+                : SanitizeTimelineText(
+                    (string)adapterCurrent["segment"],
+                    MaximumTimelineLabelLength);
+            string adapterLayer =
+                adapterCurrent == null
+                ? ""
+                : SanitizeTimelineText(
+                    (string)adapterCurrent["layer"],
+                    MaximumTimelineLabelLength);
+            current["qualified"] =
+                adapterQualified.Length != 0
+                ? adapterQualified
+                : legacyAnimation;
+            current["name"] =
+                adapterName.Length != 0
+                ? adapterName
+                : SanitizeTimelineText(
+                    animations == null ? "" : animations.val,
+                    MaximumTimelineLabelLength);
+            current["segment"] =
+                adapterSegment.Length != 0
+                ? adapterSegment
+                : segmentsParam == null
+                    ? ""
+                    : SanitizeTimelineText(
+                        segmentsParam.val,
+                        MaximumTimelineLabelLength);
+            current["layer"] = adapterLayer;
+            result["current"] = current;
+
+            JSONArray segments = new JSONArray();
+            for (index = 0; index < snapshot.Segments.Count; index++)
+            {
+                segments.Add(
+                    TimelineItemJson(
+                        snapshot.Segments[index],
+                        "",
+                        "",
+                        false));
+            }
+            JSONArray clips = new JSONArray();
+            for (index = 0; index < snapshot.Clips.Count; index++)
+            {
+                clips.Add(
+                    TimelineItemJson(
+                        snapshot.Clips[index],
+                        "",
+                        "",
+                        true));
+            }
+            result["segments"] = segments;
+            result["layers"] = new JSONArray();
+            result["clips"] = clips;
+
+            int segmentCount =
+                Math.Max(
+                    rawSegments == null ? 0 : rawSegments.Count,
+                    TimelineStateCount(
+                        adapterState,
+                        "segments",
+                        rawSegments == null ? 0 : rawSegments.Count));
+            int layerCount =
+                TimelineStateCount(adapterState, "layers", 0);
+            int clipCount =
+                Math.Max(
+                    rawAnimations == null ? 0 : rawAnimations.Count,
+                    TimelineStateCount(
+                        adapterState,
+                        "clips",
+                        rawAnimations == null ? 0 : rawAnimations.Count));
+            JSONClass counts = new JSONClass();
+            counts["segments"].AsInt =
+                BoundedTimelineCount(segmentCount);
+            counts["layers"].AsInt =
+                BoundedTimelineCount(layerCount);
+            counts["clips"].AsInt =
+                BoundedTimelineCount(clipCount);
+            counts["publishedSegments"].AsInt =
+                snapshot.Segments.Count;
+            counts["publishedLayers"].AsInt = 0;
+            counts["publishedClips"].AsInt =
+                snapshot.Clips.Count;
+            result["counts"] = counts;
+            result["limits"] =
+                TimelineLimitsJson(
+                    adapterState,
+                    snapshot.Clips.Count);
+
+            JSONClass truncated = new JSONClass();
+            truncated["segments"].AsBool =
+                segmentCount > snapshot.Segments.Count;
+            truncated["layers"].AsBool =
+                layerCount > 0;
+            truncated["clips"].AsBool =
+                clipCount > snapshot.Clips.Count;
+            result["truncated"] = truncated;
+            if (adapterError != null)
+            {
+                result["error"] = adapterError;
+            }
+            result["controls"] =
+                ready
+                ? BasicTimelineControls(
+                    plugin,
+                    snapshot.Clips.Count != 0)
+                : new JSONArray();
+            return result;
+        }
+
         private static JSONArray Capabilities()
         {
             JSONArray capabilities = new JSONArray();
@@ -4162,7 +5987,343 @@ namespace VAMPip
             capabilities.Add("person-hair-item-toggle");
             capabilities.Add("person-add");
             capabilities.Add("person-select");
+            capabilities.Add("timeline-roster");
+            capabilities.Add("timeline-transport");
+            capabilities.Add("timeline-animation-play");
+            capabilities.Add("timeline-adapter-v1");
             return capabilities;
+        }
+
+        private void PublishTimelineStatus()
+        {
+            try
+            {
+                JSONClass document = new JSONClass();
+                document["protocol"].AsInt = ProtocolVersion;
+                document["timelineProtocol"].AsInt =
+                    TimelineProtocolVersion;
+                document["bridgeVersion"] = BridgeVersion;
+                document["instanceId"] = _instanceId;
+                document["updatedAtUtc"] = UtcNow();
+
+                SuperController controller = SuperController.singleton;
+                bool loading = controller == null || controller.isLoading;
+                document["loading"].AsBool = loading;
+                Atom selected =
+                    controller == null
+                    ? null
+                    : controller.GetSelectedAtom();
+
+                List<TimelineCandidate> candidates =
+                    new List<TimelineCandidate>();
+                HashSet<string> liveKeys = new HashSet<string>();
+                int discoveredCount = 0;
+                if (controller != null)
+                {
+                    foreach (Atom atom in controller.GetAtoms())
+                    {
+                        if (atom == null)
+                        {
+                            continue;
+                        }
+                        List<string> storableIds =
+                            atom.GetStorableIDs();
+                        if (storableIds == null)
+                        {
+                            continue;
+                        }
+                        int idIndex;
+                        for (idIndex = 0;
+                             idIndex < storableIds.Count;
+                             idIndex++)
+                        {
+                            string storableId =
+                                storableIds[idIndex] ?? "";
+                            if (!storableId.EndsWith(
+                                    "VamTimeline.AtomPlugin",
+                                    StringComparison.Ordinal))
+                            {
+                                continue;
+                            }
+                            MVRScript plugin =
+                                atom.GetStorableByID(storableId)
+                                as MVRScript;
+                            if (plugin == null)
+                            {
+                                continue;
+                            }
+                            discoveredCount++;
+                            if (candidates.Count >=
+                                MaximumTimelineInstances)
+                            {
+                                continue;
+                            }
+
+                            string key =
+                                (atom.uid ?? "") +
+                                "\n" +
+                                storableId;
+                            liveKeys.Add(key);
+                            bool isSelected =
+                                selected != null &&
+                                object.ReferenceEquals(selected, atom);
+                            JSONStorableString adapterState =
+                                plugin.GetStringJSONParam(
+                                    TimelineExternalState);
+                            JSONStorableAction refresh =
+                                plugin.GetAction(
+                                    TimelineRefreshExternalState);
+                            JSONStorableString adapterCommand =
+                                plugin.GetStringJSONParam(
+                                    TimelineExternalCommand);
+                            JSONStorableString adapterResult =
+                                plugin.GetStringJSONParam(
+                                    TimelineExternalResult);
+                            JSONStorableAction execute =
+                                plugin.GetAction(
+                                    TimelineExecuteExternalCommand);
+
+                            TimelineCandidate candidate =
+                                new TimelineCandidate();
+                            candidate.ScanIndex = candidates.Count;
+                            candidate.Key = key;
+                            candidate.Atom = atom;
+                            candidate.Plugin = plugin;
+                            candidate.StorableId = storableId;
+                            candidate.Selected = isSelected;
+                            JSONStorableBool isPlaying =
+                                plugin.GetBoolJSONParam("Is Playing");
+                            candidate.Playing =
+                                isPlaying != null && isPlaying.val;
+                            candidate.AdapterAvailable =
+                                adapterState != null &&
+                                refresh != null &&
+                                refresh.actionCallback != null &&
+                                adapterCommand != null &&
+                                adapterResult != null &&
+                                execute != null &&
+                                execute.actionCallback != null;
+                            candidate.AdapterState = adapterState;
+                            candidate.AdapterRefresh = refresh;
+                            candidates.Add(candidate);
+                        }
+                    }
+                }
+
+                List<TimelineCandidate> prioritized =
+                    new List<TimelineCandidate>(candidates);
+                prioritized.Sort(
+                    delegate(
+                        TimelineCandidate left,
+                        TimelineCandidate right)
+                    {
+                        if (left.Selected != right.Selected)
+                        {
+                            return left.Selected ? -1 : 1;
+                        }
+                        if (left.Playing != right.Playing)
+                        {
+                            return left.Playing ? -1 : 1;
+                        }
+                        return left.ScanIndex.CompareTo(
+                            right.ScanIndex);
+                    });
+
+                int globalClipBudget =
+                    MaximumTimelineClipsGlobally;
+                int totalClipCount = 0;
+                int publishedClipCount = 0;
+                bool enhancedFound = false;
+                int candidateIndex;
+                for (candidateIndex = 0;
+                     candidateIndex < prioritized.Count;
+                     candidateIndex++)
+                {
+                    TimelineCandidate candidate =
+                        prioritized[candidateIndex];
+                    int instanceClipBudget =
+                        Math.Min(
+                            globalClipBudget,
+                            MaximumTimelineClips);
+                    JSONClass instance = null;
+                    JSONClass adapterState = null;
+                    JSONClass adapterError = null;
+
+                    if (candidate.AdapterAvailable)
+                    {
+                        enhancedFound = true;
+                        if (instanceClipBudget > 0)
+                        {
+                            try
+                            {
+                                candidate.AdapterRefresh.actionCallback();
+                                adapterState =
+                                    JSON.Parse(
+                                        candidate.AdapterState.val ?? "")
+                                    .AsObject;
+                                if (adapterState != null &&
+                                    adapterState["protocol"].AsInt ==
+                                        TimelineProtocolVersion)
+                                {
+                                    instance =
+                                        BuildEnhancedTimelineStatus(
+                                            candidate.Key,
+                                            candidate.Atom,
+                                            candidate.Plugin,
+                                            candidate.StorableId,
+                                            adapterState,
+                                            candidate.Selected,
+                                            instanceClipBudget);
+                                }
+                                else
+                                {
+                                    adapterError =
+                                        TimelineAdapterErrorJson(
+                                            "invalid-state",
+                                            "Timeline returned an invalid external state.");
+                                }
+                            }
+                            catch (Exception exception)
+                            {
+                                adapterError =
+                                    TimelineAdapterErrorJson(
+                                        "refresh-failed",
+                                        "Timeline could not refresh its external state: " +
+                                        DescribeException(exception));
+                            }
+                        }
+                        else
+                        {
+                            // Reuse metadata already published by Timeline,
+                            // but do not invoke the adapter's full catalog
+                            // rebuild once the global clip budget is spent.
+                            try
+                            {
+                                adapterState =
+                                    JSON.Parse(
+                                        candidate.AdapterState.val ?? "")
+                                    .AsObject;
+                                if (adapterState == null ||
+                                    adapterState["protocol"].AsInt !=
+                                        TimelineProtocolVersion)
+                                {
+                                    adapterState = null;
+                                }
+                            }
+                            catch
+                            {
+                                adapterState = null;
+                            }
+                            adapterError =
+                                TimelineAdapterErrorJson(adapterState);
+                        }
+                    }
+
+                    if (instance == null)
+                    {
+                        instance =
+                            BuildBasicTimelineStatus(
+                                candidate.Key,
+                                candidate.Atom,
+                                candidate.Plugin,
+                                candidate.StorableId,
+                                candidate.Selected,
+                                instanceClipBudget,
+                                candidate.AdapterAvailable,
+                                adapterState,
+                                adapterError);
+                    }
+                    candidate.Result = instance;
+
+                    JSONClass instanceCounts =
+                        instance["counts"].AsObject;
+                    int instanceTotal =
+                        instanceCounts == null
+                        ? 0
+                        : BoundedTimelineCount(
+                            instanceCounts["clips"].AsInt);
+                    int instancePublished =
+                        instanceCounts == null
+                        ? 0
+                        : BoundedTimelineCount(
+                            instanceCounts[
+                                "publishedClips"].AsInt);
+                    totalClipCount += instanceTotal;
+                    publishedClipCount += instancePublished;
+                    globalClipBudget =
+                        Math.Max(
+                            0,
+                            globalClipBudget -
+                                instancePublished);
+                }
+
+                JSONArray instances = new JSONArray();
+                for (candidateIndex = 0;
+                     candidateIndex < candidates.Count;
+                     candidateIndex++)
+                {
+                    instances.Add(candidates[candidateIndex].Result);
+                }
+
+                List<string> removedKeys = new List<string>();
+                foreach (
+                    KeyValuePair<string, TimelineSnapshot> entry
+                    in _timelineSnapshots)
+                {
+                    if (!liveKeys.Contains(entry.Key))
+                    {
+                        removedKeys.Add(entry.Key);
+                    }
+                }
+                int removedIndex;
+                for (removedIndex = 0;
+                     removedIndex < removedKeys.Count;
+                     removedIndex++)
+                {
+                    _timelineSnapshots.Remove(removedKeys[removedIndex]);
+                }
+
+                JSONArray capabilities = new JSONArray();
+                capabilities.Add("timeline-roster");
+                capabilities.Add("timeline-transport");
+                capabilities.Add("timeline-animation-play");
+                if (enhancedFound)
+                {
+                    capabilities.Add("timeline-adapter-v1");
+                }
+                document["instances"] = instances;
+                document["truncated"].AsBool =
+                    discoveredCount > MaximumTimelineInstances ||
+                    totalClipCount > publishedClipCount;
+                JSONClass counts = new JSONClass();
+                counts["instances"].AsInt =
+                    BoundedTimelineCount(discoveredCount);
+                counts["publishedInstances"].AsInt =
+                    candidates.Count;
+                counts["clips"].AsInt =
+                    BoundedTimelineCount(totalClipCount);
+                counts["publishedClips"].AsInt =
+                    BoundedTimelineCount(publishedClipCount);
+                document["counts"] = counts;
+                JSONClass limits = new JSONClass();
+                limits["maxInstances"].AsInt =
+                    MaximumTimelineInstances;
+                limits["maxClips"].AsInt =
+                    MaximumTimelineClips;
+                limits["maxClipsGlobally"].AsInt =
+                    MaximumTimelineClipsGlobally;
+                document["limits"] = limits;
+                document["capabilities"] = capabilities;
+                FileManagerSecure.WriteAllText(
+                    TimelinePath,
+                    document.ToString());
+            }
+            catch (Exception exception)
+            {
+                SuperController.LogError(
+                    "[VAM-PIP Bridge] Could not write Timeline status: " +
+                    DescribeException(exception));
+            }
         }
 
         private void PublishSceneStatus()

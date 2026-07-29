@@ -5,12 +5,14 @@ from importlib import resources
 import json
 import os
 from pathlib import Path
+import math
 import uuid
 
 from vampip.runtime import atomic_write_text
 
 
 PROTOCOL_VERSION = 2
+TIMELINE_PROTOCOL_VERSION = 1
 BRIDGE_RELATIVE_DIR = Path("Saves") / "PluginData" / "VAMPip" / "Bridge"
 MAX_RESOURCE_REF_LENGTH = 1000
 SCENE_RESOURCE_PREFIX = "Saves/scene/"
@@ -32,6 +34,30 @@ PERSON_PRESET_PREFIXES = {
     "plugins": "Custom/Atom/Person/Plugins/",
     "pose": "Custom/Atom/Person/Pose/",
     "skin": "Custom/Atom/Person/Skin/",
+}
+TIMELINE_CONTROL_OPERATIONS = frozenset(
+    {
+        "play",
+        "pause",
+        "stop",
+        "reset",
+        "nextFrame",
+        "previousFrame",
+        "selectClip",
+        "playClip",
+        "selectSegment",
+        "selectLayer",
+        "setTime",
+        "setSpeed",
+        "setWeight",
+        "setLocked",
+    }
+)
+TIMELINE_ID_OPERATIONS = {
+    "selectClip": "clipId",
+    "playClip": "clipId",
+    "selectSegment": "segmentId",
+    "selectLayer": "layerId",
 }
 # VaM 1.22 native non-Person atom types, audited against BrowserAssist 39's
 # static native-type registry. Packaged/custom atom types are deliberately not
@@ -248,6 +274,83 @@ def request_rescan(
             "browserAssist": browser_assist,
         },
     )
+
+
+def _validate_opaque_token(value: str, *, label: str) -> str:
+    if not isinstance(value, str):
+        raise TypeError(f"{label} must be a string")
+    if len(value) != 32 or any(
+        character not in "0123456789abcdefABCDEF" for character in value
+    ):
+        raise ValueError(f"{label} must be a 32-character opaque token")
+    return value.lower()
+
+
+def request_timeline_control(
+    vam_root: Path,
+    *,
+    timeline_id: str,
+    expected_revision: str,
+    operation: str,
+    item_id: str | None = None,
+    value: float | bool | None = None,
+) -> str:
+    """Publish one revision-bound, allowlisted Timeline operation.
+
+    Browser-facing IDs are bridge-minted opaque tokens. Timeline labels,
+    plugin IDs, storable names, and action names are intentionally absent
+    from this mailbox document.
+    """
+
+    timeline_id = _validate_opaque_token(timeline_id, label="timeline_id")
+    expected_revision = _validate_opaque_token(
+        expected_revision,
+        label="expected_revision",
+    )
+    if not isinstance(operation, str):
+        raise TypeError("operation must be a string")
+    if operation not in TIMELINE_CONTROL_OPERATIONS:
+        accepted = ", ".join(sorted(TIMELINE_CONTROL_OPERATIONS))
+        raise ValueError(f"operation must be one of: {accepted}")
+
+    document: dict[str, object] = {
+        "command": "controlTimeline",
+        "timelineId": timeline_id,
+        "expectedRevision": expected_revision,
+        "operation": operation,
+    }
+    id_field = TIMELINE_ID_OPERATIONS.get(operation)
+    if id_field is not None:
+        if item_id is None:
+            raise ValueError(f"{operation} requires an opaque item ID")
+        document[id_field] = _validate_opaque_token(item_id, label=id_field)
+    elif item_id is not None:
+        raise ValueError(f"{operation} does not accept an item ID")
+
+    if operation == "setLocked":
+        if not isinstance(value, bool):
+            raise TypeError("setLocked value must be a boolean")
+        document["value"] = value
+    elif operation in {"setTime", "setSpeed", "setWeight"}:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise TypeError(f"{operation} value must be a finite number")
+        number = float(value)
+        if not math.isfinite(number):
+            raise ValueError(f"{operation} value must be a finite number")
+        lower, upper = {
+            "setTime": (0.0, 86400.0),
+            "setSpeed": (-1.0, 5.0),
+            "setWeight": (0.0, 1.0),
+        }[operation]
+        if number < lower or number > upper:
+            raise ValueError(
+                f"{operation} value must be between {lower:g} and {upper:g}"
+            )
+        document["value"] = number
+    elif value is not None:
+        raise ValueError(f"{operation} does not accept a value")
+
+    return _write_request(vam_root, document)
 
 
 def _validate_target_uid(target_uid: str) -> str:
@@ -780,6 +883,106 @@ def read_scene_status(vam_root: Path) -> dict[str, object] | None:
                         "choicesTruncated",
                     ):
                         _normalize_bool(cua, key)
+    return document
+
+
+def read_timeline_status(vam_root: Path) -> dict[str, object] | None:
+    """Read the bridge's independently refreshed, bounded Timeline roster."""
+
+    document = _read_bridge_document(
+        bridge_directory(vam_root) / "timeline.json"
+    )
+    if document is None:
+        return None
+    _normalize_nonnegative_int(document, "timelineProtocol")
+    if document.get("timelineProtocol") != TIMELINE_PROTOCOL_VERSION:
+        return None
+    _normalize_bool(document, "loading")
+    _normalize_bool(document, "truncated")
+    root_counts = document.get("counts")
+    if isinstance(root_counts, dict):
+        for key in (
+            "instances",
+            "publishedInstances",
+            "clips",
+            "publishedClips",
+        ):
+            _normalize_nonnegative_int(root_counts, key)
+    root_limits = document.get("limits")
+    if isinstance(root_limits, dict):
+        for key in (
+            "maxInstances",
+            "maxClips",
+            "maxClipsGlobally",
+        ):
+            _normalize_nonnegative_int(root_limits, key)
+    instances = document.get("instances")
+    if isinstance(instances, list):
+        for instance in instances[:32]:
+            if not isinstance(instance, dict):
+                continue
+            for key in (
+                "enhanced",
+                "ready",
+                "selected",
+                "playing",
+                "paused",
+                "locked",
+                "clipsTruncated",
+                "segmentsTruncated",
+                "layersTruncated",
+            ):
+                _normalize_bool(instance, key)
+            for key in (
+                "clipCount",
+                "segmentCount",
+                "layerCount",
+                "stateSequence",
+            ):
+                _normalize_nonnegative_int(instance, key)
+            transport = instance.get("transport")
+            if isinstance(transport, dict):
+                for key in ("playing", "paused", "locked"):
+                    _normalize_bool(transport, key)
+            truncated = instance.get("truncated")
+            if isinstance(truncated, dict):
+                for key in ("segments", "layers", "clips"):
+                    _normalize_bool(truncated, key)
+            counts = instance.get("counts")
+            if isinstance(counts, dict):
+                for key in (
+                    "segments",
+                    "layers",
+                    "clips",
+                    "publishedSegments",
+                    "publishedLayers",
+                    "publishedClips",
+                ):
+                    _normalize_nonnegative_int(counts, key)
+            limits = instance.get("limits")
+            if isinstance(limits, dict):
+                for key in (
+                    "maxSegments",
+                    "maxLayers",
+                    "maxClips",
+                    "maxClipsGlobally",
+                    "allocatedClips",
+                ):
+                    _normalize_nonnegative_int(limits, key)
+            for collection_name in ("clips", "segments", "layers"):
+                collection = instance.get(collection_name)
+                if not isinstance(collection, list):
+                    continue
+                for item in collection:
+                    if isinstance(item, dict):
+                        for key in (
+                            "selected",
+                            "loop",
+                            "playing",
+                            "main",
+                        ):
+                            _normalize_bool(item, key)
+                        _normalize_nonnegative_int(item, "targetCount")
     return document
 
 

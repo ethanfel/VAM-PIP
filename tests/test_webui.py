@@ -1647,9 +1647,384 @@ process.stdout.write(JSON.stringify(output));
         self.assertIn('aria-live="polite"', self.html)
         self.assertIn('aria-hidden="true"', self.html)
 
+    def test_timeline_is_a_top_level_live_workspace(self) -> None:
+        self.assertIn('data-view="timeline"', self.html)
+        self.assertIn('id="timeline-view"', self.html)
+        self.assertIn('id="timeline-instance"', self.html)
+        self.assertIn('id="timeline-segment-select"', self.html)
+        self.assertIn('id="timeline-layer-select"', self.html)
+        self.assertIn('id="timeline-clip-select"', self.html)
+        self.assertIn('id="timeline-scrubber"', self.html)
+        self.assertIn('id="timeline-speed"', self.html)
+        self.assertIn('id="timeline-weight"', self.html)
+        self.assertIn('id="timeline-lock"', self.html)
+        self.assertIn('"timeline", "packages", "access"', self.javascript)
+        self.assertIn(
+            "const TIMELINE_PLAYING_POLL_MS = 1000;",
+            self.javascript,
+        )
+
+    def test_timeline_api_contract_is_centralized_and_revision_safe(self) -> None:
+        self.assertIn('snapshotPath: "/api/vam/timeline"', self.javascript)
+        self.assertIn(
+            'controlPath: "/api/vam/timeline/control"',
+            self.javascript,
+        )
+        client_start = self.javascript.index("const TimelineClient")
+        client_end = self.javascript.index(
+            "function timelineProperty(", client_start
+        )
+        client = self.javascript[client_start:client_end]
+        for field in (
+            "timeline_id:",
+            "expected_revision:",
+            "op:",
+            "body.clip_id",
+            "body.segment_id",
+            "body.layer_id",
+        ):
+            with self.subTest(field=field):
+                self.assertIn(field, client)
+        self.assertIn("return String(value);", self.javascript)
+        self.assertNotIn("parseInt(command.timelineId", client)
+        self.assertNotIn("storable", client)
+        self.assertNotIn("action", client)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is not installed")
+    def test_timeline_adapter_normalizes_live_shape_and_strict_controls(
+        self,
+    ) -> None:
+        start = self.javascript.index("const TimelineClient")
+        end = self.javascript.index("async function loadTimeline(", start)
+        adapter = self.javascript[start:end]
+        script = f"""
+"use strict";
+const MAX_TIMELINE_TRACKS = 80;
+const calls = [];
+async function api(path, options = {{}}) {{
+  calls.push({{ path, options }});
+  return {{}};
+}}
+{adapter}
+const timelineIdValue = "1".repeat(32);
+const revision = "2".repeat(32);
+const segmentId = "3".repeat(32);
+const layerId = "4".repeat(32);
+const clipId = "5".repeat(32);
+const snapshot = normalizeTimelineSnapshot({{
+  available: true,
+  vam_running: true,
+  timeline_protocol: 1,
+  capabilities: ["timeline-roster", "timeline-transport"],
+  limits: {{ maxInstances: 32, maxClips: 256, maxClipsGlobally: 1024 }},
+  instances: [{{
+    id: timelineIdValue,
+    revision,
+    atomUid: "Person",
+    enhanced: true,
+    ready: true,
+    error: {{
+      code: "State_Error<script>",
+      message: "Timeline catalog could not be built.",
+    }},
+    limits: {{
+      maxSegments: 64,
+      maxLayers: 128,
+      maxClips: 256,
+      maxClipsGlobally: 1024,
+      allocatedClips: 64,
+    }},
+    controls: ["play", "selectClip", "setTime"],
+    transport: {{
+      playing: true,
+      time: 99,
+      clipTime: 3.25,
+      duration: 12,
+      speed: 1,
+      weight: 0.75,
+    }},
+    current: {{ segmentId, layerId, clipId }},
+    segments: [{{ id: segmentId, name: "Main" }}],
+    layers: [{{ id: layerId, segmentId, name: "Base" }}],
+    clips: [{{
+      id: clipId,
+      segmentId,
+      layerId,
+      name: "Idle",
+      length: 12,
+      targetCount: 7,
+    }}],
+    truncated: {{ segments: false, layers: false, clips: false }},
+  }}],
+}});
+await TimelineClient.control({{
+  timelineId: timelineIdValue,
+  expectedRevision: revision,
+  op: "selectClip",
+  clipId,
+  segmentId,
+  layerId,
+}});
+process.stdout.write(JSON.stringify({{
+  instance: snapshot.instances[0],
+  truncated: timelineDataIsTruncated(snapshot.instances[0].truncated),
+  call: calls[0],
+}}));
+"""
+        completed = subprocess.run(
+            ["node", "--input-type=module", "-"],
+            input=script,
+            text=True,
+            capture_output=True,
+            check=True,
+            timeout=10,
+        )
+        result = json.loads(completed.stdout)
+        instance = result["instance"]
+        self.assertEqual(instance["id"], "1" * 32)
+        self.assertEqual(instance["revision"], "2" * 32)
+        self.assertEqual(instance["transport"]["time"], 3.25)
+        self.assertEqual(instance["clips"][0]["label"], "Idle")
+        self.assertEqual(instance["clips"][0]["targetCount"], 7)
+        self.assertEqual(
+            instance["error"],
+            {
+                "code": "stateerrorscript",
+                "message": "Timeline catalog could not be built.",
+            },
+        )
+        self.assertEqual(instance["limits"]["maxClipsGlobally"], 1024)
+        self.assertEqual(instance["limits"]["allocatedClips"], 64)
+        self.assertFalse(result["truncated"])
+        self.assertEqual(
+            result["call"],
+            {
+                "path": "/api/vam/timeline/control",
+                "options": {
+                    "method": "POST",
+                    "body": {
+                        "timeline_id": "1" * 32,
+                        "expected_revision": "2" * 32,
+                        "op": "selectClip",
+                        "clip_id": "5" * 32,
+                    },
+                },
+            },
+        )
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is not installed")
+    def test_timeline_keeps_out_of_window_current_clip_without_guessing(
+        self,
+    ) -> None:
+        start = self.javascript.index("const TimelineClient")
+        end = self.javascript.index("async function loadTimeline(", start)
+        adapter = self.javascript[start:end]
+        controls_start = self.javascript.index("function timelineOpKey(", end)
+        controls_end = self.javascript.index(
+            "function renderTimelineTransport(",
+            controls_start,
+        )
+        controls = self.javascript[controls_start:controls_end]
+        script = f"""
+"use strict";
+const MAX_TIMELINE_TRACKS = 80;
+const app = {{
+  timeline: null,
+  timelineError: null,
+  timelineReceivedAt: 0,
+  timelineControlInFlight: false,
+  timelineSeekInFlight: false,
+  selectedTimelineId: "",
+  selectedTimelineSegmentId: "",
+  selectedTimelineLayerId: "",
+  selectedTimelineClipId: "",
+}};
+async function api() {{ return {{}}; }}
+{adapter}
+{controls}
+const timelineIdValue = "1".repeat(32);
+const revision = "2".repeat(32);
+const publishedSegmentId = "3".repeat(32);
+const publishedLayerId = "4".repeat(32);
+const publishedClipId = "5".repeat(32);
+function snapshotFor(name, qualified) {{
+  return normalizeTimelineSnapshot({{
+    available: true,
+    vam_running: true,
+    instances: [{{
+      id: timelineIdValue,
+      revision,
+      enhanced: true,
+      ready: true,
+      current: {{
+        clipId: null,
+        segmentId: null,
+        layerId: null,
+        qualified,
+        name,
+        segment: "Overflow Segment",
+        layer: "Overflow Layer",
+      }},
+      segments: [{{
+        id: publishedSegmentId,
+        name: "Published Segment",
+      }}],
+      layers: [{{
+        id: publishedLayerId,
+        segmentId: publishedSegmentId,
+        name: "Published Layer",
+      }}],
+      clips: [{{
+        id: publishedClipId,
+        segmentId: publishedSegmentId,
+        layerId: publishedLayerId,
+        name: "Published Clip",
+      }}],
+      truncated: {{ segments: true, layers: true, clips: true }},
+    }}],
+  }});
+}}
+const first = snapshotFor(
+  "Overflow Clip",
+  "Overflow Segment::Overflow Layer::Overflow Clip",
+);
+acceptTimelineSnapshot(first);
+const instance = selectedTimelineInstance();
+const firstSignature = timelineCurrentSignature(instance);
+const secondSignature = timelineCurrentSignature(
+  snapshotFor(
+    "Another Overflow Clip",
+    "Overflow Segment::Overflow Layer::Another Overflow Clip",
+  ).instances[0],
+);
+process.stdout.write(JSON.stringify({{
+  current: instance.current,
+  selectedSegmentId: app.selectedTimelineSegmentId,
+  selectedLayerId: app.selectedTimelineLayerId,
+  selectedClipId: app.selectedTimelineClipId,
+  selectedClip: selectedTimelineClip(instance),
+  outside: timelineCurrentOutsidePublishedWindow(instance, "clip"),
+  outsideLabel: timelineOutsideOptionLabel(instance, "clip"),
+  publishedTargetAllowed: timelineControlTargetIsPublished(
+    instance,
+    "selectClip",
+    {{ clipId: publishedClipId }},
+  ),
+  unpublishedTargetAllowed: timelineControlTargetIsPublished(
+    instance,
+    "selectClip",
+    {{ clipId: "9".repeat(32) }},
+  ),
+  signatureChanged: firstSignature !== secondSignature,
+}}));
+"""
+        completed = subprocess.run(
+            ["node", "--input-type=module", "-"],
+            input=script,
+            text=True,
+            capture_output=True,
+            check=True,
+            timeout=10,
+        )
+        result = json.loads(completed.stdout)
+        self.assertEqual(
+            result["current"],
+            {
+                "segmentId": "",
+                "layerId": "",
+                "clipId": "",
+                "trackId": "",
+                "qualified": (
+                    "Overflow Segment::Overflow Layer::Overflow Clip"
+                ),
+                "name": "Overflow Clip",
+                "segment": "Overflow Segment",
+                "layer": "Overflow Layer",
+            },
+        )
+        self.assertEqual(result["selectedSegmentId"], "")
+        self.assertEqual(result["selectedLayerId"], "")
+        self.assertEqual(result["selectedClipId"], "")
+        self.assertIsNone(result["selectedClip"])
+        self.assertTrue(result["outside"])
+        self.assertEqual(
+            result["outsideLabel"],
+            (
+                "Current · Overflow Segment::Overflow Layer::Overflow Clip "
+                "· outside published window"
+            ),
+        )
+        self.assertTrue(result["publishedTargetAllowed"])
+        self.assertFalse(result["unpublishedTargetAllowed"])
+        self.assertTrue(result["signatureChanged"])
+        self.assertIn(
+            "Current clip outside published window",
+            self.javascript,
+        )
+        self.assertIn(
+            "VAM-PIP has not selected a different clip in its place",
+            self.javascript,
+        )
+        self.assertIn("outside.disabled = true;", self.javascript)
+        self.assertIn(
+            'select.value = selectedPublished ? selectedId : "";',
+            self.javascript,
+        )
+
+    def test_timeline_graph_is_canvas_rendered_and_bounded(self) -> None:
+        self.assertIn('id="timeline-canvas"', self.html)
+        self.assertNotIn('class="timeline-keyframe"', self.html)
+        self.assertIn("const MAX_TIMELINE_TRACKS = 80;", self.javascript)
+        self.assertIn(
+            "const MAX_TIMELINE_KEYS_PER_TRACK = 2_000;",
+            self.javascript,
+        )
+        self.assertIn("const MAX_TIMELINE_KEYS = 10_000;", self.javascript)
+        draw_start = self.javascript.index("function drawTimelineCanvas(")
+        draw_end = self.javascript.index(
+            "function handleTimelineCanvasClick(", draw_start
+        )
+        draw = self.javascript[draw_start:draw_end]
+        self.assertIn("tracks.length", draw)
+        self.assertIn("renderedKeys >= MAX_TIMELINE_KEYS", draw)
+        self.assertIn('canvas?.getContext("2d")', self.javascript)
+        self.assertIn(".timeline-canvas-scroll", self.styles)
+
+    def test_timeline_explains_unavailable_and_stale_states(self) -> None:
+        state_start = self.javascript.index("function timelineSnapshotState(")
+        state_end = self.javascript.index(
+            "function setTimelineStatePanel(", state_start
+        )
+        states = self.javascript[state_start:state_end]
+        for message in (
+            "Timeline support is not available yet",
+            "VaM is closed",
+            "Scene is loading",
+            "Timeline state is stale",
+            "Timeline bridge is unavailable",
+            "No Timeline instance in this scene",
+        ):
+            with self.subTest(message=message):
+                self.assertIn(message, states)
+        self.assertIn("timelineControlAllowed(instance", self.javascript)
+        self.assertIn("app.timeline?.stale", self.javascript)
+        self.assertIn("Timeline adapter error", self.javascript)
+        self.assertIn("instance.error.message", self.javascript)
+        self.assertIn("Timeline catalogue is bounded", self.javascript)
+        self.assertIn("maxClipsGlobally", self.javascript)
+
+    def test_timeline_has_a_compact_popout_route(self) -> None:
+        self.assertIn('params.get("popout") === "compact"', self.javascript)
+        self.assertIn('document.title = "VAM-PIP Timeline"', self.javascript)
+        self.assertIn('url.searchParams.set("view", "timeline")', self.javascript)
+        self.assertIn('url.searchParams.set("popout", "compact")', self.javascript)
+        self.assertIn('"vampip-timeline"', self.javascript)
+        self.assertIn("body.timeline-popout .timeline-workbench", self.styles)
+        self.assertIn("body.timeline-popout .timeline-transport", self.styles)
+
     def test_static_assets_use_the_current_cache_version(self) -> None:
-        self.assertIn("/styles.css?v=0.10.0", self.html)
-        self.assertIn("/app.js?v=0.10.0", self.html)
+        self.assertIn("/styles.css?v=0.11.0", self.html)
+        self.assertIn("/app.js?v=0.11.0", self.html)
 
 
 if __name__ == "__main__":

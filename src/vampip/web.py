@@ -244,6 +244,9 @@ class ManagerRequestHandler(BaseHTTPRequestHandler):
             if parsed.path == "/api/vam/scene":
                 self._json(HTTPStatus.OK, self.server.service.scene())
                 return
+            if parsed.path == "/api/vam/timeline":
+                self._json(HTTPStatus.OK, self.server.service.timeline())
+                return
             if parsed.path == "/api/vam/persons":
                 self._json(HTTPStatus.OK, self.server.service.persons())
                 return
@@ -552,6 +555,46 @@ class ManagerRequestHandler(BaseHTTPRequestHandler):
                 self._json(
                     HTTPStatus.OK,
                     service.launch_vam(reconcile=reconcile),
+                )
+                return
+            if method == "POST" and parsed.path == "/api/vam/timeline/control":
+                allowed_fields = {
+                    "timeline_id",
+                    "expected_revision",
+                    "op",
+                    "value",
+                    "clip_id",
+                    "segment_id",
+                    "layer_id",
+                }
+                unexpected_fields = sorted(set(document) - allowed_fields)
+                if unexpected_fields:
+                    raise ValueError(
+                        "unsupported Timeline control field(s): "
+                        + ", ".join(unexpected_fields)
+                    )
+                required_fields = {
+                    "timeline_id",
+                    "expected_revision",
+                    "op",
+                }
+                missing_fields = sorted(required_fields - set(document))
+                if missing_fields:
+                    raise ValueError(
+                        "missing Timeline control field(s): "
+                        + ", ".join(missing_fields)
+                    )
+                self._json(
+                    HTTPStatus.OK,
+                    service.control_timeline(
+                        timeline_id=document["timeline_id"],
+                        expected_revision=document["expected_revision"],
+                        operation=document["op"],
+                        value=document.get("value"),
+                        clip_id=document.get("clip_id"),
+                        segment_id=document.get("segment_id"),
+                        layer_id=document.get("layer_id"),
+                    ),
                 )
                 return
             if method == "POST" and parsed.path == "/api/vam/resource/apply":

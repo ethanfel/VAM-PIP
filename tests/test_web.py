@@ -128,6 +128,98 @@ class WebSecurityTests(unittest.TestCase):
         self.assertFalse(document["operation"]["busy"])
         self.assertEqual(document["operation"]["status"], "idle")
 
+    def test_timeline_routes_are_authenticated_and_use_only_opaque_controls(
+        self,
+    ) -> None:
+        timeline = {
+            "available": True,
+            "instances": [
+                {
+                    "id": "1" * 32,
+                    "revision": "2" * 32,
+                    "clips": [{"id": "3" * 32, "name": "Idle"}],
+                }
+            ],
+        }
+        control_result = {"bridge_request": "timeline-request"}
+        self.server.service.timeline = mock.Mock(return_value=timeline)
+        self.server.service.control_timeline = mock.Mock(
+            return_value=control_result
+        )
+
+        self.connection.request("GET", "/api/vam/timeline")
+        unauthorized = self.connection.getresponse()
+        self.assertEqual(unauthorized.status, 401)
+        unauthorized.read()
+
+        headers = {"X-VAMPIP-Token": self.token}
+        self.connection.request(
+            "GET",
+            "/api/vam/timeline",
+            headers=headers,
+        )
+        response = self.connection.getresponse()
+        self.assertEqual(response.status, 200)
+        self.assertEqual(self.response_json(response), timeline)
+
+        body = json.dumps(
+            {
+                "timeline_id": "1" * 32,
+                "expected_revision": "2" * 32,
+                "op": "selectClip",
+                "clip_id": "3" * 32,
+            }
+        ).encode("utf-8")
+        self.connection.request(
+            "POST",
+            "/api/vam/timeline/control",
+            body=body,
+            headers={
+                **headers,
+                "Content-Type": "application/json",
+                "Content-Length": str(len(body)),
+            },
+        )
+        response = self.connection.getresponse()
+        self.assertEqual(response.status, 200)
+        self.assertEqual(self.response_json(response), control_result)
+        self.server.service.control_timeline.assert_called_once_with(
+            timeline_id="1" * 32,
+            expected_revision="2" * 32,
+            operation="selectClip",
+            value=None,
+            clip_id="3" * 32,
+            segment_id=None,
+            layer_id=None,
+        )
+
+    def test_timeline_control_route_rejects_arbitrary_vam_names(self) -> None:
+        self.server.service.control_timeline = mock.Mock(return_value={})
+        body = json.dumps(
+            {
+                "timeline_id": "1" * 32,
+                "expected_revision": "2" * 32,
+                "op": "play",
+                "storable_name": "Anything",
+                "action_name": "Delete",
+            }
+        ).encode("utf-8")
+        self.connection.request(
+            "POST",
+            "/api/vam/timeline/control",
+            body=body,
+            headers={
+                "X-VAMPIP-Token": self.token,
+                "Content-Type": "application/json",
+                "Content-Length": str(len(body)),
+            },
+        )
+        response = self.connection.getresponse()
+        self.assertEqual(response.status, 400)
+        payload = self.response_json(response)
+        self.assertIn("unsupported Timeline control field", payload["error"])
+        self.server.service.control_timeline.assert_not_called()
+
     def test_mutation_rejects_foreign_origin(self) -> None:
         body = json.dumps({"apply": False}).encode()
         self.connection.request(
@@ -157,8 +249,8 @@ class WebSecurityTests(unittest.TestCase):
             "frame-ancestors 'none'", response.getheader("Content-Security-Policy")
         )
         document = response.read().decode("utf-8")
-        self.assertIn("/styles.css?v=0.10.0", document)
-        self.assertIn("/app.js?v=0.10.0", document)
+        self.assertIn("/styles.css?v=0.11.0", document)
+        self.assertIn("/app.js?v=0.11.0", document)
 
     def test_session_plugin_endpoints_report_and_import_defaults(self) -> None:
         preset_path = write_web_session_defaults(self.vam_root)
