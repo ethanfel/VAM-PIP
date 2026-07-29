@@ -27,6 +27,7 @@ from vampip.bridge import (
     request_scene_load,
     request_select_atom,
     request_select_person,
+    request_sam3d_capture,
     request_subscene_load,
     request_timeline_control,
 )
@@ -56,6 +57,30 @@ class BridgeProtocolTests(unittest.TestCase):
         self.assertEqual(request["command"], "rescan")
         self.assertEqual(request["browserAssist"], "off")
         self.assertIn("createdAtUtc", request)
+
+    def test_sam3d_capture_is_bound_to_the_exact_solution_file(self) -> None:
+        request_id = request_sam3d_capture(
+            self.vam_root,
+            job_id="a" * 32,
+            expected_revision="B" * 32,
+            solution_sha256="C" * 64,
+            camera_uid="SAM Camera",
+        )
+        request = self.read_request()
+        self.assertEqual(request["requestId"], request_id)
+        self.assertEqual(request["command"], "captureSam3dResult")
+        self.assertEqual(request["jobId"], "a" * 32)
+        self.assertEqual(request["expectedRevision"], "b" * 32)
+        self.assertEqual(request["solutionSha256"], "c" * 64)
+        self.assertEqual(request["cameraUid"], "SAM Camera")
+        with self.assertRaises(ValueError):
+            request_sam3d_capture(
+                self.vam_root,
+                job_id="a" * 32,
+                expected_revision="b" * 32,
+                solution_sha256="not-a-digest",
+                camera_uid="SAM Camera",
+            )
 
     def test_timeline_control_uses_only_opaque_revision_bound_fields(self) -> None:
         request_id = request_timeline_control(
@@ -1099,7 +1124,7 @@ class BridgeSourceTests(unittest.TestCase):
             repository / "src" / "vampip" / "bridge_assets" / "VAMPipBridge.cs"
         ).read_text(encoding="utf-8")
         self.assertIn("ProtocolVersion = 2", source)
-        self.assertIn('BridgeVersion = "0.9.0"', source)
+        self.assertIn('BridgeVersion = "1.0.0"', source)
         self.assertIn("TimelineProtocolVersion = 1", source)
         self.assertIn("MaximumTimelineClipsGlobally = 1024", source)
         self.assertIn("TimelinePublishIntervalSeconds = 1.0f", source)
@@ -1126,6 +1151,9 @@ class BridgeSourceTests(unittest.TestCase):
         self.assertIn('"loadScene"', source)
         self.assertIn('"selectAtom"', source)
         self.assertIn('"controlTimeline"', source)
+        self.assertIn('"applySam3dResult"', source)
+        self.assertIn('"undoSam3dResult"', source)
+        self.assertIn('"captureSam3dResult"', source)
         self.assertIn('"atom-roster"', source)
         self.assertIn('"atom-select"', source)
         self.assertIn('"atom-add"', source)
@@ -1141,6 +1169,10 @@ class BridgeSourceTests(unittest.TestCase):
         self.assertIn('"timeline-transport"', source)
         self.assertIn('"timeline-animation-play"', source)
         self.assertIn('"timeline-adapter-v1"', source)
+        self.assertIn('"sam3d-apply-v1"', source)
+        self.assertIn('"sam3d-undo-v1"', source)
+        self.assertIn('"sam3d-capture-v1"', source)
+        self.assertIn('"sam3d-camera-vrfunscript-v1"', source)
         self.assertIn('"VAM-PIP External State"', source)
         self.assertIn('"VAM-PIP Execute External Command"', source)
         for capability in (
@@ -1221,6 +1253,115 @@ class BridgeSourceTests(unittest.TestCase):
         self.assertIn("Never collapse an atom or resource", source)
         self.assertNotIn("System.Reflection", source)
         self.assertNotIn(".GetType(", source)
+
+    def test_bridge_sam3d_surface_is_revision_bound_and_allowlisted(self) -> None:
+        repository = Path(__file__).resolve().parents[1]
+        source = (
+            repository / "src" / "vampip" / "bridge_assets" / "VAMPipBridge.cs"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn('Sam3dSolutionSchema = 1', source)
+        self.assertIn('Sam3dControllerCount = 19', source)
+        self.assertIn('"selected-person-hip-relative"', source)
+        self.assertIn('Sam3dRoot + "\\\\" + request.Sam3dJobId + ".json"', source)
+        self.assertIn("LoadSam3dSolution(request)", source)
+        self.assertIn('request["solutionSha256"]', source)
+        self.assertIn("Sha256Ascii(payload)", source)
+        self.assertIn(
+            "request.Sam3dSolutionSha256",
+            source,
+        )
+        self.assertIn("IsSam3dControllerId", source)
+        self.assertIn("MaximumSam3dCoordinate = 10.0f", source)
+        self.assertIn("SnapshotSam3dState", source)
+        self.assertIn("RestoreSam3dSnapshot", source)
+        self.assertIn(
+            "snapshot.CameraCreated =\n"
+            "                    cameraResult.Created;",
+            source,
+        )
+        self.assertIn("RemoveCreatedSam3dCamera(", source)
+        self.assertIn(
+            "SuperController.singleton.RemoveAtom(createdCamera);",
+            source,
+        )
+        self.assertIn(
+            "if (CurrentSam3dSnapshot() != null)",
+            source,
+        )
+        self.assertIn(
+            "!object.ReferenceEquals(camera, result.Atom)",
+            source,
+        )
+        self.assertIn(
+            "result.Atom = null;\n"
+            "                    result.Created = false;\n"
+            "                    return \"\";",
+            source,
+        )
+        self.assertIn(
+            '"Could not monitor the SAM3D capture: "',
+            source,
+        )
+        self.assertIn(
+            "if (status == null)",
+            source,
+        )
+        self.assertIn(
+            "rendererError == null\n"
+            "                            ? \"\"",
+            source,
+        )
+        self.assertIn(
+            "The requested SAM3D pose and camera are not the "
+            "currently applied in-memory result.",
+            source,
+        )
+        self.assertIn(
+            "object.ReferenceEquals(\n"
+            "                        snapshot.Renderer,\n"
+            "                        renderer)",
+            source,
+        )
+        self.assertIn("CurrentSam3dSnapshot()", source)
+        self.assertIn('scene["sam3d"] = sam3d', source)
+        self.assertIn('Sam3dCaptureAction = "VAMPipCapture"', source)
+        self.assertIn('SetSam3dChoice(renderer, "Camera Target", "None")', source)
+        self.assertIn('SetSam3dChoice(renderer, "Render Mode", "Flat")', source)
+        self.assertIn(
+            '"Custom/Atom/Empty/Preset_VAMPipSAM3DCamera.vap"',
+            source,
+        )
+        self.assertNotIn('request["controllerId"]', source)
+        self.assertNotIn('request["actionName"]', source)
+        self.assertNotIn('request["solutionPath"]', source)
+
+    def test_sam3d_camera_presets_match_and_use_vendored_renderer(self) -> None:
+        repository = Path(__file__).resolve().parents[1]
+        packaged = (
+            repository
+            / "src"
+            / "vampip"
+            / "bridge_assets"
+            / "Preset_VAMPipSAM3DCamera.vap"
+        )
+        documented = (
+            repository
+            / "bridge"
+            / "vam"
+            / "Preset_VAMPipSAM3DCamera.vap"
+        )
+        self.assertEqual(packaged.read_bytes(), documented.read_bytes())
+        preset = json.loads(packaged.read_text(encoding="utf-8"))
+        plugin = preset["storables"][0]["plugins"]["plugin#0"]
+        self.assertEqual(
+            plugin,
+            "Custom/Scripts/VAMPip/VRRendererX/Eosin_VRRenderer.cslist",
+        )
+        settings = preset["storables"][1]
+        self.assertEqual(settings["Render Mode"], "Flat")
+        self.assertEqual(settings["Camera Target"], "None")
+        self.assertEqual(settings["Generate Funscripts"], "false")
 
     def test_bridge_source_has_bounded_clothing_and_hair_rosters(self) -> None:
         repository = Path(__file__).resolve().parents[1]

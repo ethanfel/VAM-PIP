@@ -6,7 +6,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib import resources
 import json
 import mimetypes
+import os
+from pathlib import Path
 import re
+import stat
 import threading
 from typing import Any
 from urllib.parse import parse_qs, quote, unquote, urlsplit
@@ -19,6 +22,11 @@ from vampip.service import (
     ManagerService,
     PackageConflictError,
 )
+from vampip.sam3d import (
+    SAM3D_UPLOAD_LIMIT,
+    Sam3dConfigurationError,
+    Sam3dJobError,
+)
 
 
 MAX_REQUEST_BYTES = 1024 * 1024
@@ -29,6 +37,16 @@ _RESOURCE_THUMBNAIL = re.compile(r"^/api/resources/([0-9]+)/thumbnail$")
 _RESOURCE_LEASE = re.compile(r"^/api/resources/([0-9]+)/lease$")
 _RESOURCE_DETAILS = re.compile(r"^/api/resources/([0-9]+)/details$")
 _PACKAGE_RESOURCES = re.compile(r"^/api/packages/([^/]+)/resources$")
+_SAM3D_JOB = re.compile(r"^/api/sam3d/jobs/([0-9a-f]{32})$")
+_SAM3D_ARTIFACT = re.compile(
+    r"^/api/sam3d/jobs/([0-9a-f]{32})/artifacts/"
+    r"(source|manifest|overlay|capture)$"
+)
+_SAM3D_RUN = re.compile(r"^/api/sam3d/jobs/([0-9a-f]{32})/run$")
+_SAM3D_SELECT = re.compile(r"^/api/sam3d/jobs/([0-9a-f]{32})/select$")
+_SAM3D_APPLY = re.compile(r"^/api/sam3d/jobs/([0-9a-f]{32})/apply$")
+_SAM3D_UNDO = re.compile(r"^/api/sam3d/jobs/([0-9a-f]{32})/undo$")
+_SAM3D_CAPTURE = re.compile(r"^/api/sam3d/jobs/([0-9a-f]{32})/capture$")
 _TOKEN_IN_LOG = re.compile(r"([?&]token=)[^&\s\"]+")
 
 
@@ -105,6 +123,48 @@ class ManagerRequestHandler(BaseHTTPRequestHandler):
         ).encode("utf-8")
         self._send(status, payload, "application/json; charset=utf-8")
 
+    def _send_path(
+        self,
+        status_code: int,
+        path: Path,
+        content_type: str,
+        *,
+        cache: str = "no-store",
+        maximum_bytes: int = 256 * 1024 * 1024,
+    ) -> None:
+        with path.open("rb") as stream:
+            file_status = os.fstat(stream.fileno())
+            if (
+                not stat.S_ISREG(file_status.st_mode)
+                or file_status.st_size < 0
+                or file_status.st_size > maximum_bytes
+            ):
+                raise ValueError("artifact is not a bounded regular file")
+            self.send_response(status_code)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(file_status.st_size))
+            self.send_header("Cache-Control", cache)
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("Referrer-Policy", "no-referrer")
+            self.send_header("Cross-Origin-Resource-Policy", "same-origin")
+            self.send_header(
+                "Content-Security-Policy",
+                "default-src 'self'; img-src 'self' data: blob:; "
+                "style-src 'self'; script-src 'self'; connect-src 'self'; "
+                "frame-ancestors 'none'; base-uri 'none'",
+            )
+            try:
+                self.end_headers()
+                if self.command == "HEAD":
+                    return
+                while True:
+                    chunk = stream.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+            except (BrokenPipeError, ConnectionResetError):
+                self.close_connection = True
+
     def _error(self, status: int, message: str) -> None:
         self._json(status, {"error": message, "status": status})
 
@@ -154,6 +214,49 @@ class ManagerRequestHandler(BaseHTTPRequestHandler):
         if not isinstance(document, dict):
             raise ValueError("request JSON must be an object")
         return document
+
+    def _read_image(self) -> tuple[bytes, str]:
+        content_type = self.headers.get("Content-Type", "")
+        raw_length = self.headers.get("Content-Length")
+        if raw_length is None:
+            raise ValueError("Content-Length is required")
+        try:
+            length = int(raw_length)
+        except ValueError as exc:
+            raise ValueError("invalid Content-Length") from exc
+        if length < 1 or length > SAM3D_UPLOAD_LIMIT:
+            raise ValueError("image body exceeds the 32 MiB upload limit")
+        data = self.rfile.read(length)
+        if len(data) != length:
+            raise ValueError("image body ended before Content-Length")
+        return data, content_type
+
+    def _sam3d_job_links(self, document: dict[str, object]) -> None:
+        job_id = document.get("id")
+        if not isinstance(job_id, str):
+            return
+        token = quote(self.server.api_token, safe="")
+        base = f"/api/sam3d/jobs/{job_id}/artifacts"
+        artifacts: dict[str, str] = {
+            "source": f"{base}/source?token={token}",
+        }
+        if document.get("state") == "succeeded":
+            artifacts.update(
+                {
+                    "manifest": f"{base}/manifest?token={token}",
+                    "overlay": f"{base}/overlay?token={token}",
+                }
+            )
+        last_action = document.get("last_vam_action")
+        if (
+            isinstance(document.get("last_capture"), dict)
+            or (
+                isinstance(last_action, dict)
+                and last_action.get("action") == "capture"
+            )
+        ):
+            artifacts["capture"] = f"{base}/capture?token={token}"
+        document["artifact_urls"] = artifacts
 
     @staticmethod
     def _roots(document: dict[str, Any]) -> list[str]:
@@ -240,6 +343,64 @@ class ManagerRequestHandler(BaseHTTPRequestHandler):
                 return
             if parsed.path == "/api/status":
                 self._json(HTTPStatus.OK, self.server.service.status())
+                return
+            if parsed.path == "/api/sam3d/status":
+                self._json(HTTPStatus.OK, self.server.service.sam3d_status())
+                return
+            if parsed.path == "/api/sam3d/jobs":
+                unexpected_fields = sorted(
+                    set(query) - {"limit", "offset", "token"}
+                )
+                if unexpected_fields:
+                    raise ValueError(
+                        "unsupported SAM3D jobs query field(s): "
+                        + ", ".join(unexpected_fields)
+                    )
+                result = self.server.service.sam3d_jobs(
+                    limit=int(query.get("limit", ["30"])[0]),
+                    offset=int(query.get("offset", ["0"])[0]),
+                )
+                items = result.get("items")
+                if isinstance(items, list):
+                    for item in items:
+                        if isinstance(item, dict):
+                            self._sam3d_job_links(item)
+                self._json(HTTPStatus.OK, result)
+                return
+            sam3d_job = _SAM3D_JOB.fullmatch(parsed.path)
+            if sam3d_job:
+                unexpected_fields = sorted(set(query) - {"token"})
+                if unexpected_fields:
+                    raise ValueError(
+                        "unsupported SAM3D job query field(s): "
+                        + ", ".join(unexpected_fields)
+                    )
+                result = self.server.service.sam3d_job(sam3d_job.group(1))
+                self._sam3d_job_links(result)
+                self._json(HTTPStatus.OK, result)
+                return
+            sam3d_artifact = _SAM3D_ARTIFACT.fullmatch(parsed.path)
+            if sam3d_artifact:
+                unexpected_fields = sorted(set(query) - {"token"})
+                if unexpected_fields:
+                    raise ValueError(
+                        "unsupported SAM3D artifact query field(s): "
+                        + ", ".join(unexpected_fields)
+                    )
+                artifact_path, content_type = self.server.service.sam3d_artifact(
+                    sam3d_artifact.group(1),
+                    sam3d_artifact.group(2),
+                )
+                self._send_path(
+                    HTTPStatus.OK,
+                    artifact_path,
+                    content_type,
+                    cache=(
+                        "no-store"
+                        if sam3d_artifact.group(2) == "capture"
+                        else "private, max-age=86400"
+                    ),
+                )
                 return
             if parsed.path == "/api/session-plugins":
                 self._json(
@@ -544,6 +705,10 @@ class ManagerRequestHandler(BaseHTTPRequestHandler):
             self._error(HTTPStatus.CONFLICT, str(exc))
         except LiveActionBusyError as exc:
             self._error(HTTPStatus.CONFLICT, str(exc))
+        except Sam3dJobError as exc:
+            self._error(HTTPStatus.CONFLICT, str(exc))
+        except Sam3dConfigurationError as exc:
+            self._error(HTTPStatus.SERVICE_UNAVAILABLE, str(exc))
         except Exception as exc:
             self.log_error("GET failed: %s", exc)
             self._error(HTTPStatus.INTERNAL_SERVER_ERROR, "internal manager error")
@@ -570,8 +735,186 @@ class ManagerRequestHandler(BaseHTTPRequestHandler):
             self._error(HTTPStatus.UNAUTHORIZED, "invalid manager token")
             return
         try:
-            document = self._read_json() if method == "POST" else {}
             service = self.server.service
+            if method == "POST" and parsed.path == "/api/sam3d/jobs":
+                unexpected_fields = sorted(
+                    set(query) - {"bbox", "vertical_fov", "token"}
+                )
+                if unexpected_fields:
+                    raise ValueError(
+                        "unsupported SAM3D upload query field(s): "
+                        + ", ".join(unexpected_fields)
+                    )
+                raw_bbox = query.get("bbox", [])
+                bbox: list[float] | None = None
+                if raw_bbox:
+                    if len(raw_bbox) != 1:
+                        raise ValueError("bbox must be supplied at most once")
+                    pieces = raw_bbox[0].split(",")
+                    if len(pieces) != 4:
+                        raise ValueError("bbox must be x1,y1,x2,y2")
+                    try:
+                        bbox = [float(piece) for piece in pieces]
+                    except ValueError as error:
+                        raise ValueError(
+                            "bbox must contain four finite numbers"
+                        ) from error
+                raw_fov = query.get("vertical_fov", [])
+                vertical_fov: float | None = None
+                if raw_fov:
+                    if len(raw_fov) != 1:
+                        raise ValueError(
+                            "vertical_fov must be supplied at most once"
+                        )
+                    try:
+                        vertical_fov = float(raw_fov[0])
+                    except ValueError as error:
+                        raise ValueError(
+                            "vertical_fov must be a finite number"
+                        ) from error
+                image_data, content_type = self._read_image()
+                result = service.create_sam3d_job(
+                    image_data,
+                    content_type,
+                    bbox=bbox,
+                    vertical_fov=vertical_fov,
+                )
+                self._sam3d_job_links(result)
+                self._json(HTTPStatus.CREATED, result)
+                return
+
+            document = self._read_json() if method == "POST" else {}
+            sam3d_run = _SAM3D_RUN.fullmatch(parsed.path)
+            if method == "POST" and sam3d_run:
+                if document:
+                    raise ValueError("SAM3D run request does not accept fields")
+                result = service.run_sam3d_job(sam3d_run.group(1))
+                self._sam3d_job_links(result)
+                self._json(HTTPStatus.ACCEPTED, result)
+                return
+            sam3d_apply = _SAM3D_APPLY.fullmatch(parsed.path)
+            sam3d_select = _SAM3D_SELECT.fullmatch(parsed.path)
+            if method == "POST" and sam3d_select:
+                unexpected_fields = sorted(
+                    set(document) - {"expected_revision", "person_index"}
+                )
+                if unexpected_fields:
+                    raise ValueError(
+                        "unsupported SAM3D select field(s): "
+                        + ", ".join(unexpected_fields)
+                    )
+                missing = sorted(
+                    {"expected_revision", "person_index"} - set(document)
+                )
+                if missing:
+                    raise ValueError(
+                        "missing SAM3D select field(s): " + ", ".join(missing)
+                    )
+                result = service.select_sam3d_person(
+                    sam3d_select.group(1),
+                    expected_revision=document["expected_revision"],
+                    person_index=document["person_index"],
+                )
+                self._sam3d_job_links(result)
+                self._json(HTTPStatus.OK, result)
+                return
+            if method == "POST" and sam3d_apply:
+                allowed_fields = {
+                    "expected_job_revision",
+                    "target_uid",
+                    "camera_uid",
+                    "create_camera",
+                    "person_index",
+                    "height_m",
+                    "aspect_ratio",
+                    "output_resolution",
+                    "image_format",
+                    "horizontal_fov",
+                }
+                unexpected_fields = sorted(set(document) - allowed_fields)
+                if unexpected_fields:
+                    raise ValueError(
+                        "unsupported SAM3D apply field(s): "
+                        + ", ".join(unexpected_fields)
+                    )
+                missing = sorted(
+                    {
+                        "expected_job_revision",
+                        "target_uid",
+                        "camera_uid",
+                    }
+                    - set(document)
+                )
+                if missing:
+                    raise ValueError(
+                        "missing SAM3D apply field(s): " + ", ".join(missing)
+                    )
+                self._json(
+                    HTTPStatus.OK,
+                    service.apply_sam3d_result(
+                        sam3d_apply.group(1),
+                        expected_job_revision=document["expected_job_revision"],
+                        target_uid=document["target_uid"],
+                        camera_uid=document["camera_uid"],
+                        create_camera=document.get("create_camera", False),
+                        person_index=document.get("person_index", 0),
+                        height_m=document.get("height_m", 1.65),
+                        aspect_ratio=document.get("aspect_ratio", "16:9"),
+                        output_resolution=document.get(
+                            "output_resolution",
+                            "1280x720 (HD)",
+                        ),
+                        image_format=document.get("image_format", "jpeg"),
+                        horizontal_fov=document.get("horizontal_fov"),
+                    ),
+                )
+                return
+            sam3d_undo = _SAM3D_UNDO.fullmatch(parsed.path)
+            if method == "POST" and sam3d_undo:
+                unexpected_fields = sorted(
+                    set(document) - {"expected_revision"}
+                )
+                if unexpected_fields:
+                    raise ValueError(
+                        "unsupported SAM3D undo field(s): "
+                        + ", ".join(unexpected_fields)
+                    )
+                if "expected_revision" not in document:
+                    raise ValueError("expected_revision is required")
+                self._json(
+                    HTTPStatus.OK,
+                    service.undo_sam3d_result(
+                        sam3d_undo.group(1),
+                        expected_revision=document["expected_revision"],
+                    ),
+                )
+                return
+            sam3d_capture = _SAM3D_CAPTURE.fullmatch(parsed.path)
+            if method == "POST" and sam3d_capture:
+                unexpected_fields = sorted(
+                    set(document) - {"expected_revision", "camera_uid"}
+                )
+                if unexpected_fields:
+                    raise ValueError(
+                        "unsupported SAM3D capture field(s): "
+                        + ", ".join(unexpected_fields)
+                    )
+                missing = sorted(
+                    {"expected_revision", "camera_uid"} - set(document)
+                )
+                if missing:
+                    raise ValueError(
+                        "missing SAM3D capture field(s): " + ", ".join(missing)
+                    )
+                self._json(
+                    HTTPStatus.OK,
+                    service.capture_sam3d_result(
+                        sam3d_capture.group(1),
+                        expected_revision=document["expected_revision"],
+                        camera_uid=document["camera_uid"],
+                    ),
+                )
+                return
             if method == "POST" and parsed.path == "/api/scan":
                 catalog = self._boolean(document, "catalog", True)
                 result: dict[str, object] = {"packages": service.scan_packages()}
@@ -1031,6 +1374,10 @@ class ManagerRequestHandler(BaseHTTPRequestHandler):
             self._error(HTTPStatus.CONFLICT, str(exc))
         except LiveActionBusyError as exc:
             self._error(HTTPStatus.CONFLICT, str(exc))
+        except Sam3dJobError as exc:
+            self._error(HTTPStatus.CONFLICT, str(exc))
+        except Sam3dConfigurationError as exc:
+            self._error(HTTPStatus.SERVICE_UNAVAILABLE, str(exc))
         except Exception as exc:
             self.log_error("%s failed: %s", method, exc)
             self._error(HTTPStatus.INTERNAL_SERVER_ERROR, "internal manager error")
@@ -1105,6 +1452,7 @@ def serve_manager(
     except KeyboardInterrupt:
         pass
     finally:
+        reconciler.stop()
         server.shutdown()
         server.server_close()
-        reconciler.stop()
+        service.close()

@@ -7,7 +7,7 @@ import sqlite3
 from typing import Iterator
 
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 
 SCHEMA = """
@@ -172,6 +172,36 @@ CREATE TABLE IF NOT EXISTS catalog_sources (
     resource_count INTEGER NOT NULL,
     PRIMARY KEY (root, source)
 );
+
+CREATE TABLE IF NOT EXISTS sam3d_jobs (
+    id TEXT PRIMARY KEY,
+    created_utc TEXT NOT NULL,
+    updated_utc TEXT NOT NULL,
+    state TEXT NOT NULL CHECK(
+        state IN (
+            'uploaded',
+            'queued',
+            'running',
+            'succeeded',
+            'failed',
+            'interrupted',
+            'cancelled'
+        )
+    ),
+    stage TEXT NOT NULL,
+    progress REAL NOT NULL DEFAULT 0.0,
+    source_type TEXT NOT NULL,
+    source_width INTEGER NOT NULL,
+    source_height INTEGER NOT NULL,
+    request_json TEXT NOT NULL,
+    result_json TEXT NOT NULL DEFAULT '{}',
+    error TEXT,
+    revision TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_sam3d_jobs_created
+    ON sam3d_jobs(created_utc DESC);
+CREATE INDEX IF NOT EXISTS idx_sam3d_jobs_state
+    ON sam3d_jobs(state, created_utc);
 
 """
 

@@ -286,6 +286,16 @@ def _validate_opaque_token(value: str, *, label: str) -> str:
     return value.lower()
 
 
+def _validate_sha256(value: str, *, label: str) -> str:
+    if not isinstance(value, str):
+        raise TypeError(f"{label} must be a string")
+    if len(value) != 64 or any(
+        character not in "0123456789abcdefABCDEF" for character in value
+    ):
+        raise ValueError(f"{label} must be a 64-character SHA-256 digest")
+    return value.lower()
+
+
 def request_timeline_control(
     vam_root: Path,
     *,
@@ -790,6 +800,83 @@ def request_scene_load(
     )
 
 
+def request_sam3d_apply(
+    vam_root: Path,
+    *,
+    job_id: str,
+    expected_revision: str,
+    solution_sha256: str,
+    target_uid: str,
+    camera_uid: str,
+    create_camera: bool,
+) -> str:
+    if not isinstance(create_camera, bool):
+        raise TypeError("create_camera must be a bool")
+    return _write_request(
+        vam_root,
+        {
+            "command": "applySam3dResult",
+            "jobId": _validate_opaque_token(job_id, label="job_id"),
+            "expectedRevision": _validate_opaque_token(
+                expected_revision,
+                label="expected_revision",
+            ),
+            "solutionSha256": _validate_sha256(
+                solution_sha256,
+                label="solution_sha256",
+            ),
+            "targetUid": _validate_target_uid(target_uid),
+            "cameraUid": _validate_target_uid(camera_uid),
+            "createCamera": create_camera,
+        },
+    )
+
+
+def request_sam3d_undo(
+    vam_root: Path,
+    *,
+    job_id: str,
+    expected_revision: str,
+) -> str:
+    return _write_request(
+        vam_root,
+        {
+            "command": "undoSam3dResult",
+            "jobId": _validate_opaque_token(job_id, label="job_id"),
+            "expectedRevision": _validate_opaque_token(
+                expected_revision,
+                label="expected_revision",
+            ),
+        },
+    )
+
+
+def request_sam3d_capture(
+    vam_root: Path,
+    *,
+    job_id: str,
+    expected_revision: str,
+    solution_sha256: str,
+    camera_uid: str,
+) -> str:
+    return _write_request(
+        vam_root,
+        {
+            "command": "captureSam3dResult",
+            "jobId": _validate_opaque_token(job_id, label="job_id"),
+            "expectedRevision": _validate_opaque_token(
+                expected_revision,
+                label="expected_revision",
+            ),
+            "solutionSha256": _validate_sha256(
+                solution_sha256,
+                label="solution_sha256",
+            ),
+            "cameraUid": _validate_target_uid(camera_uid),
+        },
+    )
+
+
 def _read_bridge_document(
     path: Path,
     *,
@@ -883,6 +970,13 @@ def read_scene_status(vam_root: Path) -> dict[str, object] | None:
                         "choicesTruncated",
                     ):
                         _normalize_bool(cua, key)
+                sam3d_camera = atom.get("sam3dCamera")
+                if isinstance(sam3d_camera, dict):
+                    _normalize_bool(sam3d_camera, "compatible")
+    sam3d = document.get("sam3d")
+    if isinstance(sam3d, dict):
+        _normalize_bool(sam3d, "applied")
+        _normalize_bool(sam3d, "undoAvailable")
     return document
 
 
@@ -1005,24 +1099,75 @@ def read_bridge_status(vam_root: Path) -> dict[str, object] | None:
 
 
 def install_bridge(vam_root: Path, *, force: bool = False) -> list[Path]:
-    destination = vam_root.resolve() / "Custom" / "Scripts" / "VAMPip" / "Bridge"
-    destination.mkdir(parents=True, exist_ok=True)
+    resolved_root = vam_root.resolve()
+    destination = resolved_root / "Custom" / "Scripts" / "VAMPip" / "Bridge"
     source_root = resources.files("vampip").joinpath("bridge_assets")
-    installed: list[Path] = []
+    planned: list[tuple[Path, bytes]] = []
     for name in ("VAMPipBridge.cs", "VAMPipBridge.cslist"):
-        payload = source_root.joinpath(name).read_bytes()
-        target = destination / name
-        if target.exists():
-            current = target.read_bytes()
-            if current == payload:
-                installed.append(target)
+        planned.append((destination / name, source_root.joinpath(name).read_bytes()))
+
+    preset_target = (
+        resolved_root
+        / "Custom"
+        / "Atom"
+        / "Empty"
+        / "Preset_VAMPipSAM3DCamera.vap"
+    )
+    preset_payload = source_root.joinpath("Preset_VAMPipSAM3DCamera.vap").read_bytes()
+    planned.append((preset_target, preset_payload))
+
+    renderer_source = (
+        resources.files("vampip")
+        .joinpath("renderer_assets")
+        .joinpath("VRRendererX")
+    )
+    renderer_target = (
+        resolved_root
+        / "Custom"
+        / "Scripts"
+        / "VAMPip"
+        / "VRRendererX"
+    )
+
+    def plan_renderer_tree(source: object, renderer_destination: Path) -> None:
+        for child in sorted(  # type: ignore[attr-defined]
+            source.iterdir(),
+            key=lambda entry: entry.name,
+        ):
+            target = renderer_destination / child.name
+            if child.is_dir():
+                plan_renderer_tree(child, target)
                 continue
-            if not force:
-                raise FileExistsError(
-                    f"bridge file differs and will not be overwritten: {target}"
-                )
-        temporary = target.with_name(f".{target.name}.{os.getpid()}.tmp")
-        temporary.write_bytes(payload)
-        os.replace(temporary, target)
+            planned.append((target, child.read_bytes()))
+
+    plan_renderer_tree(renderer_source, renderer_target)
+
+    # Validate the complete install set before creating directories or writing
+    # files. A conflict in a late renderer asset must not leave the bridge or
+    # camera preset partially installed.
+    needs_write: list[bool] = []
+    for target, payload in planned:
+        if not target.exists():
+            needs_write.append(True)
+            continue
+        if not target.is_file():
+            raise FileExistsError(
+                f"bridge target is not a file and will not be overwritten: {target}"
+            )
+        current = target.read_bytes()
+        differs = current != payload
+        if differs and not force:
+            raise FileExistsError(
+                f"bridge file differs and will not be overwritten: {target}"
+            )
+        needs_write.append(differs)
+
+    installed: list[Path] = []
+    for (target, payload), write_required in zip(planned, needs_write, strict=True):
+        if write_required:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            temporary = target.with_name(f".{target.name}.{os.getpid()}.tmp")
+            temporary.write_bytes(payload)
+            os.replace(temporary, target)
         installed.append(target)
     return installed

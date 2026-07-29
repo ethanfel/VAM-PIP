@@ -1,0 +1,1193 @@
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+from pathlib import Path
+import signal
+import subprocess
+import tempfile
+import unittest
+from unittest import mock
+
+from vampip.bridge import bridge_directory, install_bridge
+from vampip.database import connect
+from vampip.sam3d import (
+    Sam3dJobError,
+    Sam3dJobManager,
+    Sam3dWorkerConfig,
+    SubprocessSam3dWorker,
+    inspect_image,
+)
+from vampip.sam3d_vam import (
+    MHR70_NAMES,
+    VAM_CONTROLLER_IDS,
+    build_vam_solution,
+)
+from vampip.service import ManagerService
+
+
+def png_header(width: int = 64, height: int = 64) -> bytes:
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + b"\x00\x00\x00\rIHDR"
+        + width.to_bytes(4, "big")
+        + height.to_bytes(4, "big")
+        + b"\x08\x02\x00\x00\x00"
+    )
+
+
+def sample_people() -> list[dict[str, object]]:
+    points = [[0.0, 0.0, 0.0] for _ in MHR70_NAMES]
+
+    def set_point(name: str, x: float, y: float, z: float = 0.0) -> None:
+        points[MHR70_NAMES.index(name)] = [x, y, z]
+
+    set_point("nose", 0.0, -0.82, -0.02)
+    set_point("left-eye", -0.04, -0.84, -0.03)
+    set_point("right-eye", 0.04, -0.84, -0.03)
+    set_point("left-ear", -0.09, -0.79, 0.0)
+    set_point("right-ear", 0.09, -0.79, 0.0)
+    set_point("neck", 0.0, -0.62, 0.0)
+    for side, sign in (("left", -1.0), ("right", 1.0)):
+        set_point(f"{side}-shoulder", 0.22 * sign, -0.55, 0.0)
+        set_point(f"{side}-acromion", 0.22 * sign, -0.55, 0.0)
+        set_point(f"{side}-elbow", 0.43 * sign, -0.52, 0.02)
+        set_point(f"{side}-wrist", 0.65 * sign, -0.50, 0.02)
+        set_point(f"{side}-middle-tip", 0.75 * sign, -0.50, 0.02)
+        set_point(f"{side}-hip", 0.11 * sign, 0.0, 0.0)
+        set_point(f"{side}-knee", 0.11 * sign, 0.48, 0.02)
+        set_point(f"{side}-ankle", 0.11 * sign, 0.92, 0.0)
+        set_point(f"{side}-heel", 0.11 * sign, 0.94, -0.08)
+        set_point(f"{side}-big-toe-tip", 0.09 * sign, 0.96, 0.16)
+        set_point(f"{side}-small-toe-tip", 0.13 * sign, 0.96, 0.15)
+    return [
+        {
+            "index": 0,
+            "bbox": [5.0, 3.0, 59.0, 63.0],
+            "focalLength": 100.0,
+            "predCamT": [0.0, 0.0, 3.0],
+            "keypointNames": list(MHR70_NAMES),
+            "keypoints3d": points,
+            "keypoints2d": [[32.0, 32.0] for _ in MHR70_NAMES],
+        }
+    ]
+
+
+def sample_manifest(job_id: str) -> dict[str, object]:
+    return {
+        "schema": 1,
+        "engine": {
+            "name": "facebookresearch/sam-3d-body",
+            "mode": "native-standalone",
+        },
+        "jobId": job_id,
+        "source": {
+            "width": 64,
+            "height": 64,
+            "contentType": "image/png",
+            "bbox": [0.0, 0.0, 64.0, 64.0],
+            "verticalFov": None,
+        },
+        "people": sample_people(),
+        "artifacts": {"arrays": "arrays.npz", "overlay": "overlay.png"},
+    }
+
+
+class FakeWorker:
+    def __call__(self, config, paths, runtime_dir) -> None:
+        request = json.loads(paths.request.read_text(encoding="utf-8"))
+        manifest = sample_manifest(request["jobId"])
+        manifest["source"]["bbox"] = request["bbox"]
+        manifest["source"]["verticalFov"] = request["verticalFov"]
+        paths.manifest.write_text(json.dumps(manifest), encoding="utf-8")
+        paths.overlay.write_bytes(png_header())
+        paths.arrays.write_bytes(b"test-npz")
+
+
+class Sam3dBackendTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.base = Path(self.temporary.name)
+        self.state = self.base / "state"
+        self.vam_root = self.base / "VaM"
+        self.addons = self.vam_root / "AddonPackages"
+        self.addons.mkdir(parents=True)
+        python = self.base / "sam3d-conda" / "bin" / "python"
+        python.parent.mkdir(parents=True)
+        python.write_bytes(b"")
+        python.chmod(0o700)
+        repo = self.base / "sam-3d-body"
+        (repo / "sam_3d_body").mkdir(parents=True)
+        (repo / "sam_3d_body" / "__init__.py").write_text("", encoding="utf-8")
+        checkpoint = self.base / "models" / "model.ckpt"
+        checkpoint.parent.mkdir()
+        checkpoint.write_bytes(b"checkpoint")
+        (checkpoint.parent / "model_config.yaml").write_text(
+            "MODEL: {}\n",
+            encoding="utf-8",
+        )
+        mhr = self.base / "models" / "assets" / "mhr_model.pt"
+        mhr.parent.mkdir()
+        mhr.write_bytes(b"mhr")
+        self.config = Sam3dWorkerConfig(
+            python=python,
+            conda_executable=None,
+            conda_env=None,
+            repo=repo,
+            checkpoint=checkpoint,
+            mhr=mhr,
+        )
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def manager(self) -> Sam3dJobManager:
+        return Sam3dJobManager(
+            self.state,
+            config=self.config,
+            worker=FakeWorker(),
+        )
+
+    def completed_job(self) -> tuple[Sam3dJobManager, dict[str, object]]:
+        manager = self.manager()
+        created = manager.create(
+            png_header(),
+            "image/png",
+            bbox=[0.0, 0.0, 64.0, 64.0],
+            vertical_fov=55.0,
+        )
+        manager.queue(created["id"])
+        manager._queue.join()
+        return manager, manager.get(created["id"])
+
+    def test_upload_header_validation_rejects_spoofing_and_pixel_bombs(self) -> None:
+        info = inspect_image(png_header(3840, 2160), "image/png")
+        self.assertEqual((info.width, info.height), (3840, 2160))
+        with self.assertRaisesRegex(ValueError, "does not match"):
+            inspect_image(png_header(), "image/jpeg")
+        with self.assertRaisesRegex(ValueError, "dimensions"):
+            inspect_image(png_header(30_000, 30_000), "image/png")
+
+    def test_worker_status_reports_missing_components_without_importing_models(
+        self,
+    ) -> None:
+        config = Sam3dWorkerConfig(
+            python=None,
+            conda_executable=None,
+            conda_env=None,
+            repo=None,
+            checkpoint=None,
+            mhr=None,
+        )
+        manager = Sam3dJobManager(self.state, config=config, worker=FakeWorker())
+        status = manager.status()
+        self.assertFalse(status["available"])
+        self.assertFalse(status["comfyui_used"])
+        self.assertGreaterEqual(len(status["worker"]["errors"]), 4)
+
+    def test_subprocess_worker_starts_an_isolated_sanitized_session(self) -> None:
+        manager = self.manager()
+        created = manager.create(png_header(), "image/png")
+        paths = manager._paths(created["id"])
+        process = mock.Mock()
+        process.pid = 43210
+        process.wait.return_value = 0
+        inherited = {
+            "PATH": "/usr/bin",
+            "SAFE_KEEP": "yes",
+            "LD_PRELOAD": "/tmp/inject.so",
+            "LD_LIBRARY_PATH": "/tmp/libs",
+            "CONDA_PREFIX": "/tmp/conda",
+            "_CONDA_EXE": "/tmp/conda/bin/conda",
+            "VIRTUAL_ENV": "/tmp/venv",
+            "VIRTUAL_ENV_PROMPT": "venv",
+            "_CE_CONDA": "1",
+            "PYTHONPATH": "/tmp/python",
+            "PYTHONWARNINGS": "ignore",
+            "PYTHONNOUSERSITE": "0",
+            "COMFYUI_ROOT": "/tmp/ComfyUI",
+            "OTHER_MODEL_PATH": "/tmp/ComfyUI/models",
+        }
+        with (
+            mock.patch.dict(os.environ, inherited, clear=True),
+            mock.patch(
+                "vampip.sam3d.subprocess.Popen",
+                return_value=process,
+            ) as popen,
+        ):
+            SubprocessSam3dWorker()(
+                self.config,
+                paths,
+                manager.runtime_dir,
+            )
+
+        options = popen.call_args.kwargs
+        self.assertTrue(options["start_new_session"])
+        environment = options["env"]
+        self.assertEqual(environment["SAFE_KEEP"], "yes")
+        self.assertEqual(environment["PYTHONNOUSERSITE"], "1")
+        self.assertEqual(
+            environment["TMPDIR"],
+            str(manager.runtime_dir / "tmp"),
+        )
+        for key in inherited:
+            if key not in {"PATH", "SAFE_KEEP", "PYTHONNOUSERSITE"}:
+                self.assertNotIn(key, environment)
+        process.wait.assert_called_once_with(
+            timeout=self.config.timeout_seconds
+        )
+
+    def test_subprocess_timeout_terminates_then_kills_process_group(self) -> None:
+        manager = self.manager()
+        created = manager.create(png_header(), "image/png")
+        paths = manager._paths(created["id"])
+        process = mock.Mock()
+        process.pid = 43210
+        process.wait.side_effect = [
+            subprocess.TimeoutExpired("sam3d-worker", 1800),
+            subprocess.TimeoutExpired("sam3d-worker", 5),
+            -signal.SIGKILL,
+        ]
+        with (
+            mock.patch(
+                "vampip.sam3d.subprocess.Popen",
+                return_value=process,
+            ) as popen,
+            mock.patch("vampip.sam3d.os.killpg") as killpg,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "exceeded"):
+                SubprocessSam3dWorker()(
+                    self.config,
+                    paths,
+                    manager.runtime_dir,
+                )
+
+        self.assertTrue(popen.call_args.kwargs["start_new_session"])
+        self.assertEqual(
+            killpg.call_args_list,
+            [
+                mock.call(process.pid, signal.SIGTERM),
+                mock.call(process.pid, signal.SIGKILL),
+            ],
+        )
+        self.assertEqual(process.wait.call_count, 3)
+
+    def test_retry_removes_all_stale_worker_outputs_before_launch(self) -> None:
+        class FailingThenFreshWorker:
+            def __init__(self) -> None:
+                self.calls = 0
+                self.saw_clean_retry = False
+
+            def __call__(self, config, paths, runtime_dir) -> None:
+                self.calls += 1
+                if self.calls == 1:
+                    paths.manifest.write_text("stale", encoding="utf-8")
+                    paths.overlay.write_bytes(b"stale")
+                    paths.arrays.write_bytes(b"stale")
+                    raise RuntimeError("first attempt failed")
+                self.saw_clean_retry = not any(
+                    path.exists()
+                    for path in (
+                        paths.manifest,
+                        paths.overlay,
+                        paths.arrays,
+                    )
+                )
+                FakeWorker()(config, paths, runtime_dir)
+
+        worker = FailingThenFreshWorker()
+        manager = Sam3dJobManager(
+            self.state,
+            config=self.config,
+            worker=worker,
+        )
+        created = manager.create(png_header(), "image/png")
+        manager.queue(created["id"])
+        manager._queue.join()
+        self.assertEqual(manager.get(created["id"])["state"], "failed")
+
+        manager.queue(created["id"])
+        manager._queue.join()
+        self.assertTrue(worker.saw_clean_retry)
+        self.assertEqual(manager.get(created["id"])["state"], "succeeded")
+
+    def test_fake_worker_contract_persists_job_outside_tmp(self) -> None:
+        manager, job = self.completed_job()
+        self.assertEqual(job["state"], "succeeded")
+        self.assertEqual(job["person_count"], 1)
+        self.assertRegex(job["revision"], r"^[0-9a-f]{32}$")
+        directory = manager.jobs_dir / job["id"]
+        self.assertTrue((directory / "source.png").is_file())
+        self.assertTrue((directory / "manifest.json").is_file())
+        self.assertEqual(
+            directory.parent,
+            self.state.resolve() / "sam3d" / "jobs",
+        )
+        self.assertEqual(manager.manifest(job["id"])["revision"], job["revision"])
+
+    def test_manifest_revalidates_identity_content_and_revisions_on_read(
+        self,
+    ) -> None:
+        manager, job = self.completed_job()
+        path = manager.jobs_dir / job["id"] / "manifest.json"
+        original = path.read_bytes()
+        document = json.loads(original)
+
+        document["people"][0]["focalLength"] = 101.0
+        path.write_text(json.dumps(document), encoding="utf-8")
+        with self.assertRaisesRegex(Sam3dJobError, "revision"):
+            manager.manifest(job["id"])
+
+        path.write_bytes(original)
+        document = json.loads(original)
+        document["jobId"] = "f" * 32
+        path.write_text(json.dumps(document), encoding="utf-8")
+        with self.assertRaisesRegex(Sam3dJobError, "validation"):
+            manager.manifest(job["id"])
+
+        path.write_bytes(original)
+        document = json.loads(original)
+        document["schema"] = 2
+        path.write_text(json.dumps(document), encoding="utf-8")
+        with self.assertRaisesRegex(Sam3dJobError, "validation"):
+            manager.manifest(job["id"])
+
+        path.write_bytes(original)
+        document = json.loads(original)
+        document["revision"] = "f" * 32
+        path.write_text(json.dumps(document), encoding="utf-8")
+        with self.assertRaisesRegex(Sam3dJobError, "revision"):
+            manager.manifest(job["id"])
+
+        path.write_bytes(original)
+        with connect(self.state) as connection:
+            connection.execute(
+                "UPDATE sam3d_jobs SET revision = ? WHERE id = ?",
+                ("f" * 32, job["id"]),
+            )
+        with self.assertRaisesRegex(Sam3dJobError, "revision"):
+            manager.manifest(job["id"])
+
+    def test_manifest_revalidates_size_on_read(self) -> None:
+        manager, job = self.completed_job()
+        path = manager.jobs_dir / job["id"] / "manifest.json"
+        path.write_bytes(b" " * (4 * 1024 * 1024 + 1))
+        with self.assertRaisesRegex(Sam3dJobError, "validation"):
+            manager.manifest(job["id"])
+
+    def test_manifest_is_bound_to_the_persisted_request_contract(self) -> None:
+        manager, job = self.completed_job()
+        directory = manager.jobs_dir / job["id"]
+        manifest_path = directory / "manifest.json"
+        request_path = directory / "request.json"
+        original_manifest = manifest_path.read_bytes()
+        original_request = request_path.read_bytes()
+
+        mutations = (
+            lambda document: document["source"].__setitem__(
+                "contentType", "image/jpeg"
+            ),
+            lambda document: document["source"].__setitem__(
+                "bbox", [0.0, 0.0, 63.0, 64.0]
+            ),
+            lambda document: document["source"].__setitem__(
+                "verticalFov", 56.0
+            ),
+            lambda document: document["people"][0].__setitem__(
+                "keypointNames", list(reversed(MHR70_NAMES))
+            ),
+            lambda document: document.__setitem__(
+                "engine", {"name": "other", "mode": "native-standalone"}
+            ),
+        )
+        for mutate in mutations:
+            with self.subTest(mutate=mutate):
+                document = json.loads(original_manifest)
+                mutate(document)
+                manifest_path.write_text(json.dumps(document), encoding="utf-8")
+                with self.assertRaisesRegex(Sam3dJobError, "validation"):
+                    manager.manifest(job["id"])
+                manifest_path.write_bytes(original_manifest)
+
+        request = json.loads(original_request)
+        manifest = json.loads(original_manifest)
+        request["verticalFov"] = 56.0
+        manifest["source"]["verticalFov"] = 56.0
+        request_path.write_text(json.dumps(request), encoding="utf-8")
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+        with self.assertRaisesRegex(Sam3dJobError, "validation"):
+            manager.manifest(job["id"])
+
+    def test_vam_solution_uses_exact_bounded_bridge_schema(self) -> None:
+        job_id = "a" * 32
+        solution = build_vam_solution(
+            sample_manifest(job_id),
+            job_id=job_id,
+            person_index=0,
+            height_m=1.65,
+            aspect_ratio="16:9",
+            output_resolution="1280x720 (HD)",
+            image_format="jpeg",
+            horizontal_fov=72.0,
+        )
+        self.assertEqual(solution["schema"], 1)
+        self.assertEqual(
+            solution["coordinateSpace"],
+            "selected-person-hip-relative",
+        )
+        self.assertEqual(len(solution["controllers"]), 19)
+        self.assertEqual(
+            {item["id"] for item in solution["controllers"]},
+            VAM_CONTROLLER_IDS,
+        )
+        camera = solution["camera"]
+        self.assertEqual(
+            set(camera),
+            {
+                "position",
+                "rotation",
+                "flatHorizontalFov",
+                "aspectRatio",
+                "outputResolution",
+                "imageFormat",
+                "basename",
+            },
+        )
+        self.assertEqual(camera["aspectRatio"], "16:9")
+        self.assertEqual(camera["outputResolution"], "1280x720 (HD)")
+        self.assertEqual(camera["imageFormat"], "jpeg")
+        self.assertEqual(camera["basename"], job_id)
+        self.assertEqual(camera["flatHorizontalFov"], 72.0)
+        self.assertNotIn("requestId", camera)
+        self.assertRegex(solution["revision"], r"^[0-9a-f]{32}$")
+
+    def test_vam_solution_rejects_camera_outside_bridge_bounds(self) -> None:
+        job_id = "b" * 32
+        manifest = sample_manifest(job_id)
+        manifest["people"][0]["predCamT"] = [0.0, 0.0, 100.0]
+        with self.assertRaisesRegex(ValueError, "camera position"):
+            build_vam_solution(
+                manifest,
+                job_id=job_id,
+                person_index=0,
+                height_m=1.65,
+            )
+
+    def test_person_selection_is_revision_guarded_and_persistent(self) -> None:
+        manager, job = self.completed_job()
+        selected = manager.select_person(
+            job["id"],
+            expected_revision=job["revision"],
+            person_index=0,
+        )
+        self.assertEqual(selected["selected_person_index"], 0)
+        with self.assertRaisesRegex(ValueError, "revision"):
+            manager.select_person(
+                job["id"],
+                expected_revision="f" * 32,
+                person_index=0,
+            )
+
+    def test_apply_publishes_fixed_solution_and_revision_bound_request(self) -> None:
+        manager, job = self.completed_job()
+        service = ManagerService(
+            self.addons,
+            self.state,
+            process_probe=lambda: [1234],
+            sam3d_manager=manager,
+        )
+        scene = {
+            "available": True,
+            "vam_running": True,
+            "capabilities": [
+                "atom-add",
+                "sam3d-apply-v1",
+                "sam3d-camera-vrfunscript-v1",
+            ],
+            "atoms": [
+                {"uid": "Person", "type": "Person"},
+                {
+                    "uid": "SAM Camera",
+                    "type": "Empty",
+                    "sam3dCamera": {"compatible": True},
+                },
+            ],
+        }
+        service._require_live_capability = mock.Mock(return_value=scene)
+        result = service.apply_sam3d_result(
+            job["id"],
+            expected_job_revision=job["revision"],
+            target_uid="Person",
+            camera_uid="SAM Camera",
+            aspect_ratio="16:9",
+            output_resolution="1280x720 (HD)",
+        )
+        solution_path = (
+            self.vam_root
+            / "Saves"
+            / "PluginData"
+            / "VAMPip"
+            / "SAM3D"
+            / f"{job['id']}.json"
+        )
+        solution = json.loads(solution_path.read_text(encoding="utf-8"))
+        request = json.loads(
+            (bridge_directory(self.vam_root) / "request.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertEqual(request["command"], "applySam3dResult")
+        self.assertEqual(request["jobId"], job["id"])
+        self.assertEqual(
+            request["expectedRevision"],
+            solution["revision"],
+        )
+        self.assertRegex(request["solutionSha256"], r"^[0-9a-f]{64}$")
+        self.assertEqual(
+            request["solutionSha256"],
+            hashlib.sha256(solution_path.read_bytes()).hexdigest(),
+        )
+        self.assertEqual(result["solution_revision"], solution["revision"])
+        self.assertNotIn("sourcePath", json.dumps(request))
+
+    def test_solution_reload_recomputes_revision_before_undo(self) -> None:
+        manager, job = self.completed_job()
+        service = ManagerService(
+            self.addons,
+            self.state,
+            process_probe=lambda: [1234],
+            sam3d_manager=manager,
+        )
+        solution = build_vam_solution(
+            manager.manifest(job["id"]),
+            job_id=job["id"],
+        )
+        path = service._sam3d_solution_path(job["id"])
+        path.parent.mkdir(parents=True)
+        path.write_text(json.dumps(solution), encoding="utf-8")
+        service._require_live_capability = mock.Mock(
+            return_value={
+                "available": True,
+                "vam_running": True,
+                "capabilities": ["sam3d-undo-v1"],
+                "sam3d": {
+                    "applied": True,
+                    "undoAvailable": True,
+                    "jobId": job["id"],
+                    "revision": solution["revision"],
+                    "targetUid": "Person",
+                    "cameraUid": "SAM Camera",
+                },
+            }
+        )
+        service._queue_bridge_request = mock.Mock(return_value="c" * 32)
+
+        tampered = dict(solution)
+        tampered["controllers"] = list(solution["controllers"])
+        tampered["controllers"][0] = dict(tampered["controllers"][0])
+        tampered["controllers"][0]["position"] = [1.0, 0.0, 0.0]
+        path.write_text(json.dumps(tampered), encoding="utf-8")
+
+        with self.assertRaisesRegex(ValueError, "revision"):
+            service.undo_sam3d_result(
+                job["id"],
+                expected_revision=solution["revision"],
+            )
+        service._queue_bridge_request.assert_not_called()
+
+    def test_apply_rejects_reapply_while_exact_solution_is_live(self) -> None:
+        manager, job = self.completed_job()
+        service = ManagerService(
+            self.addons,
+            self.state,
+            process_probe=lambda: [1234],
+            sam3d_manager=manager,
+        )
+        solution = build_vam_solution(
+            manager.manifest(job["id"]),
+            job_id=job["id"],
+        )
+        scene = {
+            "available": True,
+            "vam_running": True,
+            "bridge": {"instanceId": "bridge-instance"},
+            "capabilities": [
+                "sam3d-apply-v1",
+                "sam3d-camera-vrfunscript-v1",
+            ],
+            "atoms": [
+                {"uid": "Person", "type": "Person"},
+                {
+                    "uid": "SAM Camera",
+                    "type": "Empty",
+                    "sam3dCamera": {"compatible": True},
+                },
+            ],
+            "sam3d": {
+                "applied": True,
+                "undoAvailable": True,
+                "jobId": job["id"],
+                "revision": solution["revision"],
+                "targetUid": "Person",
+                "cameraUid": "SAM Camera",
+            },
+        }
+        service._require_live_capability = mock.Mock(return_value=scene)
+
+        with self.assertRaisesRegex(ValueError, "undo"):
+            service.apply_sam3d_result(
+                job["id"],
+                expected_job_revision=job["revision"],
+                target_uid="Person",
+                camera_uid="SAM Camera",
+            )
+
+        self.assertFalse(
+            (bridge_directory(self.vam_root) / "request.json").exists()
+        )
+        self.assertFalse(service._sam3d_solution_path(job["id"]).exists())
+
+    def test_apply_rejects_a_post_success_modified_manifest(self) -> None:
+        manager, job = self.completed_job()
+        service = ManagerService(
+            self.addons,
+            self.state,
+            process_probe=lambda: [1234],
+            sam3d_manager=manager,
+        )
+        service._require_live_capability = mock.Mock(
+            return_value={
+                "available": True,
+                "vam_running": True,
+                "capabilities": [
+                    "sam3d-apply-v1",
+                    "sam3d-camera-vrfunscript-v1",
+                ],
+                "atoms": [
+                    {"uid": "Person", "type": "Person"},
+                    {
+                        "uid": "SAM Camera",
+                        "type": "Empty",
+                        "sam3dCamera": {"compatible": True},
+                    },
+                ],
+            }
+        )
+        path = manager.jobs_dir / job["id"] / "manifest.json"
+        document = json.loads(path.read_text(encoding="utf-8"))
+        document["people"][0]["predCamT"] = [0.0, 0.0, 2.0]
+        path.write_text(json.dumps(document), encoding="utf-8")
+
+        with self.assertRaisesRegex(Sam3dJobError, "revision"):
+            service.apply_sam3d_result(
+                job["id"],
+                expected_job_revision=job["revision"],
+                target_uid="Person",
+                camera_uid="SAM Camera",
+            )
+        self.assertFalse(
+            (bridge_directory(self.vam_root) / "request.json").exists()
+        )
+        self.assertFalse(service._sam3d_solution_path(job["id"]).exists())
+
+    def test_capture_requires_current_solution_revision_and_camera(self) -> None:
+        manager, job = self.completed_job()
+        service = ManagerService(
+            self.addons,
+            self.state,
+            process_probe=lambda: [1234],
+            sam3d_manager=manager,
+        )
+        scene = {
+            "available": True,
+            "vam_running": True,
+            "bridge": {"instanceId": "bridge-instance"},
+            "capabilities": [
+                "sam3d-capture-v1",
+                "sam3d-camera-vrfunscript-v1",
+            ],
+            "atoms": [
+                {
+                    "uid": "SAM Camera",
+                    "type": "Empty",
+                    "sam3dCamera": {"compatible": True},
+                }
+            ],
+        }
+        service._require_live_capability = mock.Mock(return_value=scene)
+        solution = build_vam_solution(
+            manager.manifest(job["id"]),
+            job_id=job["id"],
+        )
+        solution_path = service._sam3d_solution_path(job["id"])
+        solution_path.parent.mkdir(parents=True)
+        solution_path.write_text(json.dumps(solution), encoding="utf-8")
+        service._queue_bridge_request = mock.Mock(
+            side_effect=lambda writer: writer()
+        )
+
+        with self.assertRaisesRegex(ValueError, "must be applied"):
+            service.capture_sam3d_result(
+                job["id"],
+                expected_revision=solution["revision"],
+                camera_uid="SAM Camera",
+            )
+
+        scene["sam3d"] = {
+            "applied": True,
+            "undoAvailable": True,
+            "jobId": "f" * 32,
+            "revision": solution["revision"],
+            "targetUid": "Person",
+            "cameraUid": "SAM Camera",
+        }
+        with self.assertRaisesRegex(ValueError, "must be applied"):
+            service.capture_sam3d_result(
+                job["id"],
+                expected_revision=solution["revision"],
+                camera_uid="SAM Camera",
+            )
+
+        scene["sam3d"]["jobId"] = job["id"]
+        scene["sam3d"]["revision"] = "f" * 32
+        with self.assertRaisesRegex(ValueError, "must be applied"):
+            service.capture_sam3d_result(
+                job["id"],
+                expected_revision=solution["revision"],
+                camera_uid="SAM Camera",
+            )
+
+        scene["sam3d"]["revision"] = solution["revision"]
+        scene["sam3d"]["cameraUid"] = "Other Camera"
+        with self.assertRaisesRegex(ValueError, "camera_uid"):
+            service.capture_sam3d_result(
+                job["id"],
+                expected_revision=solution["revision"],
+                camera_uid="SAM Camera",
+            )
+
+        scene["sam3d"]["cameraUid"] = "SAM Camera"
+        result = service.capture_sam3d_result(
+            job["id"],
+            expected_revision=solution["revision"],
+            camera_uid="SAM Camera",
+        )
+        self.assertRegex(result["bridge_request"], r"^[0-9a-f]{32}$")
+        request = json.loads(
+            (bridge_directory(self.vam_root) / "request.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertEqual(request["command"], "captureSam3dResult")
+        self.assertEqual(
+            request["solutionSha256"],
+            hashlib.sha256(solution_path.read_bytes()).hexdigest(),
+        )
+        action = manager.get(job["id"])["last_vam_action"]
+        self.assertEqual(action["action"], "capture")
+        self.assertEqual(action["capture_extension"], "jpg")
+        self.assertEqual(action["capture_content_type"], "image/jpeg")
+
+    def test_successful_capture_history_survives_later_terminal_actions(
+        self,
+    ) -> None:
+        manager, job = self.completed_job()
+        revision = str(job["revision"])
+        capture_request = "b" * 32
+        manager.record_vam_action(
+            job["id"],
+            action="capture",
+            revision=revision,
+            request_id=capture_request,
+            bridge_instance="bridge-one",
+            target_uid="Person",
+            camera_uid="SAM Camera",
+            capture_extension="jpg",
+            capture_content_type="image/jpeg",
+        )
+        manager.reconcile_vam_action(
+            job["id"],
+            request_id=capture_request,
+            state="succeeded",
+            message="capture complete",
+        )
+        captured = manager.get(job["id"])["last_capture"]
+        self.assertEqual(
+            captured,
+            {
+                "request_id": capture_request,
+                "revision": revision,
+                "target_uid": "Person",
+                "camera_uid": "SAM Camera",
+                "extension": "jpg",
+                "content_type": "image/jpeg",
+                "captured_at_utc": captured["captured_at_utc"],
+            },
+        )
+
+        undo_request = "c" * 32
+        manager.record_vam_action(
+            job["id"],
+            action="undo",
+            revision=revision,
+            request_id=undo_request,
+            bridge_instance="bridge-one",
+            target_uid="Person",
+            camera_uid="SAM Camera",
+        )
+        manager.reconcile_vam_action(
+            job["id"],
+            request_id=undo_request,
+            state="succeeded",
+            message="undo complete",
+        )
+        manager.reconcile_vam_action(
+            job["id"],
+            request_id=undo_request,
+            state="failed",
+            message="late conflicting result",
+        )
+        after_undo = manager.get(job["id"])
+        self.assertEqual(after_undo["last_capture"], captured)
+        self.assertEqual(after_undo["last_vam_action"]["state"], "succeeded")
+
+        failed_capture = "d" * 32
+        manager.record_vam_action(
+            job["id"],
+            action="capture",
+            revision=revision,
+            request_id=failed_capture,
+            bridge_instance="bridge-one",
+            target_uid="Person",
+            camera_uid="SAM Camera",
+            capture_extension="png",
+            capture_content_type="image/png",
+        )
+        manager.reconcile_vam_action(
+            job["id"],
+            request_id=failed_capture,
+            state="failed",
+            message="renderer failed",
+        )
+        after_failure = manager.get(job["id"])
+        self.assertEqual(after_failure["last_capture"], captured)
+        self.assertEqual(after_failure["last_vam_action"]["state"], "failed")
+
+    def test_capture_artifact_survives_undo_and_manager_restart(self) -> None:
+        manager, job = self.completed_job()
+        service = ManagerService(
+            self.addons,
+            self.state,
+            process_probe=lambda: [],
+            sam3d_manager=manager,
+        )
+        solution = build_vam_solution(
+            manager.manifest(job["id"]),
+            job_id=job["id"],
+        )
+        solution_path = service._sam3d_solution_path(job["id"])
+        solution_path.parent.mkdir(parents=True)
+        solution_path.write_text(json.dumps(solution), encoding="utf-8")
+        request_id = "b" * 32
+        manager.record_vam_action(
+            job["id"],
+            action="capture",
+            revision=solution["revision"],
+            request_id=request_id,
+            bridge_instance="old-bridge",
+            target_uid="Person",
+            camera_uid="SAM Camera",
+            capture_extension="jpg",
+            capture_content_type="image/jpeg",
+        )
+        manager.reconcile_vam_action(
+            job["id"],
+            request_id=request_id,
+            state="succeeded",
+            message="capture complete",
+        )
+        capture = (
+            self.vam_root
+            / "Saves"
+            / "VR_Videos_And_Funscripts"
+            / f"vampip_{request_id}_{job['id']}.jpg"
+        )
+        capture.parent.mkdir(parents=True)
+        capture.write_bytes(b"jpeg")
+        path, content_type = service.sam3d_artifact(job["id"], "capture")
+        self.assertEqual(path, capture)
+        self.assertEqual(content_type, "image/jpeg")
+
+        undo_request = "c" * 32
+        manager.record_vam_action(
+            job["id"],
+            action="undo",
+            revision=solution["revision"],
+            request_id=undo_request,
+            bridge_instance="old-bridge",
+            target_uid="Person",
+            camera_uid="SAM Camera",
+        )
+        manager.reconcile_vam_action(
+            job["id"],
+            request_id=undo_request,
+            state="succeeded",
+            message="undo complete",
+        )
+        service.close()
+
+        restarted = ManagerService(
+            self.addons,
+            self.state,
+            process_probe=lambda: [],
+        )
+        restarted._scene_snapshot = mock.Mock(
+            side_effect=AssertionError(
+                "durable capture lookup must not require the live bridge"
+            )
+        )
+        path, content_type = restarted.sam3d_artifact(job["id"], "capture")
+        self.assertEqual(path, capture)
+        self.assertEqual(content_type, "image/jpeg")
+
+        restarted._scene_snapshot = mock.Mock(
+            return_value={"available": False}
+        )
+        decorated = restarted.sam3d_job(job["id"])
+        self.assertTrue(decorated["capture_requested"])
+        self.assertTrue(decorated["captured"])
+        self.assertEqual(
+            decorated["last_capture"]["request_id"],
+            request_id,
+        )
+        self.assertEqual(decorated["last_vam_action"]["action"], "undo")
+        restarted.close()
+
+    def test_restarted_bridge_with_same_request_stays_pending(self) -> None:
+        manager, job = self.completed_job()
+        service = ManagerService(
+            self.addons,
+            self.state,
+            process_probe=lambda: [1234],
+            sam3d_manager=manager,
+        )
+        request_id = "e" * 32
+        manager.record_vam_action(
+            job["id"],
+            action="apply",
+            revision="d" * 32,
+            request_id=request_id,
+            bridge_instance="bridge-one",
+            target_uid="Person",
+            camera_uid="SAM Camera",
+        )
+        service._scene_snapshot = mock.Mock(
+            return_value={
+                "available": True,
+                "bridge": {
+                    "instanceId": "bridge-two",
+                    "requestId": request_id,
+                    "state": "applying-sam3d",
+                    "message": "Applying.",
+                },
+                "sam3d": {
+                    "applied": False,
+                    "undoAvailable": False,
+                },
+            }
+        )
+
+        pending = service.sam3d_job(job["id"])
+
+        self.assertEqual(pending["action_state"], "running")
+        self.assertEqual(
+            manager.get(job["id"])["last_vam_action"]["state"],
+            "queued",
+        )
+
+    def test_terminal_vam_action_cannot_change_terminal_state(self) -> None:
+        manager, job = self.completed_job()
+        request_id = "e" * 32
+        manager.record_vam_action(
+            job["id"],
+            action="apply",
+            revision="d" * 32,
+            request_id=request_id,
+            bridge_instance="bridge-one",
+            target_uid="Person",
+            camera_uid="SAM Camera",
+        )
+        manager.reconcile_vam_action(
+            job["id"],
+            request_id=request_id,
+            state="succeeded",
+            message="Applied.",
+        )
+        terminal = manager.get(job["id"])["last_vam_action"]
+
+        manager.reconcile_vam_action(
+            job["id"],
+            request_id=request_id,
+            state="failed",
+            message="Late conflicting failure.",
+        )
+
+        persisted = manager.get(job["id"])["last_vam_action"]
+        self.assertEqual(persisted["state"], "succeeded")
+        self.assertEqual(persisted["message"], "Applied.")
+        self.assertEqual(
+            persisted["finished_at_utc"],
+            terminal["finished_at_utc"],
+        )
+
+    def test_job_state_tracks_live_bridge_outcome_not_mailbox_submission(
+        self,
+    ) -> None:
+        manager, job = self.completed_job()
+        service = ManagerService(
+            self.addons,
+            self.state,
+            process_probe=lambda: [1234],
+            sam3d_manager=manager,
+        )
+        revision = "d" * 32
+        request_id = "e" * 32
+        manager.record_vam_action(
+            job["id"],
+            action="apply",
+            revision=revision,
+            request_id=request_id,
+            bridge_instance="bridge-one",
+            target_uid="Person",
+            camera_uid="SAM Camera",
+        )
+        scene = {
+            "available": True,
+            "bridge": {
+                "instanceId": "bridge-one",
+                "requestId": request_id,
+                "state": "applying-sam3d",
+                "message": "Applying.",
+            },
+            "sam3d": {"applied": False, "undoAvailable": False},
+        }
+        service._scene_snapshot = mock.Mock(return_value=scene)
+
+        pending = service.sam3d_job(job["id"])
+        self.assertEqual(pending["action_state"], "running")
+        self.assertFalse(pending["applied"])
+        self.assertFalse(pending["can_undo"])
+
+        scene["bridge"].update(
+            {
+                "state": "ok",
+                "lastCompletedRequestId": request_id,
+                "message": "Applied.",
+            }
+        )
+        scene["sam3d"] = {
+            "applied": True,
+            "undoAvailable": True,
+            "jobId": job["id"],
+            "revision": revision,
+            "targetUid": "Person",
+            "cameraUid": "SAM Camera",
+            "lastAction": {
+                "requestId": request_id,
+                "jobId": job["id"],
+                "revision": revision,
+                "action": "apply",
+                "state": "ok",
+                "message": "Applied.",
+            },
+        }
+        applied = service.sam3d_job(job["id"])
+        self.assertEqual(applied["action_state"], "succeeded")
+        self.assertTrue(applied["applied"])
+        self.assertTrue(applied["can_undo"])
+        self.assertEqual(
+            manager.get(job["id"])["last_vam_action"]["state"],
+            "succeeded",
+        )
+
+        scene["bridge"] = {
+            "instanceId": "bridge-two",
+            "requestId": "1" * 32,
+            "state": "ok",
+        }
+        scene["sam3d"] = {"applied": False, "undoAvailable": False}
+        after_restart = service.sam3d_job(job["id"])
+        self.assertEqual(after_restart["action_state"], "succeeded")
+        self.assertFalse(after_restart["applied"])
+
+        scene["bridge"] = {
+            "instanceId": "bridge-one",
+            "requestId": request_id,
+            "state": "ok",
+            "lastCompletedRequestId": request_id,
+        }
+        scene["sam3d"] = {
+            "applied": True,
+            "undoAvailable": True,
+            "jobId": job["id"],
+            "revision": revision,
+            "targetUid": "Person",
+            "cameraUid": "SAM Camera",
+        }
+        failed_request = "f" * 32
+        manager.record_vam_action(
+            job["id"],
+            action="apply",
+            revision=revision,
+            request_id=failed_request,
+            bridge_instance="bridge-one",
+            target_uid="Other Person",
+            camera_uid="SAM Camera",
+        )
+        scene["sam3d"]["lastAction"] = {
+            "requestId": failed_request,
+            "jobId": job["id"],
+            "revision": revision,
+            "action": "apply",
+            "state": "error",
+            "message": "Target disappeared.",
+        }
+        failed = service.sam3d_job(job["id"])
+        self.assertEqual(failed["action_state"], "failed")
+        self.assertFalse(failed["applied"])
+        self.assertFalse(failed["can_undo"])
+
+    def test_manager_close_closes_owned_worker(self) -> None:
+        worker = mock.Mock()
+        worker.close = mock.Mock()
+        manager = Sam3dJobManager(
+            self.state,
+            config=self.config,
+            worker=worker,
+        )
+        manager.close()
+        worker.close.assert_called_once_with()
+        with self.assertRaisesRegex(Sam3dJobError, "shutting down"):
+            manager.queue("a" * 32)
+
+    def test_bridge_install_includes_camera_preset_and_renderer_tree(self) -> None:
+        installed = install_bridge(self.vam_root)
+        camera_preset = (
+            self.vam_root
+            / "Custom"
+            / "Atom"
+            / "Empty"
+            / "Preset_VAMPipSAM3DCamera.vap"
+        )
+        renderer = (
+            self.vam_root
+            / "Custom"
+            / "Scripts"
+            / "VAMPip"
+            / "VRRendererX"
+            / "Eosin_VRRenderer.cslist"
+        )
+        self.assertIn(camera_preset, installed)
+        self.assertIn(renderer, installed)
+        self.assertTrue(renderer.is_file())

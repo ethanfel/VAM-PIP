@@ -6,8 +6,8 @@
     <meta name="color-scheme" content="dark">
     <meta name="theme-color" content="#111316">
     <title>VAM-PIP Manager</title>
-    <link rel="stylesheet" href="/styles.css?v=0.13.0">
-    <script src="/app.js?v=0.13.0" defer></script>
+    <link rel="stylesheet" href="/styles.css?v=0.14.0">
+    <script src="/app.js?v=0.14.0" defer></script>
   </head>
   <body>
     <a class="skip-link" href="#main-content">Skip to library</a>
@@ -186,6 +186,10 @@
           <button class="view-tab" type="button" data-view="timeline" aria-selected="false">
             Timeline
             <span id="timeline-tab-count">—</span>
+          </button>
+          <button class="view-tab" type="button" data-view="sam3d" aria-selected="false">
+            SAM 3D
+            <span id="sam3d-tab-state">—</span>
           </button>
           <button class="view-tab" type="button" data-view="packages" aria-selected="false">
             Packages
@@ -646,6 +650,283 @@
               </svg>
             </button>
           </nav>
+        </section>
+
+        <section id="sam3d-view" class="sam3d-view" hidden aria-labelledby="sam3d-title">
+          <header class="sam3d-heading">
+            <div>
+              <p class="eyebrow">Image → pose + camera</p>
+              <div class="sam3d-title-row">
+                <h2 id="sam3d-title">SAM 3D Body studio</h2>
+                <span class="sam3d-runtime-badge" id="sam3d-runtime-badge" role="status">
+                  <span class="status-dot" aria-hidden="true"></span>
+                  <span id="sam3d-runtime-label">Checking worker…</span>
+                </span>
+              </div>
+              <p>
+                Reconstruct a static body pose and matching camera, then apply both to VaM.
+                This uses a standalone SAM 3D Body environment—ComfyUI is not used or modified.
+              </p>
+            </div>
+            <button class="secondary-button" id="sam3d-refresh-button" type="button">Refresh</button>
+          </header>
+
+          <section class="sam3d-runtime-panel" id="sam3d-runtime-panel" role="status" aria-live="polite">
+            <div>
+              <strong id="sam3d-runtime-title">Checking the standalone worker</strong>
+              <p id="sam3d-runtime-message">Reading model, GPU, VaM bridge, and camera-plugin capabilities.</p>
+            </div>
+            <button class="secondary-button small" id="sam3d-runtime-action" type="button" hidden>Retry</button>
+          </section>
+
+          <div class="sam3d-layout">
+            <div class="sam3d-main-column">
+              <section class="sam3d-panel sam3d-source-panel" aria-labelledby="sam3d-source-title">
+                <header class="sam3d-panel-heading">
+                  <div>
+                    <span class="sam3d-step">1</span>
+                    <div>
+                      <p class="eyebrow">Source image</p>
+                      <h3 id="sam3d-source-title">Choose the person to reconstruct</h3>
+                    </div>
+                  </div>
+                  <button class="quiet-button" id="sam3d-clear-source" type="button" hidden>Clear</button>
+                </header>
+
+                <input
+                  class="visually-hidden"
+                  id="sam3d-file-input"
+                  type="file"
+                  accept="image/jpeg,image/png,image/webp"
+                >
+                <label class="sam3d-drop-zone" id="sam3d-drop-zone" for="sam3d-file-input">
+                  <span class="sam3d-drop-icon" aria-hidden="true">
+                    <svg viewBox="0 0 24 24">
+                      <path d="M12 16V4m0 0L7.5 8.5M12 4l4.5 4.5M5 13v6h14v-6"></path>
+                    </svg>
+                  </span>
+                  <strong>Drop a JPEG, PNG, or WebP image here</strong>
+                  <span>or choose a file · one still image, up to 32 MiB</span>
+                </label>
+
+                <div class="sam3d-source-editor" id="sam3d-source-editor" hidden>
+                  <div class="sam3d-canvas-wrap" id="sam3d-canvas-wrap">
+                    <canvas
+                      id="sam3d-source-canvas"
+                      width="960"
+                      height="640"
+                      aria-label="Source image and selected person box"
+                    ></canvas>
+                    <p class="sam3d-canvas-hint" id="sam3d-canvas-hint">
+                      Drag over the person to draw a tighter box.
+                    </p>
+                  </div>
+                  <div class="sam3d-source-controls">
+                    <div class="sam3d-source-file">
+                      <strong id="sam3d-source-name">Source image</strong>
+                      <span id="sam3d-source-meta">—</span>
+                    </div>
+                    <label class="switch-row sam3d-bbox-toggle" for="sam3d-manual-bbox">
+                      <span>
+                        <strong>Manual person box</strong>
+                        <small>Use the full image when disabled</small>
+                      </span>
+                      <span class="switch">
+                        <input id="sam3d-manual-bbox" type="checkbox">
+                        <span aria-hidden="true"></span>
+                      </span>
+                    </label>
+                    <label class="sam3d-source-option" for="sam3d-known-vertical-fov">
+                      <span>Known vertical FOV <small>optional</small></span>
+                      <span class="sam3d-unit-input">
+                        <input
+                          id="sam3d-known-vertical-fov"
+                          type="number"
+                          min="5"
+                          max="170"
+                          step="0.1"
+                          inputmode="decimal"
+                          placeholder="Auto"
+                        >
+                        <span>°</span>
+                      </span>
+                      <small>Leave empty to let SAM 3D estimate the camera intrinsics.</small>
+                    </label>
+                    <fieldset class="sam3d-bbox-fields" id="sam3d-bbox-fields" disabled>
+                      <legend>Person box · percentage of image</legend>
+                      <label>
+                        <span>X</span>
+                        <input id="sam3d-bbox-x" type="number" min="0" max="100" step="0.1" value="0">
+                      </label>
+                      <label>
+                        <span>Y</span>
+                        <input id="sam3d-bbox-y" type="number" min="0" max="100" step="0.1" value="0">
+                      </label>
+                      <label>
+                        <span>Width</span>
+                        <input id="sam3d-bbox-width" type="number" min="0.1" max="100" step="0.1" value="100">
+                      </label>
+                      <label>
+                        <span>Height</span>
+                        <input id="sam3d-bbox-height" type="number" min="0.1" max="100" step="0.1" value="100">
+                      </label>
+                      <button class="quiet-button" id="sam3d-reset-bbox" type="button">Use full image</button>
+                    </fieldset>
+                  </div>
+                </div>
+              </section>
+
+              <section class="sam3d-panel sam3d-run-panel" aria-labelledby="sam3d-run-title">
+                <header class="sam3d-panel-heading">
+                  <div>
+                    <span class="sam3d-step">2</span>
+                    <div>
+                      <p class="eyebrow">Standalone inference</p>
+                      <h3 id="sam3d-run-title">Reconstruct pose and camera</h3>
+                    </div>
+                  </div>
+                  <button class="primary-button" id="sam3d-run-button" type="button" disabled>
+                    Run SAM 3D Body
+                  </button>
+                </header>
+                <div class="sam3d-job-progress" id="sam3d-job-progress" hidden>
+                  <div class="sam3d-progress-copy">
+                    <span class="sam3d-progress-dot" aria-hidden="true"></span>
+                    <div>
+                      <strong id="sam3d-job-stage">Preparing job…</strong>
+                      <p id="sam3d-job-message">The source image stays in VAM-PIP’s managed job storage.</p>
+                    </div>
+                    <output id="sam3d-job-percent" for="sam3d-job-progress-bar">0%</output>
+                  </div>
+                  <progress id="sam3d-job-progress-bar" max="100" value="0"></progress>
+                  <button class="secondary-button small" id="sam3d-job-retry" type="button" hidden>Retry job</button>
+                </div>
+              </section>
+
+              <section class="sam3d-panel sam3d-result-panel" id="sam3d-result-panel" hidden aria-labelledby="sam3d-result-title">
+                <header class="sam3d-panel-heading">
+                  <div>
+                    <span class="sam3d-step">3</span>
+                    <div>
+                      <p class="eyebrow">Review</p>
+                      <h3 id="sam3d-result-title">Check the reconstruction</h3>
+                    </div>
+                  </div>
+                  <label class="sam3d-body-field" for="sam3d-body-select">
+                    <span>Detected body</span>
+                    <select id="sam3d-body-select"></select>
+                  </label>
+                </header>
+
+                <div class="sam3d-preview">
+                  <div class="sam3d-preview-tabs" role="tablist" aria-label="Reconstruction preview">
+                    <button class="active" id="sam3d-preview-source" type="button" data-sam3d-preview="source" role="tab" aria-selected="true">Source</button>
+                    <button id="sam3d-preview-overlay" type="button" data-sam3d-preview="overlay" role="tab" aria-selected="false">Joint overlay</button>
+                    <button id="sam3d-preview-result" type="button" data-sam3d-preview="result" role="tab" aria-selected="false">VaM capture</button>
+                  </div>
+                  <div class="sam3d-preview-stage">
+                    <img id="sam3d-preview-image" alt="SAM 3D reconstruction preview">
+                    <div class="sam3d-preview-empty" id="sam3d-preview-empty" hidden>
+                      <strong id="sam3d-preview-empty-title">No VaM capture yet</strong>
+                      <span id="sam3d-preview-empty-detail">Apply the result and capture through the VR Video &amp; Funscript camera.</span>
+                    </div>
+                  </div>
+                  <p class="sam3d-preview-caption" id="sam3d-preview-caption">
+                    Original source image
+                  </p>
+                </div>
+              </section>
+
+              <section class="sam3d-panel sam3d-apply-panel" id="sam3d-apply-panel" hidden aria-labelledby="sam3d-apply-title">
+                <header class="sam3d-panel-heading">
+                  <div>
+                    <span class="sam3d-step">4</span>
+                    <div>
+                      <p class="eyebrow">VaM handoff</p>
+                      <h3 id="sam3d-apply-title">Apply Person pose and camera together</h3>
+                    </div>
+                  </div>
+                  <span class="sam3d-revision" id="sam3d-revision">Revision —</span>
+                </header>
+
+                <div class="sam3d-target-grid">
+                  <label>
+                    <span>Target Person</span>
+                    <select id="sam3d-person-target">
+                      <option value="">Waiting for VaM…</option>
+                    </select>
+                  </label>
+                  <label>
+                    <span>VR Video &amp; Funscript camera</span>
+                    <select id="sam3d-camera-target">
+                      <option value="">Waiting for VaM…</option>
+                    </select>
+                  </label>
+                  <label>
+                    <span>Horizontal FOV override</span>
+                    <span class="sam3d-unit-input">
+                      <input
+                        id="sam3d-camera-fov"
+                        type="number"
+                        min="5"
+                        max="170"
+                        step="0.1"
+                        inputmode="decimal"
+                        placeholder="Auto"
+                      >
+                      <span>°</span>
+                    </span>
+                  </label>
+                  <label>
+                    <span>Estimated body height</span>
+                    <span class="sam3d-unit-input">
+                      <input id="sam3d-person-height" type="number" min="0.5" max="3" step="0.01" value="1.65">
+                      <span>m</span>
+                    </span>
+                  </label>
+                  <label>
+                    <span>Capture aspect</span>
+                    <select id="sam3d-aspect-ratio"></select>
+                  </label>
+                  <label>
+                    <span>Output resolution</span>
+                    <select id="sam3d-output-resolution"></select>
+                  </label>
+                  <label>
+                    <span>Image format</span>
+                    <select id="sam3d-image-format">
+                      <option value="jpeg">JPEG</option>
+                      <option value="png">PNG</option>
+                    </select>
+                  </label>
+                </div>
+
+                <p class="sam3d-apply-note" id="sam3d-apply-note" role="status" aria-live="polite">
+                  Select an existing Person and an Empty atom running VR Video &amp; Funscript Exporter.
+                </p>
+                <div class="sam3d-action-row">
+                  <button class="primary-button" id="sam3d-apply-button" type="button" disabled>Apply pose + camera</button>
+                  <button class="secondary-button" id="sam3d-undo-button" type="button" disabled>Undo last apply</button>
+                  <button class="secondary-button" id="sam3d-capture-button" type="button" disabled>Take VaM screenshot</button>
+                </div>
+              </section>
+            </div>
+
+            <aside class="sam3d-history-panel" aria-labelledby="sam3d-history-title">
+              <header>
+                <div>
+                  <p class="eyebrow">Recent work</p>
+                  <h3 id="sam3d-history-title">Jobs</h3>
+                </div>
+                <span class="count-badge" id="sam3d-history-count">0</span>
+              </header>
+              <div class="sam3d-history-list" id="sam3d-history-list">
+                <div class="inline-empty">
+                  <p>No reconstruction jobs yet.</p>
+                </div>
+              </div>
+            </aside>
+          </div>
         </section>
 
         <section id="timeline-view" class="timeline-view" hidden aria-labelledby="timeline-title">

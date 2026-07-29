@@ -3859,6 +3859,851 @@ body.resource-detail-open {
   min-width: 88px;
 }
 
+.sam3d-view {
+  min-width: 0;
+  padding-top: 24px;
+}
+
+.sam3d-heading {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 24px;
+}
+
+.sam3d-heading > div {
+  min-width: 0;
+}
+
+.sam3d-heading h2 {
+  margin: 0;
+  font-size: clamp(25px, 3vw, 38px);
+  letter-spacing: -0.035em;
+}
+
+.sam3d-heading > div > p:last-child {
+  max-width: 780px;
+  margin: 9px 0 0;
+  color: var(--text-soft);
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+.sam3d-title-row {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 13px;
+}
+
+.sam3d-runtime-badge {
+  display: inline-flex;
+  flex: 0 0 auto;
+  gap: 7px;
+  align-items: center;
+  min-height: 30px;
+  padding: 0 11px;
+  color: var(--text-soft);
+  background: var(--surface-soft);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 750;
+}
+
+.sam3d-runtime-badge.is-ready {
+  color: var(--accent);
+  background: var(--accent-wash);
+  border-color: rgba(134, 230, 176, 0.24);
+}
+
+.sam3d-runtime-badge.is-error {
+  color: var(--danger);
+  background: var(--danger-wash);
+  border-color: rgba(255, 133, 141, 0.22);
+}
+
+.sam3d-runtime-panel {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  min-height: 68px;
+  margin-top: 22px;
+  padding: 14px 17px;
+  color: var(--text-soft);
+  background:
+    linear-gradient(90deg, rgba(128, 191, 255, 0.08), transparent 45%),
+    var(--surface);
+  border: 1px solid rgba(128, 191, 255, 0.2);
+  border-radius: var(--radius);
+}
+
+.sam3d-runtime-panel.is-ready {
+  background:
+    linear-gradient(90deg, var(--accent-wash), transparent 45%),
+    var(--surface);
+  border-color: rgba(134, 230, 176, 0.22);
+}
+
+.sam3d-runtime-panel.is-error {
+  background:
+    linear-gradient(90deg, var(--danger-wash), transparent 45%),
+    var(--surface);
+  border-color: rgba(255, 133, 141, 0.25);
+}
+
+.sam3d-runtime-panel strong {
+  display: block;
+  color: var(--text);
+  font-size: 13px;
+}
+
+.sam3d-runtime-panel p {
+  margin: 4px 0 0;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.sam3d-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(230px, 290px);
+  gap: 18px;
+  align-items: start;
+  margin-top: 18px;
+}
+
+.sam3d-main-column {
+  display: grid;
+  min-width: 0;
+  gap: 14px;
+}
+
+.sam3d-panel,
+.sam3d-history-panel {
+  min-width: 0;
+  overflow: hidden;
+  background: var(--surface);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-lg);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.12);
+}
+
+.sam3d-panel-heading {
+  display: flex;
+  min-height: 76px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 15px 18px;
+  background: rgba(255, 255, 255, 0.012);
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.sam3d-panel-heading > div:first-child {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 12px;
+}
+
+.sam3d-panel-heading h3 {
+  margin: 2px 0 0;
+  font-size: 16px;
+}
+
+.sam3d-step {
+  display: grid;
+  flex: 0 0 auto;
+  width: 31px;
+  height: 31px;
+  place-items: center;
+  color: var(--blue);
+  background: var(--blue-wash);
+  border: 1px solid rgba(128, 191, 255, 0.22);
+  border-radius: 10px;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.sam3d-drop-zone {
+  display: grid;
+  min-height: 230px;
+  margin: 18px;
+  padding: 32px;
+  place-items: center;
+  align-content: center;
+  gap: 8px;
+  color: var(--text-soft);
+  background:
+    radial-gradient(circle at center, rgba(128, 191, 255, 0.075), transparent 60%),
+    var(--surface-raised);
+  border: 1px dashed #3b4653;
+  border-radius: 13px;
+  text-align: center;
+  cursor: pointer;
+  transition:
+    border-color 130ms ease,
+    background 130ms ease,
+    transform 130ms ease;
+}
+
+.sam3d-drop-zone:hover,
+.sam3d-drop-zone.is-dragover {
+  background:
+    radial-gradient(circle at center, rgba(128, 191, 255, 0.13), transparent 60%),
+    var(--surface-hover);
+  border-color: var(--blue);
+}
+
+.sam3d-drop-zone.is-dragover {
+  transform: scale(0.995);
+}
+
+.sam3d-drop-zone strong {
+  color: var(--text);
+  font-size: 15px;
+}
+
+.sam3d-drop-zone > span:last-child {
+  font-size: 12px;
+}
+
+.sam3d-drop-icon {
+  display: grid;
+  width: 48px;
+  height: 48px;
+  margin-bottom: 7px;
+  place-items: center;
+  color: var(--blue);
+  background: var(--blue-wash);
+  border: 1px solid rgba(128, 191, 255, 0.2);
+  border-radius: 15px;
+}
+
+.sam3d-drop-icon svg {
+  width: 23px;
+  height: 23px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.7;
+}
+
+.sam3d-source-editor {
+  display: grid;
+  grid-template-columns: minmax(0, 1.75fr) minmax(245px, 0.75fr);
+}
+
+.sam3d-canvas-wrap {
+  position: relative;
+  display: grid;
+  min-width: 0;
+  min-height: 360px;
+  overflow: hidden;
+  place-items: center;
+  background:
+    linear-gradient(45deg, #11151a 25%, transparent 25%),
+    linear-gradient(-45deg, #11151a 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, #11151a 75%),
+    linear-gradient(-45deg, transparent 75%, #11151a 75%),
+    #0e1115;
+  background-position: 0 0, 0 8px, 8px -8px, -8px 0;
+  background-size: 16px 16px;
+  border-right: 1px solid var(--border-soft);
+}
+
+.sam3d-source-canvas {
+  display: block;
+  width: auto;
+  max-width: 100%;
+  height: auto;
+  max-height: min(58vh, 610px);
+  object-fit: contain;
+  touch-action: none;
+  cursor: crosshair;
+}
+
+.sam3d-canvas-hint {
+  position: absolute;
+  right: 10px;
+  bottom: 10px;
+  margin: 0;
+  padding: 7px 10px;
+  color: var(--text-soft);
+  background: rgba(12, 14, 17, 0.84);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 10px;
+  pointer-events: none;
+  backdrop-filter: blur(8px);
+}
+
+.sam3d-source-controls {
+  display: grid;
+  align-content: start;
+  gap: 18px;
+  padding: 18px;
+  background: var(--surface-raised);
+}
+
+.sam3d-source-file {
+  min-width: 0;
+}
+
+.sam3d-source-file strong,
+.sam3d-source-file span {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sam3d-source-file strong {
+  font-size: 13px;
+}
+
+.sam3d-source-file span {
+  margin-top: 5px;
+  color: var(--text-faint);
+  font-size: 11px;
+}
+
+.sam3d-bbox-toggle {
+  padding: 12px;
+  background: var(--surface);
+  border: 1px solid var(--border-soft);
+  border-radius: 10px;
+}
+
+.sam3d-bbox-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  min-width: 0;
+  margin: 0;
+  padding: 13px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+
+.sam3d-bbox-fields legend {
+  padding: 0 5px;
+  color: var(--text-faint);
+  font-size: 10px;
+  font-weight: 750;
+}
+
+.sam3d-bbox-fields label,
+.sam3d-target-grid > label,
+.sam3d-body-field,
+.sam3d-source-option {
+  display: grid;
+  min-width: 0;
+  gap: 6px;
+  color: var(--text-soft);
+  font-size: 10px;
+  font-weight: 750;
+}
+
+.sam3d-bbox-fields input,
+.sam3d-target-grid input,
+.sam3d-target-grid select,
+.sam3d-body-field select,
+.sam3d-source-option input {
+  width: 100%;
+  min-width: 0;
+  height: 39px;
+  padding: 0 10px;
+  color: var(--text);
+  background: var(--surface-soft);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  outline: none;
+  font-size: 12px;
+}
+
+.sam3d-bbox-fields input:focus,
+.sam3d-target-grid input:focus,
+.sam3d-target-grid select:focus,
+.sam3d-body-field select:focus,
+.sam3d-source-option input:focus {
+  border-color: rgba(134, 230, 176, 0.5);
+}
+
+.sam3d-bbox-fields .quiet-button {
+  grid-column: 1 / -1;
+  justify-self: start;
+}
+
+.sam3d-source-option {
+  padding: 12px;
+  background: var(--surface);
+  border: 1px solid var(--border-soft);
+  border-radius: 10px;
+}
+
+.sam3d-source-option > span:first-child {
+  color: var(--text-soft);
+  font-size: 11px;
+  font-weight: 750;
+}
+
+.sam3d-source-option > span:first-child small,
+.sam3d-source-option > small {
+  color: var(--text-faint);
+  font-size: 9px;
+  font-weight: 600;
+}
+
+.sam3d-job-progress {
+  padding: 17px 18px 19px;
+}
+
+.sam3d-progress-copy {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 11px;
+  align-items: center;
+}
+
+.sam3d-progress-copy strong {
+  font-size: 13px;
+}
+
+.sam3d-progress-copy p {
+  margin: 3px 0 0;
+  color: var(--text-soft);
+  font-size: 11px;
+}
+
+.sam3d-progress-copy output {
+  color: var(--text-soft);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.sam3d-progress-dot {
+  width: 9px;
+  height: 9px;
+  background: var(--blue);
+  border-radius: 50%;
+  box-shadow: 0 0 0 5px var(--blue-wash);
+}
+
+.sam3d-job-progress.is-running .sam3d-progress-dot {
+  animation: sam3d-pulse 1.5s ease-in-out infinite;
+}
+
+.sam3d-job-progress.is-complete .sam3d-progress-dot {
+  background: var(--accent);
+  box-shadow: 0 0 0 5px var(--accent-wash);
+}
+
+.sam3d-job-progress.is-error .sam3d-progress-dot {
+  background: var(--danger);
+  box-shadow: 0 0 0 5px var(--danger-wash);
+}
+
+.sam3d-job-progress progress {
+  display: block;
+  width: 100%;
+  height: 5px;
+  margin-top: 14px;
+  overflow: hidden;
+  appearance: none;
+  background: var(--surface-soft);
+  border: 0;
+  border-radius: 999px;
+}
+
+.sam3d-job-progress progress::-webkit-progress-bar {
+  background: var(--surface-soft);
+}
+
+.sam3d-job-progress progress::-webkit-progress-value {
+  background: linear-gradient(90deg, var(--blue), var(--accent));
+  border-radius: 999px;
+}
+
+.sam3d-job-progress progress::-moz-progress-bar {
+  background: linear-gradient(90deg, var(--blue), var(--accent));
+  border-radius: 999px;
+}
+
+.sam3d-job-retry {
+  margin-top: 13px;
+}
+
+.sam3d-body-field {
+  width: min(210px, 42vw);
+}
+
+.sam3d-preview {
+  padding: 16px 18px 18px;
+}
+
+.sam3d-preview-tabs {
+  display: inline-flex;
+  gap: 3px;
+  padding: 3px;
+  background: var(--surface-soft);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+
+.sam3d-preview-tabs button {
+  min-height: 31px;
+  padding: 0 11px;
+  color: var(--text-faint);
+  background: transparent;
+  border: 0;
+  border-radius: 7px;
+  font-size: 11px;
+  font-weight: 750;
+}
+
+.sam3d-preview-tabs button.active {
+  color: var(--text);
+  background: var(--surface-hover);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.2);
+}
+
+.sam3d-preview-stage {
+  position: relative;
+  display: grid;
+  min-height: 360px;
+  max-height: 70vh;
+  margin-top: 12px;
+  overflow: hidden;
+  place-items: center;
+  background: #090b0d;
+  border: 1px solid var(--border-soft);
+  border-radius: 12px;
+}
+
+.sam3d-preview-stage img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  max-height: 70vh;
+  object-fit: contain;
+}
+
+.sam3d-preview-empty {
+  display: grid;
+  position: absolute;
+  inset: 0;
+  place-content: center;
+  gap: 6px;
+  padding: 26px;
+  color: var(--text-faint);
+  background: var(--surface-raised);
+  text-align: center;
+}
+
+.sam3d-preview-empty strong {
+  color: var(--text-soft);
+  font-size: 13px;
+}
+
+.sam3d-preview-empty span {
+  max-width: 390px;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.sam3d-preview-caption {
+  margin: 9px 1px 0;
+  color: var(--text-faint);
+  font-size: 10px;
+}
+
+.sam3d-revision {
+  max-width: 220px;
+  overflow: hidden;
+  color: var(--text-faint);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sam3d-target-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(155px, 1fr));
+  gap: 12px;
+  padding: 18px;
+}
+
+.sam3d-unit-input {
+  position: relative;
+  display: block;
+}
+
+.sam3d-unit-input input {
+  padding-right: 30px;
+}
+
+.sam3d-unit-input > span {
+  position: absolute;
+  top: 50%;
+  right: 10px;
+  color: var(--text-faint);
+  transform: translateY(-50%);
+}
+
+.sam3d-apply-note {
+  margin: 0 18px;
+  padding: 11px 13px;
+  color: var(--text-soft);
+  background: var(--surface-raised);
+  border: 1px solid var(--border-soft);
+  border-radius: 9px;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.sam3d-apply-note.is-error {
+  color: var(--danger);
+  background: var(--danger-wash);
+  border-color: rgba(255, 133, 141, 0.22);
+}
+
+.sam3d-action-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 14px 18px 18px;
+}
+
+.sam3d-history-panel {
+  position: sticky;
+  top: calc(var(--topbar-height) + 18px);
+}
+
+.sam3d-history-panel > header {
+  display: flex;
+  min-height: 67px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 13px 15px;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.sam3d-history-panel h3 {
+  margin: 2px 0 0;
+  font-size: 15px;
+}
+
+.sam3d-history-list {
+  display: grid;
+  max-height: min(72vh, 720px);
+  overflow-y: auto;
+}
+
+.sam3d-history-item {
+  display: grid;
+  grid-template-columns: 46px minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+  width: 100%;
+  min-width: 0;
+  padding: 11px 13px;
+  color: var(--text);
+  background: transparent;
+  border: 0;
+  border-bottom: 1px solid var(--border-soft);
+  text-align: left;
+}
+
+.sam3d-history-item:hover,
+.sam3d-history-item.active {
+  background: var(--surface-hover);
+}
+
+.sam3d-history-item.active {
+  box-shadow: inset 2px 0 var(--blue);
+}
+
+.sam3d-history-thumb {
+  display: grid;
+  width: 46px;
+  height: 46px;
+  overflow: hidden;
+  place-items: center;
+  color: var(--text-faint);
+  background: var(--surface-soft);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 10px;
+}
+
+.sam3d-history-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.sam3d-history-copy {
+  min-width: 0;
+}
+
+.sam3d-history-copy strong,
+.sam3d-history-copy span {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sam3d-history-copy strong {
+  font-size: 11px;
+}
+
+.sam3d-history-copy span {
+  margin-top: 4px;
+  color: var(--text-faint);
+  font-size: 9px;
+}
+
+.sam3d-history-state {
+  width: 8px;
+  height: 8px;
+  background: var(--text-faint);
+  border-radius: 50%;
+}
+
+.sam3d-history-state.is-running {
+  background: var(--blue);
+  box-shadow: 0 0 0 4px var(--blue-wash);
+}
+
+.sam3d-history-state.is-complete {
+  background: var(--accent);
+}
+
+.sam3d-history-state.is-error {
+  background: var(--danger);
+}
+
+@keyframes sam3d-pulse {
+  0%,
+  100% {
+    opacity: 0.55;
+    transform: scale(0.85);
+  }
+
+  50% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@media (max-width: 1180px) {
+  .sam3d-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .sam3d-history-panel {
+    position: static;
+  }
+
+  .sam3d-history-list {
+    grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+    max-height: none;
+  }
+
+  .sam3d-history-item {
+    border-right: 1px solid var(--border-soft);
+  }
+
+  .sam3d-target-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    row-gap: 22px;
+  }
+}
+
+@media (max-width: 760px) {
+  .sam3d-heading,
+  .sam3d-panel-heading {
+    align-items: flex-start;
+  }
+
+  .sam3d-heading {
+    flex-direction: column;
+  }
+
+  .sam3d-title-row {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .sam3d-source-editor,
+  .sam3d-target-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .sam3d-canvas-wrap {
+    border-right: 0;
+    border-bottom: 1px solid var(--border-soft);
+  }
+
+  .sam3d-target-grid {
+    row-gap: 16px;
+  }
+
+}
+
+@media (max-width: 500px) {
+  .sam3d-panel-heading {
+    flex-direction: column;
+  }
+
+  .sam3d-panel-heading > .primary-button,
+  .sam3d-body-field {
+    width: 100%;
+  }
+
+  .sam3d-drop-zone {
+    min-height: 190px;
+    margin: 12px;
+    padding: 22px 13px;
+  }
+
+  .sam3d-source-canvas {
+    max-height: 52vh;
+  }
+
+  .sam3d-bbox-fields {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .sam3d-bbox-fields .quiet-button {
+    grid-column: 1;
+  }
+
+  .sam3d-preview-tabs {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    width: 100%;
+  }
+
+  .sam3d-preview-tabs button {
+    padding: 0 5px;
+  }
+
+  .sam3d-preview-stage {
+    min-height: 260px;
+  }
+
+  .sam3d-action-row > button {
+    width: 100%;
+  }
+}
+
 .timeline-view {
   min-width: 0;
   padding-top: 24px;

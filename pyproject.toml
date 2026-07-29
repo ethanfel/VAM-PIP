@@ -1,14 +1,15 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "vampip"
-version = "0.13.0"
+version = "0.14.0"
 description = "Safe Virt-A-Mate package management, profiles, leases, and browser UI"
 readme = "README.md"
 requires-python = ">=3.10"
-license = { text = "MIT" }
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [{ name = "VAM-PIP contributors" }]
 dependencies = []
 
@@ -32,7 +33,13 @@ vampip = [
     "bridge_assets/*.cs",
     "bridge_assets/*.cslist",
     "bridge_assets/*.md",
+    "bridge_assets/*.vap",
+    "renderer_assets/**/*",
     "webui/*.html",
     "webui/*.css",
     "webui/*.js",
 ]
+
+[tool.setuptools.data-files]
+"share/vampip/docs" = ["docs/SAM3D_SETUP.md"]
+"share/vampip/scripts" = ["scripts/create_sam3d_conda_env.sh"]

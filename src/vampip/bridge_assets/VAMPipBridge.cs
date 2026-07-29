@@ -17,8 +17,9 @@ namespace VAMPip
     public class VAMPipBridge : MVRScript
     {
         private const int ProtocolVersion = 2;
-        private const string BridgeVersion = "0.9.0";
+        private const string BridgeVersion = "1.0.0";
         private const int TimelineProtocolVersion = 1;
+        private const int Sam3dSolutionSchema = 1;
 
         private const string PluginDataRoot = "Saves\\PluginData";
         private const string DataRoot = "Saves\\PluginData\\VAMPip";
@@ -27,6 +28,9 @@ namespace VAMPip
         private const string StatusPath = BridgeRoot + "\\status.json";
         private const string ScenePath = BridgeRoot + "\\scene.json";
         private const string TimelinePath = BridgeRoot + "\\timeline.json";
+        private const string Sam3dRoot = DataRoot + "\\SAM3D";
+        private const string Sam3dCameraPreset =
+            "Custom/Atom/Empty/Preset_VAMPipSAM3DCamera.vap";
 
         private const int MaximumResourceRefLength = 1000;
         private const int MaximumCuaChoicesPerAtom = 128;
@@ -46,6 +50,9 @@ namespace VAMPip
         private const int MaximumTimelineClipsGlobally = 1024;
         private const int MaximumTimelineLabelLength = 256;
         private const int MaximumTimelineQualifiedLength = 512;
+        private const int Sam3dControllerCount = 19;
+        private const float MaximumSam3dCoordinate = 10.0f;
+        private const float Sam3dCaptureWaitSeconds = 300.0f;
         private const float PollIntervalSeconds = 0.5f;
         private const float ScenePublishIntervalSeconds = 1.0f;
         private const float TimelinePublishIntervalSeconds = 1.0f;
@@ -70,6 +77,20 @@ namespace VAMPip
         private const string CommandSelectAtom = "selectAtom";
         private const string CommandLoadScene = "loadScene";
         private const string CommandControlTimeline = "controlTimeline";
+        private const string CommandApplySam3dResult = "applySam3dResult";
+        private const string CommandUndoSam3dResult = "undoSam3dResult";
+        private const string CommandCaptureSam3dResult =
+            "captureSam3dResult";
+        private const string Sam3dCoordinateSpace =
+            "selected-person-hip-relative";
+        private const string Sam3dRendererSuffix = "_Eosin.VRRenderer";
+        private const string Sam3dCaptureAction = "VAMPipCapture";
+        private const string Sam3dRequestIdParam = "VAMPipRequestId";
+        private const string Sam3dBaseFilenameParam =
+            "VAMPipBaseFilename";
+        private const string Sam3dStatusParam = "VAMPipStatus";
+        private const string Sam3dLastOutputParam = "VAMPipLastOutput";
+        private const string Sam3dErrorParam = "VAMPipError";
         private const string TimelineExternalState =
             "VAM-PIP External State";
         private const string TimelineExternalCommand =
@@ -87,6 +108,8 @@ namespace VAMPip
         private const string StateAdding = "adding";
         private const string StateSelecting = "selecting";
         private const string StateLoadingScene = "loading-scene";
+        private const string StateApplyingSam3d = "applying-sam3d";
+        private const string StateCapturingSam3d = "capturing-sam3d";
         private const string StateOk = "ok";
         private const string StateError = "error";
 
@@ -168,6 +191,76 @@ namespace VAMPip
             public float TimelineNumberValue;
             public bool TimelineBoolValue;
             public bool HasTimelineValue;
+            public string Sam3dJobId;
+            public string Sam3dRevision;
+            public string Sam3dSolutionSha256;
+            public string Sam3dCameraUid;
+            public bool Sam3dCreateCamera;
+        }
+
+        private sealed class Sam3dControllerSolution
+        {
+            public string Id;
+            public Vector3 Position;
+            public Quaternion Rotation;
+        }
+
+        private sealed class Sam3dCameraSolution
+        {
+            public Vector3 Position;
+            public Quaternion Rotation;
+            public float FlatHorizontalFov;
+            public string AspectRatio;
+            public string OutputResolution;
+            public string ImageFormat;
+            public string BaseFilename;
+        }
+
+        private sealed class Sam3dSolution
+        {
+            public string JobId;
+            public string Revision;
+            public List<Sam3dControllerSolution> Controllers;
+            public Sam3dCameraSolution Camera;
+        }
+
+        private sealed class Sam3dControllerUndo
+        {
+            public FreeControllerV3 Controller;
+            public Vector3 Position;
+            public Quaternion Rotation;
+            public FreeControllerV3.PositionState PositionState;
+            public FreeControllerV3.RotationState RotationState;
+        }
+
+        private sealed class Sam3dUndoSnapshot
+        {
+            public string JobId;
+            public string Revision;
+            public string TargetUid;
+            public string CameraUid;
+            public bool CameraCreated;
+            public List<Sam3dControllerUndo> Controllers;
+            public FreeControllerV3 CameraController;
+            public Vector3 CameraPosition;
+            public Quaternion CameraRotation;
+            public FreeControllerV3.PositionState CameraPositionState;
+            public FreeControllerV3.RotationState CameraRotationState;
+            public MVRScript Renderer;
+            public float FlatHorizontalFov;
+            public string CameraTarget;
+            public string AspectRatio;
+            public string OutputResolution;
+            public string RenderMode;
+            public string ImageFormat;
+            public bool GenerateFunscripts;
+        }
+
+        private sealed class Sam3dCameraResult
+        {
+            public Atom Atom;
+            public bool Created;
+            public string Error;
         }
 
         private sealed class AtomCreationResult
@@ -321,6 +414,14 @@ namespace VAMPip
         private readonly Dictionary<string, TimelineSnapshot>
             _timelineSnapshots =
                 new Dictionary<string, TimelineSnapshot>();
+        private Sam3dUndoSnapshot _sam3dUndoSnapshot;
+        private string _lastSam3dRequestId = "";
+        private string _lastSam3dCommand = "";
+        private string _lastSam3dJobId = "";
+        private string _lastSam3dRevision = "";
+        private string _lastSam3dCameraUid = "";
+        private string _lastSam3dState = "";
+        private string _lastSam3dMessage = "";
 
         public override void Init()
         {
@@ -596,6 +697,10 @@ namespace VAMPip
                 parsed.TimelineRevision = "";
                 parsed.TimelineOperation = "";
                 parsed.TimelineItemToken = "";
+                parsed.Sam3dJobId = "";
+                parsed.Sam3dRevision = "";
+                parsed.Sam3dCameraUid = "";
+                parsed.Sam3dCreateCamera = false;
 
                 if (command == CommandRescan)
                 {
@@ -860,6 +965,66 @@ namespace VAMPip
                         return;
                     }
                 }
+                else if (command == CommandApplySam3dResult)
+                {
+                    parsed.Sam3dJobId =
+                        ((string)request["jobId"] ?? "").Trim();
+                    parsed.Sam3dRevision =
+                        ((string)request["expectedRevision"] ?? "").Trim();
+                    parsed.Sam3dSolutionSha256 =
+                        ((string)request["solutionSha256"] ?? "").Trim();
+                    parsed.TargetUid =
+                        ((string)request["targetUid"] ?? "").Trim();
+                    parsed.Sam3dCameraUid =
+                        ((string)request["cameraUid"] ?? "").Trim();
+                    parsed.Sam3dCreateCamera =
+                        request["createCamera"].AsBool;
+                    parsed.RescanRequired = false;
+
+                    string validationError =
+                        ValidateSam3dApplyRequest(parsed);
+                    if (validationError.Length != 0)
+                    {
+                        RejectRequest(requestId, validationError);
+                        return;
+                    }
+                }
+                else if (command == CommandUndoSam3dResult)
+                {
+                    parsed.Sam3dJobId =
+                        ((string)request["jobId"] ?? "").Trim();
+                    parsed.Sam3dRevision =
+                        ((string)request["expectedRevision"] ?? "").Trim();
+                    parsed.RescanRequired = false;
+
+                    string validationError =
+                        ValidateSam3dIdentity(parsed);
+                    if (validationError.Length != 0)
+                    {
+                        RejectRequest(requestId, validationError);
+                        return;
+                    }
+                }
+                else if (command == CommandCaptureSam3dResult)
+                {
+                    parsed.Sam3dJobId =
+                        ((string)request["jobId"] ?? "").Trim();
+                    parsed.Sam3dRevision =
+                        ((string)request["expectedRevision"] ?? "").Trim();
+                    parsed.Sam3dSolutionSha256 =
+                        ((string)request["solutionSha256"] ?? "").Trim();
+                    parsed.Sam3dCameraUid =
+                        ((string)request["cameraUid"] ?? "").Trim();
+                    parsed.RescanRequired = false;
+
+                    string validationError =
+                        ValidateSam3dCaptureRequest(parsed);
+                    if (validationError.Length != 0)
+                    {
+                        RejectRequest(requestId, validationError);
+                        return;
+                    }
+                }
                 else
                 {
                     RejectRequest(
@@ -870,8 +1035,9 @@ namespace VAMPip
                         "'loadCustomUnityAsset', " +
                         "'selectCustomUnityAssetChoice', " +
                         "'setPersonClothingResource', 'setPersonHairItem', " +
-                        "'selectPerson', " +
-                        "'selectAtom', 'loadScene', and 'controlTimeline'.");
+                        "'selectPerson', 'selectAtom', 'loadScene', " +
+                        "'controlTimeline', 'applySam3dResult', " +
+                        "'undoSam3dResult', and 'captureSam3dResult'.");
                     return;
                 }
 
@@ -1148,6 +1314,27 @@ namespace VAMPip
             return true;
         }
 
+        private static bool IsSha256Token(string value)
+        {
+            if (value == null || value.Length != 64)
+            {
+                return false;
+            }
+            int index;
+            for (index = 0; index < value.Length; index++)
+            {
+                char character = value[index];
+                bool digit = character >= '0' && character <= '9';
+                bool lower = character >= 'a' && character <= 'f';
+                bool upper = character >= 'A' && character <= 'F';
+                if (!digit && !lower && !upper)
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
+
         private static string TimelineItemField(string operation)
         {
             if (operation == "selectClip" || operation == "playClip")
@@ -1234,6 +1421,69 @@ namespace VAMPip
         private static bool IsFinite(float value)
         {
             return !float.IsNaN(value) && !float.IsInfinity(value);
+        }
+
+        private static string ValidateSam3dIdentity(
+            BridgeRequest request)
+        {
+            if (!IsHexToken(request.Sam3dJobId))
+            {
+                return "jobId must contain exactly 32 hexadecimal characters.";
+            }
+            if (!IsHexToken(request.Sam3dRevision))
+            {
+                return "expectedRevision must contain exactly 32 hexadecimal characters.";
+            }
+            return "";
+        }
+
+        private static string ValidateSam3dApplyRequest(
+            BridgeRequest request)
+        {
+            string identityError = ValidateSam3dIdentity(request);
+            if (identityError.Length != 0)
+            {
+                return identityError;
+            }
+            if (!IsSha256Token(request.Sam3dSolutionSha256))
+            {
+                return
+                    "solutionSha256 must contain exactly 64 hexadecimal characters.";
+            }
+            string targetError = ValidateTargetUid(request.TargetUid);
+            if (targetError.Length != 0)
+            {
+                return targetError;
+            }
+            string cameraError =
+                ValidateTargetUid(request.Sam3dCameraUid);
+            if (cameraError.Length != 0)
+            {
+                return "cameraUid " + cameraError;
+            }
+            return "";
+        }
+
+        private static string ValidateSam3dCaptureRequest(
+            BridgeRequest request)
+        {
+            string identityError = ValidateSam3dIdentity(request);
+            if (identityError.Length != 0)
+            {
+                return identityError;
+            }
+            if (!IsSha256Token(request.Sam3dSolutionSha256))
+            {
+                return
+                    "solutionSha256 must contain exactly 64 hexadecimal characters.";
+            }
+            string cameraError =
+                ValidateTargetUid(request.Sam3dCameraUid);
+            if (cameraError.Length != 0)
+            {
+                return "cameraUid " + cameraError;
+            }
+            return "";
         }
 
         private static string ValidateTargetUid(string targetUid)
@@ -1592,6 +1842,29 @@ namespace VAMPip
                 }
                 return;
             }
+            if (request.Command == CommandApplySam3dResult ||
+                request.Command == CommandCaptureSam3dResult)
+            {
+                _requestInProgress = true;
+                try
+                {
+                    StartCoroutine(
+                        request.Command == CommandApplySam3dResult
+                        ? ExecuteApplySam3dResult(request)
+                        : ExecuteCaptureSam3dResult(request));
+                }
+                catch (Exception exception)
+                {
+                    _requestInProgress = false;
+                    _pendingRequest = null;
+                    FailRequest(
+                        request,
+                        "",
+                        "Could not start the SAM3D action: " +
+                        DescribeException(exception));
+                }
+                return;
+            }
 
             _pendingRequest = null;
             if (request.Command == CommandRescan)
@@ -1613,6 +1886,10 @@ namespace VAMPip
             else if (request.Command == CommandControlTimeline)
             {
                 ExecuteTimelineControl(request);
+            }
+            else if (request.Command == CommandUndoSam3dResult)
+            {
+                ExecuteUndoSam3dResult(request);
             }
             else
             {
@@ -2478,6 +2755,1552 @@ namespace VAMPip
             _pendingRequest = null;
             _requestInProgress = false;
             FailRequest(request, startedAt, message);
+        }
+
+        private static bool IsSam3dControllerId(string id)
+        {
+            const string allowed =
+                "|hipControl|lThighControl|rThighControl|" +
+                "lKneeControl|rKneeControl|lFootControl|rFootControl|" +
+                "abdomen2Control|chestControl|neckControl|headControl|" +
+                "lShoulderControl|rShoulderControl|" +
+                "lArmControl|rArmControl|lElbowControl|rElbowControl|" +
+                "lHandControl|rHandControl|";
+            return id != null &&
+                id.IndexOf('|') < 0 &&
+                allowed.IndexOf(
+                    "|" + id + "|",
+                    StringComparison.Ordinal) >= 0;
+        }
+
+        private static Vector3 ParseSam3dVector(
+            JSONNode node,
+            string label)
+        {
+            JSONArray values = node == null ? null : node.AsArray;
+            if (values == null || values.Count != 3)
+            {
+                throw new Exception(label + " must contain three numbers.");
+            }
+            float x = values[0].AsFloat;
+            float y = values[1].AsFloat;
+            float z = values[2].AsFloat;
+            if (!IsFinite(x) || !IsFinite(y) || !IsFinite(z) ||
+                Mathf.Abs(x) > MaximumSam3dCoordinate ||
+                Mathf.Abs(y) > MaximumSam3dCoordinate ||
+                Mathf.Abs(z) > MaximumSam3dCoordinate)
+            {
+                throw new Exception(
+                    label + " contains a non-finite or out-of-range coordinate.");
+            }
+            return new Vector3(x, y, z);
+        }
+
+        private static Quaternion ParseSam3dQuaternion(
+            JSONNode node,
+            string label)
+        {
+            JSONArray values = node == null ? null : node.AsArray;
+            if (values == null || values.Count != 4)
+            {
+                throw new Exception(label + " must contain four numbers.");
+            }
+            float x = values[0].AsFloat;
+            float y = values[1].AsFloat;
+            float z = values[2].AsFloat;
+            float w = values[3].AsFloat;
+            if (!IsFinite(x) || !IsFinite(y) ||
+                !IsFinite(z) || !IsFinite(w))
+            {
+                throw new Exception(label + " contains a non-finite value.");
+            }
+            float magnitude =
+                Mathf.Sqrt(x * x + y * y + z * z + w * w);
+            if (!IsFinite(magnitude) ||
+                magnitude < 0.5f ||
+                magnitude > 1.5f)
+            {
+                throw new Exception(
+                    label + " is not a bounded unit quaternion.");
+            }
+            return new Quaternion(
+                x / magnitude,
+                y / magnitude,
+                z / magnitude,
+                w / magnitude);
+        }
+
+        private static string Sam3dText(
+            JSONNode node,
+            string label,
+            int maximumLength)
+        {
+            string value = ((string)node ?? "").Trim();
+            if (value.Length == 0 || value.Length > maximumLength ||
+                ContainsControlCharacter(value))
+            {
+                throw new Exception(
+                    label + " must contain 1 to " +
+                    maximumLength +
+                    " printable characters.");
+            }
+            return value;
+        }
+
+        private static uint Sha256RotateRight(uint value, int count)
+        {
+            return (value >> count) | (value << (32 - count));
+        }
+
+        private static string Sha256Ascii(string value)
+        {
+            if (value == null)
+            {
+                throw new Exception("Cannot hash a null SAM3D solution.");
+            }
+            byte[] input = new byte[value.Length];
+            int index;
+            for (index = 0; index < value.Length; index++)
+            {
+                if (value[index] > 127)
+                {
+                    throw new Exception(
+                        "The SAM3D solution must use ASCII JSON encoding.");
+                }
+                input[index] = (byte)value[index];
+            }
+
+            int paddedLength =
+                ((input.Length + 9 + 63) / 64) * 64;
+            byte[] message = new byte[paddedLength];
+            Array.Copy(input, message, input.Length);
+            message[input.Length] = 0x80;
+            ulong bitLength = (ulong)input.Length * 8UL;
+            for (index = 0; index < 8; index++)
+            {
+                message[paddedLength - 1 - index] =
+                    (byte)(bitLength >> (index * 8));
+            }
+
+            uint[] constants = new uint[] {
+                0x428a2f98u, 0x71374491u, 0xb5c0fbcfu, 0xe9b5dba5u,
+                0x3956c25bu, 0x59f111f1u, 0x923f82a4u, 0xab1c5ed5u,
+                0xd807aa98u, 0x12835b01u, 0x243185beu, 0x550c7dc3u,
+                0x72be5d74u, 0x80deb1feu, 0x9bdc06a7u, 0xc19bf174u,
+                0xe49b69c1u, 0xefbe4786u, 0x0fc19dc6u, 0x240ca1ccu,
+                0x2de92c6fu, 0x4a7484aau, 0x5cb0a9dcu, 0x76f988dau,
+                0x983e5152u, 0xa831c66du, 0xb00327c8u, 0xbf597fc7u,
+                0xc6e00bf3u, 0xd5a79147u, 0x06ca6351u, 0x14292967u,
+                0x27b70a85u, 0x2e1b2138u, 0x4d2c6dfcu, 0x53380d13u,
+                0x650a7354u, 0x766a0abbu, 0x81c2c92eu, 0x92722c85u,
+                0xa2bfe8a1u, 0xa81a664bu, 0xc24b8b70u, 0xc76c51a3u,
+                0xd192e819u, 0xd6990624u, 0xf40e3585u, 0x106aa070u,
+                0x19a4c116u, 0x1e376c08u, 0x2748774cu, 0x34b0bcb5u,
+                0x391c0cb3u, 0x4ed8aa4au, 0x5b9cca4fu, 0x682e6ff3u,
+                0x748f82eeu, 0x78a5636fu, 0x84c87814u, 0x8cc70208u,
+                0x90befffau, 0xa4506cebu, 0xbef9a3f7u, 0xc67178f2u
+            };
+            uint[] hash = new uint[] {
+                0x6a09e667u, 0xbb67ae85u, 0x3c6ef372u, 0xa54ff53au,
+                0x510e527fu, 0x9b05688cu, 0x1f83d9abu, 0x5be0cd19u
+            };
+            uint[] schedule = new uint[64];
+            unchecked
+            {
+                int offset;
+                for (offset = 0; offset < message.Length; offset += 64)
+                {
+                    for (index = 0; index < 16; index++)
+                    {
+                        int cursor = offset + index * 4;
+                        schedule[index] =
+                            ((uint)message[cursor] << 24) |
+                            ((uint)message[cursor + 1] << 16) |
+                            ((uint)message[cursor + 2] << 8) |
+                            message[cursor + 3];
+                    }
+                    for (index = 16; index < 64; index++)
+                    {
+                        uint before15 = schedule[index - 15];
+                        uint before2 = schedule[index - 2];
+                        uint sigma0 =
+                            Sha256RotateRight(before15, 7) ^
+                            Sha256RotateRight(before15, 18) ^
+                            (before15 >> 3);
+                        uint sigma1 =
+                            Sha256RotateRight(before2, 17) ^
+                            Sha256RotateRight(before2, 19) ^
+                            (before2 >> 10);
+                        schedule[index] =
+                            schedule[index - 16] +
+                            sigma0 +
+                            schedule[index - 7] +
+                            sigma1;
+                    }
+
+                    uint a = hash[0];
+                    uint b = hash[1];
+                    uint c = hash[2];
+                    uint d = hash[3];
+                    uint e = hash[4];
+                    uint f = hash[5];
+                    uint g = hash[6];
+                    uint h = hash[7];
+                    for (index = 0; index < 64; index++)
+                    {
+                        uint sum1 =
+                            Sha256RotateRight(e, 6) ^
+                            Sha256RotateRight(e, 11) ^
+                            Sha256RotateRight(e, 25);
+                        uint choose = (e & f) ^ ((~e) & g);
+                        uint temporary1 =
+                            h +
+                            sum1 +
+                            choose +
+                            constants[index] +
+                            schedule[index];
+                        uint sum0 =
+                            Sha256RotateRight(a, 2) ^
+                            Sha256RotateRight(a, 13) ^
+                            Sha256RotateRight(a, 22);
+                        uint majority =
+                            (a & b) ^ (a & c) ^ (b & c);
+                        uint temporary2 = sum0 + majority;
+                        h = g;
+                        g = f;
+                        f = e;
+                        e = d + temporary1;
+                        d = c;
+                        c = b;
+                        b = a;
+                        a = temporary1 + temporary2;
+                    }
+                    hash[0] += a;
+                    hash[1] += b;
+                    hash[2] += c;
+                    hash[3] += d;
+                    hash[4] += e;
+                    hash[5] += f;
+                    hash[6] += g;
+                    hash[7] += h;
+                }
+            }
+
+            const string hexadecimal = "0123456789abcdef";
+            char[] result = new char[64];
+            for (index = 0; index < hash.Length; index++)
+            {
+                int digit;
+                for (digit = 0; digit < 8; digit++)
+                {
+                    int shift = 28 - digit * 4;
+                    result[index * 8 + digit] =
+                        hexadecimal[
+                            (int)((hash[index] >> shift) & 0x0fu)];
+                }
+            }
+            return new string(result);
+        }
+
+        private static Sam3dSolution LoadSam3dSolution(
+            BridgeRequest request)
+        {
+            string path =
+                Sam3dRoot + "\\" + request.Sam3dJobId + ".json";
+            if (!FileManagerSecure.FileExists(path))
+            {
+                throw new Exception(
+                    "The requested SAM3D solution is not available.");
+            }
+            string payload = FileManagerSecure.ReadAllText(path);
+            if (payload == null || payload.Length == 0 ||
+                payload.Length > 131072)
+            {
+                throw new Exception(
+                    "The SAM3D solution is empty or exceeds 128 KiB.");
+            }
+            if (!string.Equals(
+                    Sha256Ascii(payload),
+                    request.Sam3dSolutionSha256,
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                throw new Exception(
+                    "The SAM3D solution file digest no longer matches the request.");
+            }
+            JSONClass document = JSON.Parse(payload).AsObject;
+            if (document == null ||
+                document["schema"].AsInt != Sam3dSolutionSchema)
+            {
+                throw new Exception(
+                    "The SAM3D solution schema is unsupported.");
+            }
+
+            Sam3dSolution solution = new Sam3dSolution();
+            solution.JobId =
+                ((string)document["jobId"] ?? "").Trim().ToLowerInvariant();
+            solution.Revision =
+                ((string)document["revision"] ?? "").Trim().ToLowerInvariant();
+            if (!string.Equals(
+                    solution.JobId,
+                    request.Sam3dJobId,
+                    StringComparison.OrdinalIgnoreCase) ||
+                !string.Equals(
+                    solution.Revision,
+                    request.Sam3dRevision,
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                throw new Exception(
+                    "The SAM3D solution no longer matches the requested revision.");
+            }
+            if ((string)document["coordinateSpace"] !=
+                Sam3dCoordinateSpace)
+            {
+                throw new Exception(
+                    "The SAM3D solution coordinate space is unsupported.");
+            }
+
+            JSONArray controllers = document["controllers"].AsArray;
+            if (controllers == null ||
+                controllers.Count != Sam3dControllerCount)
+            {
+                throw new Exception(
+                    "The SAM3D solution must contain exactly 19 controllers.");
+            }
+            solution.Controllers =
+                new List<Sam3dControllerSolution>();
+            HashSet<string> seen = new HashSet<string>();
+            int controllerIndex;
+            for (controllerIndex = 0;
+                 controllerIndex < controllers.Count;
+                 controllerIndex++)
+            {
+                JSONClass value = controllers[controllerIndex].AsObject;
+                string id =
+                    value == null
+                    ? ""
+                    : ((string)value["id"] ?? "").Trim();
+                if (!IsSam3dControllerId(id) || seen.Contains(id))
+                {
+                    throw new Exception(
+                        "The SAM3D solution contains an unknown or duplicate controller.");
+                }
+                seen.Add(id);
+                Sam3dControllerSolution controller =
+                    new Sam3dControllerSolution();
+                controller.Id = id;
+                controller.Position =
+                    ParseSam3dVector(
+                        value["position"],
+                        id + " position");
+                controller.Rotation =
+                    ParseSam3dQuaternion(
+                        value["rotation"],
+                        id + " rotation");
+                solution.Controllers.Add(controller);
+            }
+
+            JSONClass camera = document["camera"].AsObject;
+            if (camera == null)
+            {
+                throw new Exception(
+                    "The SAM3D solution has no camera.");
+            }
+            solution.Camera = new Sam3dCameraSolution();
+            solution.Camera.Position =
+                ParseSam3dVector(camera["position"], "camera position");
+            solution.Camera.Rotation =
+                ParseSam3dQuaternion(camera["rotation"], "camera rotation");
+            solution.Camera.FlatHorizontalFov =
+                camera["flatHorizontalFov"].AsFloat;
+            if (!IsFinite(solution.Camera.FlatHorizontalFov) ||
+                solution.Camera.FlatHorizontalFov < 0.1f ||
+                solution.Camera.FlatHorizontalFov > 179.9f)
+            {
+                throw new Exception(
+                    "camera flatHorizontalFov must be between 0.1 and 179.9.");
+            }
+            solution.Camera.AspectRatio =
+                Sam3dText(camera["aspectRatio"], "camera aspectRatio", 16);
+            solution.Camera.OutputResolution =
+                Sam3dText(
+                    camera["outputResolution"],
+                    "camera outputResolution",
+                    64);
+            solution.Camera.ImageFormat =
+                Sam3dText(camera["imageFormat"], "camera imageFormat", 128);
+            solution.Camera.BaseFilename =
+                Sam3dText(camera["basename"], "camera basename", 64);
+            if (solution.Camera.BaseFilename != solution.JobId)
+            {
+                throw new Exception(
+                    "camera basename does not match the immutable job ID.");
+            }
+            return solution;
+        }
+
+        private static MVRScript FindSam3dRenderer(Atom camera)
+        {
+            if (camera == null || camera.type != "Empty")
+            {
+                return null;
+            }
+            List<string> storableIds = camera.GetStorableIDs();
+            if (storableIds == null)
+            {
+                return null;
+            }
+            int index;
+            for (index = 0; index < storableIds.Count; index++)
+            {
+                string storableId = storableIds[index] ?? "";
+                if (!storableId.EndsWith(
+                        Sam3dRendererSuffix,
+                        StringComparison.Ordinal))
+                {
+                    continue;
+                }
+                MVRScript renderer =
+                    camera.GetStorableByID(storableId) as MVRScript;
+                if (renderer == null ||
+                    renderer.GetAction(Sam3dCaptureAction) == null ||
+                    renderer.GetStringJSONParam(Sam3dRequestIdParam) == null ||
+                    renderer.GetStringJSONParam(Sam3dBaseFilenameParam) == null ||
+                    renderer.GetStringJSONParam(Sam3dStatusParam) == null ||
+                    renderer.GetStringJSONParam(Sam3dLastOutputParam) == null ||
+                    renderer.GetStringJSONParam(Sam3dErrorParam) == null)
+                {
+                    continue;
+                }
+                return renderer;
+            }
+            return null;
+        }
+
+        private static JSONStorableStringChooser RequireSam3dChooser(
+            MVRScript renderer,
+            string name)
+        {
+            JSONStorableStringChooser chooser =
+                renderer.GetStringChooserJSONParam(name);
+            if (chooser == null)
+            {
+                throw new Exception(
+                    "The VR-and-Funscript renderer has no " +
+                    name +
+                    " chooser.");
+            }
+            return chooser;
+        }
+
+        private static void SetSam3dChoice(
+            MVRScript renderer,
+            string name,
+            string value)
+        {
+            JSONStorableStringChooser chooser =
+                RequireSam3dChooser(renderer, name);
+            if (chooser.choices == null ||
+                !chooser.choices.Contains(value))
+            {
+                throw new Exception(
+                    "The VR-and-Funscript renderer does not support " +
+                    name +
+                    " value " +
+                    value +
+                    ".");
+            }
+            chooser.val = value;
+        }
+
+        private static string Sam3dImageFormatLabel(string key)
+        {
+            if (key == "jpeg")
+            {
+                return "JPEG (Lossy, Small & Fast)\nNo Transparency";
+            }
+            if (key == "png")
+            {
+                return "PNG (Lossless, Big & Slow)\nTransparency Support";
+            }
+            throw new Exception(
+                "camera imageFormat must be either jpeg or png.");
+        }
+
+        private static void ConfigureSam3dRenderer(
+            MVRScript renderer,
+            Sam3dCameraSolution camera)
+        {
+            JSONStorableFloat fov =
+                renderer.GetFloatJSONParam("Flat Horizontal FOV");
+            JSONStorableBool funscripts =
+                renderer.GetBoolJSONParam("Generate Funscripts");
+            if (fov == null || funscripts == null)
+            {
+                throw new Exception(
+                    "The VR-and-Funscript renderer is missing required flat-render controls.");
+            }
+            SetSam3dChoice(renderer, "Camera Target", "None");
+            SetSam3dChoice(renderer, "Render Mode", "Flat");
+            SetSam3dChoice(
+                renderer,
+                "Aspect Ratio",
+                camera.AspectRatio);
+            SetSam3dChoice(
+                renderer,
+                "Output Resolution",
+                camera.OutputResolution);
+            SetSam3dChoice(
+                renderer,
+                "Image Format",
+                Sam3dImageFormatLabel(camera.ImageFormat));
+            fov.val = camera.FlatHorizontalFov;
+            funscripts.val = false;
+        }
+
+        private static Dictionary<string, FreeControllerV3>
+            Sam3dPersonControllers(Atom person)
+        {
+            Dictionary<string, FreeControllerV3> result =
+                new Dictionary<string, FreeControllerV3>();
+            FreeControllerV3[] controllers =
+                person.GetComponentsInChildren<FreeControllerV3>(true);
+            int index;
+            for (index = 0; index < controllers.Length; index++)
+            {
+                FreeControllerV3 controller = controllers[index];
+                if (controller != null &&
+                    IsSam3dControllerId(controller.name) &&
+                    !result.ContainsKey(controller.name))
+                {
+                    result.Add(controller.name, controller);
+                }
+            }
+            return result;
+        }
+
+        private static Sam3dUndoSnapshot SnapshotSam3dState(
+            BridgeRequest request,
+            Sam3dSolution solution,
+            Atom person,
+            Atom camera,
+            MVRScript renderer,
+            Dictionary<string, FreeControllerV3> controllers)
+        {
+            Sam3dUndoSnapshot snapshot = new Sam3dUndoSnapshot();
+            snapshot.JobId = solution.JobId;
+            snapshot.Revision = solution.Revision;
+            snapshot.TargetUid = request.TargetUid;
+            snapshot.CameraUid = request.Sam3dCameraUid;
+            snapshot.Controllers = new List<Sam3dControllerUndo>();
+            int index;
+            for (index = 0;
+                 index < solution.Controllers.Count;
+                 index++)
+            {
+                Sam3dControllerSolution target =
+                    solution.Controllers[index];
+                FreeControllerV3 controller;
+                if (!controllers.TryGetValue(target.Id, out controller) ||
+                    controller == null)
+                {
+                    throw new Exception(
+                        "Person is missing required controller " +
+                        target.Id +
+                        ".");
+                }
+                Sam3dControllerUndo saved =
+                    new Sam3dControllerUndo();
+                saved.Controller = controller;
+                saved.Position = controller.transform.position;
+                saved.Rotation = controller.transform.rotation;
+                saved.PositionState = controller.currentPositionState;
+                saved.RotationState = controller.currentRotationState;
+                snapshot.Controllers.Add(saved);
+            }
+
+            snapshot.CameraController = camera.mainController;
+            if (snapshot.CameraController == null)
+            {
+                throw new Exception(
+                    "The camera Empty has no main controller.");
+            }
+            snapshot.CameraPosition =
+                snapshot.CameraController.transform.position;
+            snapshot.CameraRotation =
+                snapshot.CameraController.transform.rotation;
+            snapshot.CameraPositionState =
+                snapshot.CameraController.currentPositionState;
+            snapshot.CameraRotationState =
+                snapshot.CameraController.currentRotationState;
+            snapshot.Renderer = renderer;
+            JSONStorableFloat fov =
+                renderer.GetFloatJSONParam("Flat Horizontal FOV");
+            JSONStorableBool funscripts =
+                renderer.GetBoolJSONParam("Generate Funscripts");
+            if (fov == null || funscripts == null)
+            {
+                throw new Exception(
+                    "The VR-and-Funscript renderer has incomplete settings.");
+            }
+            snapshot.FlatHorizontalFov = fov.val;
+            snapshot.CameraTarget =
+                RequireSam3dChooser(renderer, "Camera Target").val;
+            snapshot.AspectRatio =
+                RequireSam3dChooser(renderer, "Aspect Ratio").val;
+            snapshot.OutputResolution =
+                RequireSam3dChooser(renderer, "Output Resolution").val;
+            snapshot.RenderMode =
+                RequireSam3dChooser(renderer, "Render Mode").val;
+            snapshot.ImageFormat =
+                RequireSam3dChooser(renderer, "Image Format").val;
+            snapshot.GenerateFunscripts = funscripts.val;
+            return snapshot;
+        }
+
+        private static void RestoreSam3dSnapshot(
+            Sam3dUndoSnapshot snapshot)
+        {
+            if (snapshot == null)
+            {
+                throw new Exception("No SAM3D undo snapshot is available.");
+            }
+            int index;
+            for (index = 0;
+                 index < snapshot.Controllers.Count;
+                 index++)
+            {
+                Sam3dControllerUndo saved =
+                    snapshot.Controllers[index];
+                if (saved.Controller == null)
+                {
+                    throw new Exception(
+                        "A saved Person controller is no longer available.");
+                }
+                saved.Controller.currentPositionState =
+                    FreeControllerV3.PositionState.On;
+                saved.Controller.currentRotationState =
+                    FreeControllerV3.RotationState.On;
+                saved.Controller.transform.position = saved.Position;
+                saved.Controller.transform.rotation = saved.Rotation;
+                saved.Controller.currentPositionState =
+                    saved.PositionState;
+                saved.Controller.currentRotationState =
+                    saved.RotationState;
+            }
+            if (snapshot.CameraCreated)
+            {
+                Atom createdCamera =
+                    SuperController.singleton.GetAtomByUid(
+                        snapshot.CameraUid);
+                if (createdCamera == null ||
+                    createdCamera.type != "Empty" ||
+                    !object.ReferenceEquals(
+                        createdCamera.mainController,
+                        snapshot.CameraController) ||
+                    !object.ReferenceEquals(
+                        FindSam3dRenderer(createdCamera),
+                        snapshot.Renderer))
+                {
+                    throw new Exception(
+                        "The generated SAM3D camera is no longer available.");
+                }
+                SuperController.singleton.RemoveAtom(createdCamera);
+                return;
+            }
+            if (snapshot.CameraController == null ||
+                snapshot.Renderer == null)
+            {
+                throw new Exception(
+                    "The saved SAM3D camera is no longer available.");
+            }
+            snapshot.CameraController.currentPositionState =
+                FreeControllerV3.PositionState.On;
+            snapshot.CameraController.currentRotationState =
+                FreeControllerV3.RotationState.On;
+            snapshot.CameraController.transform.position =
+                snapshot.CameraPosition;
+            snapshot.CameraController.transform.rotation =
+                snapshot.CameraRotation;
+            snapshot.CameraController.currentPositionState =
+                snapshot.CameraPositionState;
+            snapshot.CameraController.currentRotationState =
+                snapshot.CameraRotationState;
+            snapshot.Renderer.GetFloatJSONParam(
+                "Flat Horizontal FOV").val =
+                snapshot.FlatHorizontalFov;
+            RequireSam3dChooser(
+                snapshot.Renderer,
+                "Camera Target").val =
+                snapshot.CameraTarget;
+            RequireSam3dChooser(
+                snapshot.Renderer,
+                "Aspect Ratio").val =
+                snapshot.AspectRatio;
+            RequireSam3dChooser(
+                snapshot.Renderer,
+                "Output Resolution").val =
+                snapshot.OutputResolution;
+            RequireSam3dChooser(
+                snapshot.Renderer,
+                "Render Mode").val =
+                snapshot.RenderMode;
+            RequireSam3dChooser(
+                snapshot.Renderer,
+                "Image Format").val =
+                snapshot.ImageFormat;
+            snapshot.Renderer.GetBoolJSONParam(
+                "Generate Funscripts").val =
+                snapshot.GenerateFunscripts;
+        }
+
+        private Sam3dUndoSnapshot CurrentSam3dSnapshot()
+        {
+            Sam3dUndoSnapshot snapshot = _sam3dUndoSnapshot;
+            if (snapshot == null ||
+                SuperController.singleton == null)
+            {
+                _sam3dUndoSnapshot = null;
+                return null;
+            }
+            Atom person =
+                SuperController.singleton.GetAtomByUid(
+                    snapshot.TargetUid);
+            Atom camera =
+                SuperController.singleton.GetAtomByUid(
+                    snapshot.CameraUid);
+            if (person == null ||
+                person.type != "Person" ||
+                camera == null ||
+                camera.type != "Empty" ||
+                !object.ReferenceEquals(
+                    camera.mainController,
+                    snapshot.CameraController) ||
+                !object.ReferenceEquals(
+                    FindSam3dRenderer(camera),
+                    snapshot.Renderer))
+            {
+                _sam3dUndoSnapshot = null;
+                return null;
+            }
+            Dictionary<string, FreeControllerV3> controllers =
+                Sam3dPersonControllers(person);
+            int index;
+            for (index = 0;
+                 index < snapshot.Controllers.Count;
+                 index++)
+            {
+                FreeControllerV3 current;
+                Sam3dControllerUndo saved =
+                    snapshot.Controllers[index];
+                if (saved.Controller == null ||
+                    !controllers.TryGetValue(
+                        saved.Controller.name,
+                        out current) ||
+                    !object.ReferenceEquals(
+                        current,
+                        saved.Controller))
+                {
+                    _sam3dUndoSnapshot = null;
+                    return null;
+                }
+            }
+            return snapshot;
+        }
+
+        private static Quaternion Sam3dAnchorRotation(Atom person)
+        {
+            Transform anchor =
+                person.mainController == null
+                ? null
+                : person.mainController.transform;
+            if (anchor == null)
+            {
+                throw new Exception(
+                    "The target Person has no main controller.");
+            }
+            Vector3 forward = anchor.forward;
+            forward.y = 0f;
+            if (forward.sqrMagnitude < 0.0001f)
+            {
+                forward = Vector3.forward;
+            }
+            return Quaternion.LookRotation(
+                forward.normalized,
+                Vector3.up);
+        }
+
+        private static void ApplySam3dTransforms(
+            Sam3dSolution solution,
+            Atom person,
+            Atom camera,
+            MVRScript renderer,
+            Dictionary<string, FreeControllerV3> controllers)
+        {
+            FreeControllerV3 hip;
+            if (!controllers.TryGetValue("hipControl", out hip) ||
+                hip == null)
+            {
+                throw new Exception(
+                    "The target Person has no hipControl.");
+            }
+            Vector3 anchorPosition = hip.transform.position;
+            Quaternion anchorRotation = Sam3dAnchorRotation(person);
+            int index;
+            for (index = 0;
+                 index < solution.Controllers.Count;
+                 index++)
+            {
+                Sam3dControllerSolution target =
+                    solution.Controllers[index];
+                FreeControllerV3 controller =
+                    controllers[target.Id];
+                controller.currentPositionState =
+                    FreeControllerV3.PositionState.On;
+                controller.currentRotationState =
+                    FreeControllerV3.RotationState.On;
+                controller.transform.position =
+                    anchorPosition +
+                    anchorRotation * target.Position;
+                controller.transform.rotation =
+                    anchorRotation * target.Rotation;
+            }
+
+            FreeControllerV3 cameraController = camera.mainController;
+            if (cameraController == null)
+            {
+                throw new Exception(
+                    "The camera Empty has no main controller.");
+            }
+            cameraController.currentPositionState =
+                FreeControllerV3.PositionState.On;
+            cameraController.currentRotationState =
+                FreeControllerV3.RotationState.On;
+            cameraController.transform.position =
+                anchorPosition +
+                anchorRotation * solution.Camera.Position;
+            cameraController.transform.rotation =
+                anchorRotation * solution.Camera.Rotation;
+            ConfigureSam3dRenderer(renderer, solution.Camera);
+        }
+
+        private void FinishSam3dActionOk(
+            BridgeRequest request,
+            string startedAt,
+            string message)
+        {
+            RecordSam3dAction(request, StateOk, message);
+            CompleteRequest(request.RequestId);
+            _pendingRequest = null;
+            _requestInProgress = false;
+            PublishSceneStatus();
+            PublishStatus(
+                StateOk,
+                request.RequestId,
+                startedAt,
+                UtcNow(),
+                "vam-sam3d",
+                message);
+            SuperController.LogMessage(
+                "[VAM-PIP Bridge] " + message);
+        }
+
+        private void FinishSam3dActionError(
+            BridgeRequest request,
+            string startedAt,
+            string message)
+        {
+            RecordSam3dAction(request, StateError, message);
+            _pendingRequest = null;
+            _requestInProgress = false;
+            FailRequest(request, startedAt, message);
+        }
+
+        private static string RemoveCreatedSam3dCamera(
+            BridgeRequest request,
+            Sam3dCameraResult result)
+        {
+            if (result == null || !result.Created)
+            {
+                return "";
+            }
+            try
+            {
+                Atom camera =
+                    SuperController.singleton == null
+                    ? null
+                    : SuperController.singleton.GetAtomByUid(
+                        request.Sam3dCameraUid);
+                if (camera == null)
+                {
+                    result.Atom = null;
+                    result.Created = false;
+                    return "";
+                }
+                if (
+                    result.Atom != null &&
+                    !object.ReferenceEquals(camera, result.Atom))
+                {
+                    throw new Exception(
+                        "the generated camera identity changed");
+                }
+                if (camera.type != "Empty" ||
+                    !string.Equals(
+                        camera.uid,
+                        request.Sam3dCameraUid,
+                        StringComparison.Ordinal))
+                {
+                    throw new Exception(
+                        "the generated camera identity changed");
+                }
+                SuperController.singleton.RemoveAtom(camera);
+                result.Atom = null;
+                result.Created = false;
+                return "";
+            }
+            catch (Exception exception)
+            {
+                return
+                    " Could not remove the generated SAM3D camera: " +
+                    DescribeException(exception);
+            }
+        }
+
+        private void RecordSam3dAction(
+            BridgeRequest request,
+            string state,
+            string message)
+        {
+            if (request == null)
+            {
+                return;
+            }
+            _lastSam3dRequestId = request.RequestId ?? "";
+            _lastSam3dCommand = request.Command ?? "";
+            _lastSam3dJobId = request.Sam3dJobId ?? "";
+            _lastSam3dRevision = request.Sam3dRevision ?? "";
+            _lastSam3dCameraUid = request.Sam3dCameraUid ?? "";
+            _lastSam3dState = state ?? "";
+            _lastSam3dMessage = message ?? "";
+            if (_lastSam3dMessage.Length > 1000)
+            {
+                _lastSam3dMessage =
+                    _lastSam3dMessage.Substring(0, 1000);
+            }
+        }
+
+        private IEnumerator EnsureSam3dCamera(
+            BridgeRequest request,
+            Sam3dCameraResult result)
+        {
+            result.Atom = null;
+            result.Created = false;
+            result.Error = "";
+            Atom camera =
+                SuperController.singleton.GetAtomByUid(
+                    request.Sam3dCameraUid);
+            if (camera != null)
+            {
+                if (camera.type != "Empty")
+                {
+                    result.Error =
+                        "cameraUid is already used by an atom of type " +
+                        camera.type +
+                        ", not Empty.";
+                    yield break;
+                }
+                if (FindSam3dRenderer(camera) == null)
+                {
+                    result.Error =
+                        "The selected Empty does not contain the VAM-PIP-enabled " +
+                        "VR Video and Funscript Exporter.";
+                    yield break;
+                }
+                result.Atom = camera;
+                yield break;
+            }
+            if (!request.Sam3dCreateCamera)
+            {
+                result.Error =
+                    "cameraUid does not identify an existing compatible Empty.";
+                yield break;
+            }
+            if (!FileManagerSecure.FileExists(Sam3dCameraPreset))
+            {
+                result.Error =
+                    "The fixed VAM-PIP SAM3D camera preset is not installed.";
+                yield break;
+            }
+
+            IEnumerator addRoutine = null;
+            try
+            {
+                PublishStatus(
+                    StateAdding,
+                    request.RequestId,
+                    "",
+                    "",
+                    "vam",
+                    "Adding SAM3D VR-and-Funscript camera " +
+                    request.Sam3dCameraUid +
+                    ".");
+                addRoutine =
+                    SuperController.singleton.AddAtomByType(
+                        "Empty",
+                        request.Sam3dCameraUid,
+                        true);
+                if (addRoutine == null)
+                {
+                    throw new Exception(
+                        "VaM did not provide an Empty creation routine.");
+                }
+                // From this point onward the fixed UID belongs to this
+                // transaction, even if VaM fails part-way through creation.
+                result.Created = true;
+            }
+            catch (Exception exception)
+            {
+                result.Error =
+                    "Could not create the SAM3D camera: " +
+                    DescribeException(exception);
+                yield break;
+            }
+
+            float deadline =
+                Time.realtimeSinceStartup + MaximumOperationWaitSeconds;
+            while (true)
+            {
+                bool hasNext = false;
+                object current = null;
+                try
+                {
+                    if (Time.realtimeSinceStartup >= deadline)
+                    {
+                        throw new Exception(
+                            "Empty creation did not finish within 120 seconds.");
+                    }
+                    hasNext = addRoutine.MoveNext();
+                    if (hasNext)
+                    {
+                        current = addRoutine.Current;
+                    }
+                }
+                catch (Exception exception)
+                {
+                    result.Error =
+                        "Could not create the SAM3D camera: " +
+                        DescribeException(exception);
+                    yield break;
+                }
+                if (!hasNext)
+                {
+                    break;
+                }
+                yield return current;
+            }
+            yield return new WaitForEndOfFrame();
+
+            camera =
+                SuperController.singleton.GetAtomByUid(
+                    request.Sam3dCameraUid);
+            if (camera == null || camera.type != "Empty")
+            {
+                result.Error =
+                    "VaM completed creation without the requested Empty.";
+                yield break;
+            }
+
+            try
+            {
+                JSONStorable preset =
+                    camera.GetStorableByID("Preset");
+                JSONStorableUrl browsePath =
+                    preset == null
+                    ? null
+                    : preset.GetUrlJSONParam("presetBrowsePath");
+                if (preset == null || browsePath == null)
+                {
+                    throw new Exception(
+                        "The camera Empty does not expose preset loading.");
+                }
+                JSONStorableBool loadOnSelect =
+                    preset.GetBoolJSONParam("loadPresetOnSelect");
+                bool previous =
+                    loadOnSelect != null && loadOnSelect.val;
+                if (loadOnSelect != null)
+                {
+                    loadOnSelect.val = false;
+                }
+                try
+                {
+                    browsePath.val =
+                        SuperController.singleton.NormalizePath(
+                            Sam3dCameraPreset);
+                    preset.CallAction("LoadPreset");
+                }
+                finally
+                {
+                    if (loadOnSelect != null)
+                    {
+                        loadOnSelect.val = previous;
+                    }
+                }
+            }
+            catch (Exception exception)
+            {
+                result.Error =
+                    "Could not load the fixed SAM3D camera preset: " +
+                    DescribeException(exception);
+                yield break;
+            }
+
+            LoadingWaitResult loading = new LoadingWaitResult();
+            yield return WaitForVaMLoading(
+                "SAM3D camera preset loading",
+                loading);
+            if (loading.Error.Length != 0)
+            {
+                result.Error = loading.Error;
+                yield break;
+            }
+
+            deadline =
+                Time.realtimeSinceStartup + MaximumOperationWaitSeconds;
+            while (FindSam3dRenderer(camera) == null &&
+                   Time.realtimeSinceStartup < deadline)
+            {
+                yield return null;
+            }
+            if (FindSam3dRenderer(camera) == null)
+            {
+                result.Error =
+                    "The VAM-PIP-enabled VR Video and Funscript Exporter " +
+                    "did not become ready within 120 seconds.";
+                yield break;
+            }
+            result.Atom = camera;
+        }
+
+        private IEnumerator ExecuteApplySam3dResult(
+            BridgeRequest request)
+        {
+            string startedAt = UtcNow();
+            PublishStatus(
+                StateApplyingSam3d,
+                request.RequestId,
+                startedAt,
+                "",
+                "vam-sam3d",
+                "Validating the SAM3D pose and camera solution.");
+
+            Sam3dSolution solution = null;
+            Atom person = null;
+            string preparationError = "";
+            try
+            {
+                if (CurrentSam3dSnapshot() != null)
+                {
+                    throw new Exception(
+                        "Undo the currently applied SAM3D result before applying another.");
+                }
+                solution = LoadSam3dSolution(request);
+                person =
+                    SuperController.singleton.GetAtomByUid(
+                        request.TargetUid);
+                if (person == null || person.type != "Person")
+                {
+                    throw new Exception(
+                        "targetUid does not identify an existing Person.");
+                }
+            }
+            catch (Exception exception)
+            {
+                preparationError =
+                    "Could not prepare the SAM3D result: " +
+                    DescribeException(exception);
+            }
+            if (preparationError.Length != 0)
+            {
+                FinishSam3dActionError(
+                    request,
+                    startedAt,
+                    preparationError);
+                yield break;
+            }
+
+            Sam3dCameraResult cameraResult =
+                new Sam3dCameraResult();
+            yield return EnsureSam3dCamera(request, cameraResult);
+            if (cameraResult.Error.Length != 0)
+            {
+                cameraResult.Error +=
+                    RemoveCreatedSam3dCamera(
+                        request,
+                        cameraResult);
+                FinishSam3dActionError(
+                    request,
+                    startedAt,
+                    cameraResult.Error);
+                yield break;
+            }
+
+            Sam3dUndoSnapshot snapshot = null;
+            string applyError = "";
+            try
+            {
+                MVRScript renderer =
+                    FindSam3dRenderer(cameraResult.Atom);
+                if (renderer == null)
+                {
+                    throw new Exception(
+                        "The selected camera has no compatible renderer.");
+                }
+                Dictionary<string, FreeControllerV3> controllers =
+                    Sam3dPersonControllers(person);
+                snapshot =
+                    SnapshotSam3dState(
+                        request,
+                        solution,
+                        person,
+                        cameraResult.Atom,
+                        renderer,
+                        controllers);
+                snapshot.CameraCreated =
+                    cameraResult.Created;
+                ApplySam3dTransforms(
+                    solution,
+                    person,
+                    cameraResult.Atom,
+                    renderer,
+                    controllers);
+                _sam3dUndoSnapshot = snapshot;
+            }
+            catch (Exception exception)
+            {
+                applyError =
+                    "Could not apply the SAM3D result: " +
+                    DescribeException(exception);
+                if (snapshot != null)
+                {
+                    try
+                    {
+                        RestoreSam3dSnapshot(snapshot);
+                    }
+                    catch (Exception restoreException)
+                    {
+                        applyError +=
+                            " Automatic rollback also failed: " +
+                            DescribeException(restoreException);
+                    }
+                }
+                applyError +=
+                    RemoveCreatedSam3dCamera(
+                        request,
+                        cameraResult);
+            }
+            if (applyError.Length != 0)
+            {
+                FinishSam3dActionError(
+                    request,
+                    startedAt,
+                    applyError);
+                yield break;
+            }
+
+            yield return new WaitForEndOfFrame();
+            FinishSam3dActionOk(
+                request,
+                startedAt,
+                "SAM3D pose and VR-and-Funscript camera applied. Undo is available.");
+        }
+
+        private void ExecuteUndoSam3dResult(
+            BridgeRequest request)
+        {
+            string startedAt = UtcNow();
+            PublishStatus(
+                StateApplyingSam3d,
+                request.RequestId,
+                startedAt,
+                "",
+                "vam-sam3d",
+                "Restoring the previous Person and camera state.");
+            try
+            {
+                Sam3dUndoSnapshot snapshot =
+                    CurrentSam3dSnapshot();
+                if (snapshot == null ||
+                    !string.Equals(
+                        snapshot.JobId,
+                        request.Sam3dJobId,
+                        StringComparison.OrdinalIgnoreCase) ||
+                    !string.Equals(
+                        snapshot.Revision,
+                        request.Sam3dRevision,
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    throw new Exception(
+                        "No matching in-memory SAM3D undo snapshot is available.");
+                }
+                RestoreSam3dSnapshot(snapshot);
+                _sam3dUndoSnapshot = null;
+                RecordSam3dAction(
+                    request,
+                    StateOk,
+                    "Previous Person and camera state restored.");
+                CompleteRequest(request.RequestId);
+                PublishSceneStatus();
+                PublishStatus(
+                    StateOk,
+                    request.RequestId,
+                    startedAt,
+                    UtcNow(),
+                    "vam-sam3d",
+                    "Previous Person and camera state restored.");
+                SuperController.LogMessage(
+                    "[VAM-PIP Bridge] Previous SAM3D state restored.");
+            }
+            catch (Exception exception)
+            {
+                string message =
+                    "Could not undo the SAM3D result: " +
+                    DescribeException(exception);
+                RecordSam3dAction(
+                    request,
+                    StateError,
+                    message);
+                FailRequest(
+                    request,
+                    startedAt,
+                    message);
+            }
+        }
+
+        private static bool IsSafeSam3dOutput(
+            string path,
+            string requestId,
+            string baseFilename)
+        {
+            if (path == null)
+            {
+                return false;
+            }
+            string normalized = path.Replace('\\', '/');
+            const string prefix =
+                "Saves/VR_Videos_And_Funscripts/";
+            if (!normalized.StartsWith(
+                    prefix,
+                    StringComparison.Ordinal) ||
+                normalized.IndexOf("..", StringComparison.Ordinal) >= 0)
+            {
+                return false;
+            }
+            string expected =
+                prefix +
+                "vampip_" +
+                requestId +
+                "_" +
+                baseFilename;
+            return string.Equals(
+                    normalized,
+                    expected + ".jpg",
+                    StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(
+                    normalized,
+                    expected + ".png",
+                    StringComparison.OrdinalIgnoreCase);
+        }
+
+        private IEnumerator ExecuteCaptureSam3dResult(
+            BridgeRequest request)
+        {
+            string startedAt = UtcNow();
+            PublishStatus(
+                StateCapturingSam3d,
+                request.RequestId,
+                startedAt,
+                "",
+                "vam-sam3d",
+                "Starting the VR-and-Funscript camera capture.");
+            Sam3dSolution solution = null;
+            MVRScript renderer = null;
+            string setupError = "";
+            try
+            {
+                solution = LoadSam3dSolution(request);
+                Atom camera =
+                    SuperController.singleton.GetAtomByUid(
+                        request.Sam3dCameraUid);
+                renderer = FindSam3dRenderer(camera);
+                if (renderer == null)
+                {
+                    throw new Exception(
+                        "cameraUid does not identify a compatible renderer Empty.");
+                }
+                Sam3dUndoSnapshot snapshot =
+                    CurrentSam3dSnapshot();
+                if (snapshot == null ||
+                    !string.Equals(
+                        snapshot.JobId,
+                        request.Sam3dJobId,
+                        StringComparison.OrdinalIgnoreCase) ||
+                    !string.Equals(
+                        snapshot.Revision,
+                        request.Sam3dRevision,
+                        StringComparison.OrdinalIgnoreCase) ||
+                    !string.Equals(
+                        snapshot.CameraUid,
+                        request.Sam3dCameraUid,
+                        StringComparison.Ordinal) ||
+                    !object.ReferenceEquals(
+                        snapshot.Renderer,
+                        renderer))
+                {
+                    throw new Exception(
+                        "The requested SAM3D pose and camera are not the currently applied in-memory result.");
+                }
+                ConfigureSam3dRenderer(renderer, solution.Camera);
+                JSONStorableString requestId =
+                    renderer.GetStringJSONParam(
+                        Sam3dRequestIdParam);
+                JSONStorableString baseFilename =
+                    renderer.GetStringJSONParam(
+                        Sam3dBaseFilenameParam);
+                JSONStorableAction action =
+                    renderer.GetAction(Sam3dCaptureAction);
+                if (requestId == null ||
+                    baseFilename == null ||
+                    action == null ||
+                    action.actionCallback == null)
+                {
+                    throw new Exception(
+                        "The renderer's VAM-PIP capture interface is incomplete.");
+                }
+                requestId.val = request.RequestId;
+                baseFilename.val = solution.Camera.BaseFilename;
+                action.actionCallback();
+            }
+            catch (Exception exception)
+            {
+                setupError =
+                    "Could not start the SAM3D capture: " +
+                    DescribeException(exception);
+            }
+            if (setupError.Length != 0)
+            {
+                FinishSam3dActionError(
+                    request,
+                    startedAt,
+                    setupError);
+                yield break;
+            }
+
+            float deadline =
+                Time.realtimeSinceStartup + Sam3dCaptureWaitSeconds;
+            while (Time.realtimeSinceStartup < deadline)
+            {
+                string state = "";
+                string output = "";
+                string error = "";
+                string pollError = "";
+                try
+                {
+                    if (renderer == null)
+                    {
+                        throw new Exception(
+                            "The capture renderer is no longer available.");
+                    }
+                    JSONStorableString status =
+                        renderer.GetStringJSONParam(
+                            Sam3dStatusParam);
+                    if (status == null)
+                    {
+                        throw new Exception(
+                            "The renderer's capture status is no longer available.");
+                    }
+                    state =
+                        (status.val ?? "").Trim().ToLowerInvariant();
+                    if (state == "succeeded")
+                    {
+                        JSONStorableString lastOutput =
+                            renderer.GetStringJSONParam(
+                                Sam3dLastOutputParam);
+                        if (lastOutput == null)
+                        {
+                            throw new Exception(
+                                "The renderer's capture output is unavailable.");
+                        }
+                        output = lastOutput.val;
+                    }
+                    else if (state == "failed")
+                    {
+                        JSONStorableString rendererError =
+                            renderer.GetStringJSONParam(
+                                Sam3dErrorParam);
+                        error =
+                            rendererError == null
+                            ? ""
+                            : rendererError.val;
+                    }
+                }
+                catch (Exception exception)
+                {
+                    pollError =
+                        "Could not monitor the SAM3D capture: " +
+                        DescribeException(exception);
+                }
+                if (pollError.Length != 0)
+                {
+                    FinishSam3dActionError(
+                        request,
+                        startedAt,
+                        pollError);
+                    yield break;
+                }
+                if (state == "succeeded")
+                {
+                    if (!IsSafeSam3dOutput(
+                            output,
+                            request.RequestId,
+                            solution.Camera.BaseFilename))
+                    {
+                        FinishSam3dActionError(
+                            request,
+                            startedAt,
+                            "The renderer returned an invalid capture path.");
+                        yield break;
+                    }
+                    FinishSam3dActionOk(
+                        request,
+                        startedAt,
+                        "SAM3D capture saved to " +
+                        output.Replace('\\', '/') +
+                        ".");
+                    yield break;
+                }
+                if (state == "failed")
+                {
+                    if (error == null ||
+                        error.Trim().Length == 0)
+                    {
+                        error = "The renderer reported a capture failure.";
+                    }
+                    if (error.Length > 500)
+                    {
+                        error = error.Substring(0, 500);
+                    }
+                    FinishSam3dActionError(
+                        request,
+                        startedAt,
+                        error);
+                    yield break;
+                }
+                yield return null;
+            }
+
+            FinishSam3dActionError(
+                request,
+                startedAt,
+                "VR-and-Funscript capture did not finish within 300 seconds.");
         }
 
         private string PrepareAtomResourceRequest(
@@ -5958,6 +7781,46 @@ namespace VAMPip
             return result;
         }
 
+        private static JSONClass BuildSam3dCameraStatus(Atom atom)
+        {
+            MVRScript renderer = FindSam3dRenderer(atom);
+            if (renderer == null)
+            {
+                return null;
+            }
+            JSONClass result = new JSONClass();
+            result["compatible"].AsBool = true;
+            string status =
+                (renderer.GetStringJSONParam(
+                    Sam3dStatusParam).val ?? "")
+                .Trim()
+                .ToLowerInvariant();
+            if (status != "idle" &&
+                status != "rendering" &&
+                status != "encoding" &&
+                status != "succeeded" &&
+                status != "failed")
+            {
+                status = "unknown";
+            }
+            result["status"] = status;
+            JSONStorableFloat fov =
+                renderer.GetFloatJSONParam("Flat Horizontal FOV");
+            if (fov != null && IsFinite(fov.val))
+            {
+                result["flatHorizontalFov"].AsFloat = fov.val;
+            }
+            JSONStorableStringChooser aspect =
+                renderer.GetStringChooserJSONParam("Aspect Ratio");
+            JSONStorableStringChooser resolution =
+                renderer.GetStringChooserJSONParam("Output Resolution");
+            result["aspectRatio"] =
+                aspect == null ? "" : aspect.val ?? "";
+            result["outputResolution"] =
+                resolution == null ? "" : resolution.val ?? "";
+            return result;
+        }
+
         private static JSONArray Capabilities()
         {
             JSONArray capabilities = new JSONArray();
@@ -5991,6 +7854,10 @@ namespace VAMPip
             capabilities.Add("timeline-transport");
             capabilities.Add("timeline-animation-play");
             capabilities.Add("timeline-adapter-v1");
+            capabilities.Add("sam3d-apply-v1");
+            capabilities.Add("sam3d-undo-v1");
+            capabilities.Add("sam3d-capture-v1");
+            capabilities.Add("sam3d-camera-vrfunscript-v1");
             return capabilities;
         }
 
@@ -6383,6 +8250,16 @@ namespace VAMPip
                                     atom,
                                     ref globalCuaChoiceBudget);
                         }
+                        if (atom.type == "Empty")
+                        {
+                            JSONClass sam3dCamera =
+                                BuildSam3dCameraStatus(atom);
+                            if (sam3dCamera != null)
+                            {
+                                atomStatus["sam3dCamera"] =
+                                    sam3dCamera;
+                            }
+                        }
                         atoms.Add(atomStatus);
 
                         if (atom.type != "Person")
@@ -6458,6 +8335,45 @@ namespace VAMPip
                 }
                 scene["atoms"] = atoms;
                 scene["persons"] = persons;
+                JSONClass sam3d = new JSONClass();
+                Sam3dUndoSnapshot liveSam3dSnapshot =
+                    loading
+                    ? null
+                    : CurrentSam3dSnapshot();
+                bool sam3dApplied = liveSam3dSnapshot != null;
+                sam3d["applied"].AsBool = sam3dApplied;
+                sam3d["undoAvailable"].AsBool = sam3dApplied;
+                if (sam3dApplied)
+                {
+                    sam3d["jobId"] =
+                        liveSam3dSnapshot.JobId ?? "";
+                    sam3d["revision"] =
+                        liveSam3dSnapshot.Revision ?? "";
+                    sam3d["targetUid"] =
+                        liveSam3dSnapshot.TargetUid ?? "";
+                    sam3d["cameraUid"] =
+                        liveSam3dSnapshot.CameraUid ?? "";
+                }
+                if (_lastSam3dRequestId.Length != 0)
+                {
+                    JSONClass lastAction = new JSONClass();
+                    lastAction["requestId"] =
+                        _lastSam3dRequestId;
+                    lastAction["command"] =
+                        _lastSam3dCommand;
+                    lastAction["jobId"] =
+                        _lastSam3dJobId;
+                    lastAction["revision"] =
+                        _lastSam3dRevision;
+                    lastAction["cameraUid"] =
+                        _lastSam3dCameraUid;
+                    lastAction["state"] =
+                        _lastSam3dState;
+                    lastAction["message"] =
+                        _lastSam3dMessage;
+                    sam3d["lastAction"] = lastAction;
+                }
+                scene["sam3d"] = sam3d;
                 scene["capabilities"] = Capabilities();
                 FileManagerSecure.WriteAllText(ScenePath, scene.ToString());
             }

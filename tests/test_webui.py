@@ -2507,7 +2507,9 @@ process.stdout.write(JSON.stringify(output));
         self.assertIn('id="timeline-speed"', self.html)
         self.assertIn('id="timeline-weight"', self.html)
         self.assertIn('id="timeline-lock"', self.html)
-        self.assertIn('"timeline", "packages", "access"', self.javascript)
+        for view in ('"timeline"', '"sam3d"', '"packages"', '"access"'):
+            with self.subTest(view=view):
+                self.assertIn(view, self.javascript)
         self.assertIn(
             "const TIMELINE_PLAYING_POLL_MS = 1000;",
             self.javascript,
@@ -2871,9 +2873,182 @@ process.stdout.write(JSON.stringify({{
         self.assertIn("body.timeline-popout .timeline-workbench", self.styles)
         self.assertIn("body.timeline-popout .timeline-transport", self.styles)
 
+    def test_sam3d_is_a_top_level_standalone_workflow(self) -> None:
+        self.assertIn('data-view="sam3d"', self.html)
+        self.assertIn('id="sam3d-view"', self.html)
+        for control_id in (
+            "sam3d-file-input",
+            "sam3d-source-canvas",
+            "sam3d-manual-bbox",
+            "sam3d-run-button",
+            "sam3d-job-progress",
+            "sam3d-history-list",
+            "sam3d-body-select",
+            "sam3d-preview-source",
+            "sam3d-preview-overlay",
+            "sam3d-preview-result",
+            "sam3d-person-target",
+            "sam3d-camera-target",
+            "sam3d-camera-fov",
+            "sam3d-person-height",
+            "sam3d-aspect-ratio",
+            "sam3d-output-resolution",
+            "sam3d-image-format",
+            "sam3d-apply-button",
+            "sam3d-undo-button",
+            "sam3d-capture-button",
+        ):
+            with self.subTest(control_id=control_id):
+                self.assertIn(f'id="{control_id}"', self.html)
+        self.assertIn("standalone SAM 3D Body environment", self.html)
+        self.assertIn("ComfyUI is not used or modified", self.html)
+        self.assertIn("VR Video &amp; Funscript camera", self.html)
+
+    def test_sam3d_api_contract_is_centralized_and_revision_checked(self) -> None:
+        start = self.javascript.index("const Sam3dClient")
+        end = self.javascript.index("const TimelineClient", start)
+        client = self.javascript[start:end]
+        for contract in (
+            'status: "/api/sam3d/status"',
+            'jobs: "/api/sam3d/jobs"',
+            "/run`",
+            "/apply`",
+            "/undo`",
+            "/capture`",
+            "/artifacts/${artifactKind}",
+            "SAM3D_JOB_ID_PATTERN",
+            "expected_job_revision:",
+            "target_uid:",
+            "camera_uid:",
+            "create_camera:",
+            "person_index:",
+            "height_m:",
+            "aspect_ratio:",
+            "output_resolution:",
+            "image_format:",
+            "horizontal_fov",
+        ):
+            with self.subTest(contract=contract):
+                self.assertIn(contract, client)
+        self.assertIn("body: file", client)
+        self.assertIn(
+            '"Content-Type": sam3dFileContentType(file)',
+            client,
+        )
+        self.assertIn("Sam3dClient.run(uploadedJob.id)", client)
+        self.assertNotIn("/select", client)
+        self.assertIn("sam3dStatusError.status !== 404", client)
+
+    def test_sam3d_source_box_and_artifacts_are_bounded(self) -> None:
+        self.assertIn(
+            "const SAM3D_MAX_UPLOAD_BYTES = 32 * 1024 * 1024;",
+            self.javascript,
+        )
+        self.assertIn("const SAM3D_MAX_HISTORY = 50;", self.javascript)
+        self.assertIn("function clampSam3dBbox(", self.javascript)
+        self.assertIn("function sam3dBboxPixels(", self.javascript)
+        self.assertIn("1600 / Math.max(", self.javascript)
+        self.assertIn(
+            '"capture",\n        "manifest",\n        "overlay",\n        "source",',
+            self.javascript,
+        )
+        self.assertIn(
+            "if (url.origin !== window.location.origin)",
+            self.javascript,
+        )
+        self.assertIn("SAM3D_MAX_HISTORY", self.javascript)
+
+    def test_sam3d_apply_is_capability_and_revision_guarded(self) -> None:
+        apply_start = self.javascript.index(
+            "function renderSam3dApplyState("
+        )
+        apply_end = self.javascript.index(
+            "async function applySam3dResult(", apply_start
+        )
+        apply_state = self.javascript[apply_start:apply_end]
+        for guard in (
+            "revisionReady",
+            "snapshotBridgeBusy()",
+            "personVamRunning()",
+            "sam3dApplyCapabilityAvailable()",
+            "sam3dCaptureCapabilityAvailable()",
+            "sam3dJobIsApplied(job)",
+            "hasAppliedCamera",
+        ):
+            with self.subTest(guard=guard):
+                self.assertIn(guard, apply_state)
+        self.assertIn("sam3d-apply-v1", self.javascript)
+        self.assertIn("sam3d-capture-v1", self.javascript)
+        self.assertIn("sam3d-camera-vrfunscript-v1", self.javascript)
+        self.assertIn(
+            "const SAM3D_CAPTURE_POLL_ATTEMPTS = 310;",
+            self.javascript,
+        )
+        self.assertIn(
+            'raw.capture_requested === true || actionName === "capture"',
+            self.javascript,
+        )
+        self.assertIn("function sam3dJobNeedsPolling(", self.javascript)
+        self.assertIn("vamActionState: actionState", self.javascript)
+        self.assertIn(
+            "app.sam3dCaptureReadyJobs.add(job.id)",
+            self.javascript,
+        )
+        self.assertIn("function sam3dCaptureBridgeError(", self.javascript)
+        self.assertNotIn(
+            'actionName === "capture" && artifactUrls.capture',
+            self.javascript,
+        )
+        self.assertIn(
+            "expected_revision: solutionRevision",
+            self.javascript,
+        )
+        capture_start = self.javascript.index(
+            "async function captureSam3dResult("
+        )
+        capture_end = self.javascript.index(
+            "const TimelineClient", capture_start
+        )
+        capture = self.javascript[capture_start:capture_end]
+        self.assertIn(
+            'const cameraUid = String(job.cameraUid || "").trim();',
+            capture,
+        )
+        self.assertNotIn(
+            "elements.sam3dCameraTarget.value",
+            capture,
+        )
+        targets_start = self.javascript.index(
+            "function renderSam3dTargets("
+        )
+        targets_end = self.javascript.index(
+            "function sam3dApplyCapabilityAvailable(", targets_start
+        )
+        targets = self.javascript[targets_start:targets_end]
+        self.assertIn("fixedCameraUidExists", targets)
+        self.assertIn("!alreadyApplied", targets)
+        self.assertIn("One-level undo", self.javascript)
+        self.assertIn("showDialog({", self.javascript)
+
+    def test_sam3d_layout_is_responsive(self) -> None:
+        for selector in (
+            ".sam3d-view",
+            ".sam3d-layout",
+            ".sam3d-drop-zone",
+            ".sam3d-source-editor",
+            ".sam3d-preview-stage",
+            ".sam3d-target-grid",
+            ".sam3d-history-panel",
+        ):
+            with self.subTest(selector=selector):
+                self.assertIn(selector, self.styles)
+        self.assertIn("@media (max-width: 1180px)", self.styles)
+        self.assertIn("@media (max-width: 760px)", self.styles)
+        self.assertIn("@media (max-width: 500px)", self.styles)
+
     def test_static_assets_use_the_current_cache_version(self) -> None:
-        self.assertIn("/styles.css?v=0.13.0", self.html)
-        self.assertIn("/app.js?v=0.13.0", self.html)
+        self.assertIn("/styles.css?v=0.14.0", self.html)
+        self.assertIn("/app.js?v=0.14.0", self.html)
 
 
 if __name__ == "__main__":

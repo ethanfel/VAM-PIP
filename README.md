@@ -23,7 +23,7 @@ leaving managed mode restores that baseline.
 
 ## Current status
 
-Version 0.13.0 is functional but should still be treated as an early release.
+Version 0.14.0 is functional but should still be treated as an early release.
 Package switching is deliberately conservative:
 
 - entering managed mode requires explicit confirmation;
@@ -248,6 +248,18 @@ mutation is intentionally not part of protocol 1. The compact route is:
 
 Its title is `VAM-PIP Timeline`, which can be matched by a desktop-compositor
 “keep above” rule. A browser popup cannot enforce always-on-top by itself.
+
+## SAM 3D workspace
+
+The **SAM 3D** tab accepts one image and an explicit person bounding box, then
+runs Meta's native SAM 3D Body code in a dedicated Python 3.11 worker. The
+result can be retargeted onto an existing VaM Person, applied with one-step
+undo, and captured through a compatible VRRenderer camera atom.
+
+The worker is isolated from ComfyUI, and bridge installation includes the fixed
+camera preset and renderer scripts needed by that workflow. See the
+[standalone SAM 3D Body setup](docs/SAM3D_SETUP.md) for environment, model, and
+configuration instructions.
 
 ## External workspace
 

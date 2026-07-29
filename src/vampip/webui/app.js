@@ -12,6 +12,89 @@ const MAX_TIMELINE_KEYS_PER_TRACK = 2_000;
 const MAX_TIMELINE_KEYS = 10_000;
 const TIMELINE_PLAYING_POLL_MS = 1000;
 const TIMELINE_IDLE_POLL_MS = 1_000;
+const SAM3D_POLL_MS = 1_000;
+// The VaM bridge allows the renderer up to five minutes to finish encoding.
+// Keep checking a little longer so a valid slow capture is not abandoned.
+const SAM3D_CAPTURE_POLL_ATTEMPTS = 310;
+const SAM3D_MAX_UPLOAD_BYTES = 32 * 1024 * 1024;
+const SAM3D_MAX_HISTORY = 50;
+const SAM3D_DEFAULT_CAMERA_UID = "VAMPip SAM3D Camera";
+const SAM3D_RENDERER_RESOLUTIONS = Object.freeze({
+  "36:9": Object.freeze(["1600x400", "3200x800", "6400x1600"]),
+  "32:9": Object.freeze([
+    "2048x576",
+    "2560x720",
+    "3840x1080 (DFHD)",
+    "5120x1440 (DQHD)",
+    "7680x2160 (DUHD)",
+  ]),
+  "21:9": Object.freeze([
+    "2560x1080 (WFHD)",
+    "3440x1440 (WQHD)",
+    "5120x2160 (4K WUHD)",
+  ]),
+  "16:9": Object.freeze([
+    "1280x720 (HD)",
+    "1920x1080 (FHD)",
+    "2560x1440 (QHD)",
+    "3840x2160 (4K UHD)",
+    "5120x2880 (5K)",
+    "7680x4320 (8K UHD)",
+  ]),
+  "16:10": Object.freeze([
+    "1280x800 (WXGA)",
+    "1440x900 (WXGA+)",
+    "1920x1200 (WUXGA)",
+    "3840x2400 (2x WUXGA)",
+  ]),
+  "4:3": Object.freeze([
+    "800x600 (SVGA)",
+    "1024x768 (XGA)",
+    "2048x1536 (2x XGA)",
+    "4096x3072 (4x XGA)",
+  ]),
+  "2:1": Object.freeze([
+    "1280x640",
+    "1920x960",
+    "2560x1280",
+    "3840x1920 (4K)",
+    "5120x2560 (5K)",
+    "7680x3840 (8K)",
+  ]),
+  "1:1": Object.freeze([
+    "256x256",
+    "512x512",
+    "1024x1024",
+    "1920x1920",
+    "2048x2048",
+    "2560x2560",
+    "3840x3840 (4K)",
+    "4096x4096",
+  ]),
+});
+const SAM3D_JOB_ID_PATTERN = /^[0-9a-f]{32}$/i;
+const SAM3D_TERMINAL_STATES = new Set([
+  "cancelled",
+  "complete",
+  "completed",
+  "error",
+  "failed",
+  "interrupted",
+  "ready",
+  "succeeded",
+]);
+const SAM3D_SUCCESS_STATES = new Set([
+  "complete",
+  "completed",
+  "ready",
+  "succeeded",
+]);
+const SAM3D_ERROR_STATES = new Set([
+  "cancelled",
+  "error",
+  "failed",
+  "interrupted",
+]);
 const TOKEN_KEY = "vampip-token";
 const WORKSPACE_ACTION_STALL_MS = 5 * 60 * 1000;
 const PERSON_BRIDGE_BUSY_STATES = new Set([
@@ -757,6 +840,31 @@ const app = {
   selectedTimelineLayerId: "",
   selectedTimelineClipId: "",
   timelinePopout: false,
+  sam3dStatus: null,
+  sam3dStatusError: null,
+  sam3dStatusInFlight: false,
+  sam3dJobs: [],
+  sam3dJobsError: null,
+  sam3dJobsInFlight: false,
+  sam3dSelectedJob: null,
+  sam3dSelectedJobId: "",
+  sam3dSelectedBodyIndex: 0,
+  sam3dJobPollTimer: null,
+  sam3dJobRequestGeneration: 0,
+  sam3dSourceFile: null,
+  sam3dSourceUrl: "",
+  sam3dSourceImage: null,
+  sam3dSourceWidth: 0,
+  sam3dSourceHeight: 0,
+  sam3dSourceJobId: "",
+  sam3dBbox: { x: 0, y: 0, width: 100, height: 100 },
+  sam3dBboxDrag: null,
+  sam3dPreviewKind: "source",
+  sam3dMutationInFlight: false,
+  sam3dAppliedRevision: "",
+  sam3dAppliedJobId: "",
+  sam3dCapturePollAttempts: 0,
+  sam3dCaptureReadyJobs: new Set(),
 };
 
 const elements = {};
@@ -824,11 +932,69 @@ function cacheElements() {
     "resources-tab-count",
     "workspace-tab-count",
     "timeline-tab-count",
+    "sam3d-tab-state",
     "packages-tab-count",
     "access-tab-count",
     "library-view",
     "timeline-view",
+    "sam3d-view",
     "access-view",
+    "sam3d-runtime-badge",
+    "sam3d-runtime-label",
+    "sam3d-refresh-button",
+    "sam3d-runtime-panel",
+    "sam3d-runtime-title",
+    "sam3d-runtime-message",
+    "sam3d-runtime-action",
+    "sam3d-file-input",
+    "sam3d-drop-zone",
+    "sam3d-clear-source",
+    "sam3d-source-editor",
+    "sam3d-canvas-wrap",
+    "sam3d-source-canvas",
+    "sam3d-canvas-hint",
+    "sam3d-source-name",
+    "sam3d-source-meta",
+    "sam3d-known-vertical-fov",
+    "sam3d-manual-bbox",
+    "sam3d-bbox-fields",
+    "sam3d-bbox-x",
+    "sam3d-bbox-y",
+    "sam3d-bbox-width",
+    "sam3d-bbox-height",
+    "sam3d-reset-bbox",
+    "sam3d-run-button",
+    "sam3d-job-progress",
+    "sam3d-job-stage",
+    "sam3d-job-message",
+    "sam3d-job-percent",
+    "sam3d-job-progress-bar",
+    "sam3d-job-retry",
+    "sam3d-result-panel",
+    "sam3d-body-select",
+    "sam3d-preview-source",
+    "sam3d-preview-overlay",
+    "sam3d-preview-result",
+    "sam3d-preview-image",
+    "sam3d-preview-empty",
+    "sam3d-preview-empty-title",
+    "sam3d-preview-empty-detail",
+    "sam3d-preview-caption",
+    "sam3d-apply-panel",
+    "sam3d-revision",
+    "sam3d-person-target",
+    "sam3d-camera-target",
+    "sam3d-camera-fov",
+    "sam3d-person-height",
+    "sam3d-aspect-ratio",
+    "sam3d-output-resolution",
+    "sam3d-image-format",
+    "sam3d-apply-note",
+    "sam3d-apply-button",
+    "sam3d-undo-button",
+    "sam3d-capture-button",
+    "sam3d-history-count",
+    "sam3d-history-list",
     "timeline-connection-state",
     "timeline-connection-label",
     "timeline-instance",
@@ -1016,13 +1182,15 @@ function applyInitialRoute() {
   }
   if (requestedView === "timeline" || app.timelinePopout) {
     setView("timeline");
+  } else if (requestedView === "sam3d") {
+    setView("sam3d");
   }
 }
 
 function updateViewRoute(view) {
   const url = new URL(window.location.href);
-  if (view === "timeline") {
-    url.searchParams.set("view", "timeline");
+  if (view === "timeline" || view === "sam3d") {
+    url.searchParams.set("view", view);
   } else if (!app.timelinePopout) {
     url.searchParams.delete("view");
     url.searchParams.delete("popout");
@@ -1086,6 +1254,95 @@ function bindEvents() {
     "click",
     dismissResourceReturnContext,
   );
+  elements.sam3dRefreshButton.addEventListener("click", () =>
+    loadSam3dWorkspace({ force: true }),
+  );
+  elements.sam3dRuntimeAction.addEventListener("click", () =>
+    loadSam3dWorkspace({ force: true }),
+  );
+  elements.sam3dFileInput.addEventListener("change", () => {
+    const [file] = Array.from(elements.sam3dFileInput.files || []);
+    if (file) chooseSam3dSource(file);
+  });
+  for (const eventName of ["dragenter", "dragover"]) {
+    elements.sam3dDropZone.addEventListener(eventName, (event) => {
+      event.preventDefault();
+      elements.sam3dDropZone.classList.add("is-dragover");
+    });
+  }
+  for (const eventName of ["dragleave", "drop"]) {
+    elements.sam3dDropZone.addEventListener(eventName, (event) => {
+      event.preventDefault();
+      elements.sam3dDropZone.classList.remove("is-dragover");
+    });
+  }
+  elements.sam3dDropZone.addEventListener("drop", (event) => {
+    const [file] = Array.from(event.dataTransfer?.files || []);
+    if (file) chooseSam3dSource(file);
+  });
+  elements.sam3dClearSource.addEventListener("click", clearSam3dSource);
+  elements.sam3dManualBbox.addEventListener("change", () => {
+    elements.sam3dBboxFields.disabled = !elements.sam3dManualBbox.checked;
+    elements.sam3dCanvasHint.hidden = !elements.sam3dManualBbox.checked;
+    drawSam3dSourceCanvas();
+  });
+  for (const field of [
+    elements.sam3dBboxX,
+    elements.sam3dBboxY,
+    elements.sam3dBboxWidth,
+    elements.sam3dBboxHeight,
+  ]) {
+    field.addEventListener("input", readSam3dBboxFields);
+  }
+  elements.sam3dResetBbox.addEventListener("click", resetSam3dBbox);
+  elements.sam3dSourceCanvas.addEventListener(
+    "pointerdown",
+    beginSam3dBboxDrag,
+  );
+  elements.sam3dSourceCanvas.addEventListener(
+    "pointermove",
+    continueSam3dBboxDrag,
+  );
+  elements.sam3dSourceCanvas.addEventListener("pointerup", finishSam3dBboxDrag);
+  elements.sam3dSourceCanvas.addEventListener(
+    "pointercancel",
+    finishSam3dBboxDrag,
+  );
+  elements.sam3dRunButton.addEventListener("click", createSam3dJob);
+  elements.sam3dJobRetry.addEventListener("click", retrySam3dJob);
+  elements.sam3dHistoryList.addEventListener("click", (event) => {
+    const jobButton = event.target.closest("[data-sam3d-job-id]");
+    if (jobButton) selectSam3dJob(jobButton.dataset.sam3dJobId);
+  });
+  elements.sam3dBodySelect.addEventListener("change", () =>
+    selectSam3dBody(elements.sam3dBodySelect.value),
+  );
+  for (const previewButton of [
+    elements.sam3dPreviewSource,
+    elements.sam3dPreviewOverlay,
+    elements.sam3dPreviewResult,
+  ]) {
+    previewButton.addEventListener("click", () =>
+      setSam3dPreview(previewButton.dataset.sam3dPreview),
+    );
+  }
+  for (const target of [
+    elements.sam3dPersonTarget,
+    elements.sam3dCameraTarget,
+    elements.sam3dCameraFov,
+    elements.sam3dPersonHeight,
+    elements.sam3dOutputResolution,
+    elements.sam3dImageFormat,
+  ]) {
+    target.addEventListener("change", renderSam3dApplyState);
+  }
+  elements.sam3dAspectRatio.addEventListener("change", () => {
+    renderSam3dResolutionOptions();
+    renderSam3dApplyState();
+  });
+  elements.sam3dApplyButton.addEventListener("click", applySam3dResult);
+  elements.sam3dUndoButton.addEventListener("click", undoSam3dApply);
+  elements.sam3dCaptureButton.addEventListener("click", captureSam3dResult);
   elements.timelineInstance.addEventListener(
     "change",
     handleTimelineInstanceChange,
@@ -1145,6 +1402,7 @@ function bindEvents() {
   elements.timelineCanvas.addEventListener("click", handleTimelineCanvasClick);
   window.addEventListener("resize", () => {
     if (app.view === "timeline") drawTimelineCanvas();
+    if (app.view === "sam3d") drawSam3dSourceCanvas();
   });
   elements.autoReconcile.addEventListener("change", updateAutoReconcile);
   elements.pagePrevious.addEventListener("click", () =>
@@ -1307,7 +1565,7 @@ function bindEvents() {
       !event.altKey &&
       !isEditing(event.target) &&
       !anyModalOpen() &&
-      !["access", "timeline"].includes(app.view)
+      !["access", "timeline", "sam3d"].includes(app.view)
     ) {
       event.preventDefault();
       elements.searchInput.focus();
@@ -6001,6 +6259,10 @@ async function loadPersons({ quiet = false } = {}) {
       renderLiveState(app.status || {});
       renderPersonContext();
       renderAtomContext();
+      if (app.view === "sam3d") {
+        renderSam3dTargets();
+        renderSam3dApplyState();
+      }
       if (app.view === "workspace" && previousKey !== personControlKey()) {
         if (isIndividualClothingCategory()) {
           await loadLibrary({ preservePage: true });
@@ -6815,6 +7077,2112 @@ async function addPersonInVam() {
     renderPersonContext();
   }
 }
+
+const Sam3dClient = Object.freeze({
+  paths: Object.freeze({
+    status: "/api/sam3d/status",
+    jobs: "/api/sam3d/jobs",
+    job(jobId) {
+      return `/api/sam3d/jobs/${encodeURIComponent(sam3dJobId(jobId))}`;
+    },
+    run(jobId) {
+      return `${this.job(jobId)}/run`;
+    },
+    apply(jobId) {
+      return `${this.job(jobId)}/apply`;
+    },
+    undo(jobId) {
+      return `${this.job(jobId)}/undo`;
+    },
+    capture(jobId) {
+      return `${this.job(jobId)}/capture`;
+    },
+    artifact(jobId, kind) {
+      const allowed = new Set([
+        "capture",
+        "manifest",
+        "overlay",
+        "source",
+      ]);
+      const artifactKind = String(kind || "").toLowerCase();
+      if (!allowed.has(artifactKind)) {
+        throw new Error("Unsupported SAM 3D artifact");
+      }
+      return `${this.job(jobId)}/artifacts/${artifactKind}`;
+    },
+  }),
+
+  status(signal) {
+    return api(this.paths.status, { signal });
+  },
+
+  listJobs(signal) {
+    return api(`${this.paths.jobs}?limit=30&offset=0`, { signal });
+  },
+
+  job(jobId, signal) {
+    return api(this.paths.job(jobId), { signal });
+  },
+
+  create(file, bbox, verticalFov = null) {
+    const query = new URLSearchParams();
+    if (bbox) {
+      query.set("bbox", bbox.map((value) => Math.round(value)).join(","));
+    }
+    if (verticalFov !== null) {
+      query.set("vertical_fov", String(verticalFov));
+    }
+    return sam3dRawApi(`${this.paths.jobs}?${query}`, file);
+  },
+
+  run(jobId) {
+    return api(this.paths.run(jobId), {
+      method: "POST",
+      body: {},
+    });
+  },
+
+  apply(jobId, request) {
+    return api(this.paths.apply(jobId), {
+      method: "POST",
+      body: request,
+    });
+  },
+
+  undo(jobId, expectedRevision) {
+    return api(this.paths.undo(jobId), {
+      method: "POST",
+      body: { expected_revision: expectedRevision },
+    });
+  },
+
+  capture(jobId, request) {
+    return api(this.paths.capture(jobId), {
+      method: "POST",
+      body: request,
+    });
+  },
+
+  artifactUrl(jobId, kind) {
+    return sam3dAuthenticatedUrl(this.paths.artifact(jobId, kind));
+  },
+});
+
+function sam3dJobId(value) {
+  const jobId = String(value || "").trim().toLowerCase();
+  if (!SAM3D_JOB_ID_PATTERN.test(jobId)) {
+    throw new Error("Invalid SAM 3D job identifier");
+  }
+  return jobId;
+}
+
+function sam3dAuthenticatedUrl(path) {
+  const url = new URL(path, window.location.href);
+  if (url.origin !== window.location.origin) return "";
+  if (app.token) url.searchParams.set("token", app.token);
+  return `${url.pathname}${url.search}`;
+}
+
+async function sam3dRawApi(path, file) {
+  if (!app.token) {
+    throw new Error(
+      "This page has no write token. Reopen the URL printed by VAM-PIP (it contains #token=…).",
+    );
+  }
+  const headers = new Headers({
+    Accept: "application/json",
+    "Content-Type": sam3dFileContentType(file),
+    "X-VAMPIP-Token": app.token,
+  });
+  const response = await fetch(path, {
+    method: "POST",
+    headers,
+    credentials: "same-origin",
+    cache: "no-store",
+    body: file,
+  });
+  const contentType = response.headers.get("content-type") || "";
+  const payload = contentType.includes("application/json")
+    ? await response.json().catch(() => ({}))
+    : await response.text();
+  if (!response.ok) {
+    const detail =
+      (payload &&
+        typeof payload === "object" &&
+        (payload.error || payload.message || payload.detail)) ||
+      (typeof payload === "string" && payload) ||
+      `${response.status} ${response.statusText}`;
+    const error = new Error(String(detail));
+    error.status = response.status;
+    error.payload =
+      payload && typeof payload === "object" ? payload : { detail };
+    throw error;
+  }
+  return payload || {};
+}
+
+function sam3dCapabilitySet(status = app.sam3dStatus) {
+  const values = [
+    ...asArray(status?.capabilities),
+    ...asArray(status?.worker?.capabilities),
+    ...asArray(status?.vam?.capabilities),
+    ...asArray(status?.bridge?.capabilities),
+  ];
+  return new Set(
+    values
+      .map((value) => String(value || "").trim().toLowerCase())
+      .filter(Boolean),
+  );
+}
+
+function sam3dStatusReady(status = app.sam3dStatus) {
+  if (!status || typeof status !== "object") return false;
+  const worker =
+    status.worker && typeof status.worker === "object" ? status.worker : {};
+  if (status.ready !== undefined) return Boolean(status.ready);
+  if (worker.ready !== undefined) return Boolean(worker.ready);
+  if (status.available !== undefined) return Boolean(status.available);
+  return false;
+}
+
+function sam3dRawJobs(payload) {
+  if (Array.isArray(payload)) return payload;
+  return asArray(
+    payload?.jobs ||
+      payload?.items ||
+      payload?.results ||
+      payload?.history,
+  );
+}
+
+function sam3dJobState(job) {
+  return String(job?.status || job?.state || "unknown")
+    .trim()
+    .toLowerCase();
+}
+
+function sam3dJobIsTerminal(job) {
+  return SAM3D_TERMINAL_STATES.has(sam3dJobState(job));
+}
+
+function sam3dJobIsActive(job) {
+  return ["queued", "running"].includes(sam3dJobState(job));
+}
+
+function sam3dVamActionState(job) {
+  return String(job?.vamActionState || job?.action_state || "")
+    .trim()
+    .toLowerCase();
+}
+
+function sam3dJobNeedsPolling(job) {
+  return (
+    sam3dJobIsActive(job) ||
+    ["queued", "running"].includes(sam3dVamActionState(job))
+  );
+}
+
+function sam3dJobSucceeded(job) {
+  return SAM3D_SUCCESS_STATES.has(sam3dJobState(job));
+}
+
+function sam3dJobFailed(job) {
+  return SAM3D_ERROR_STATES.has(sam3dJobState(job));
+}
+
+function sam3dJobProgress(raw) {
+  let progress = Number(
+    raw?.progress_percent ??
+      raw?.percent ??
+      raw?.progress?.percent ??
+      raw?.progress ??
+      0,
+  );
+  if (!Number.isFinite(progress)) progress = 0;
+  if (progress > 0 && progress <= 1) progress *= 100;
+  return Math.max(0, Math.min(100, progress));
+}
+
+function normalizeSam3dJob(raw) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  let id;
+  try {
+    id = sam3dJobId(raw.id || raw.job_id || raw.jobId);
+  } catch (_error) {
+    return null;
+  }
+  const result =
+    raw.result && typeof raw.result === "object" ? raw.result : {};
+  const source =
+    raw.source && typeof raw.source === "object" ? raw.source : {};
+  const camera =
+    (result.camera && typeof result.camera === "object" && result.camera) ||
+    (raw.camera && typeof raw.camera === "object" && raw.camera) ||
+    {};
+  let bodies = asArray(
+    result.bodies ||
+      raw.bodies ||
+      result.people ||
+      raw.people,
+  ).filter((body) => body && typeof body === "object");
+  if (!bodies.length) {
+    const personCount = Math.max(
+      0,
+      Math.min(
+        32,
+        integerValue(raw.person_count ?? result.person_count) || 0,
+      ),
+    );
+    bodies = Array.from({ length: personCount }, () => ({}));
+  }
+  const selectedBodyIndex = Math.max(
+    0,
+    integerValue(
+      raw.selected_body_index ??
+        raw.selected_person_index ??
+        raw.body_index ??
+        result.selected_body_index ??
+        0,
+    ) || 0,
+  );
+  const revision = String(
+    raw.revision ||
+      result.revision ||
+      raw.result_revision ||
+      "",
+  ).trim().toLowerCase();
+  const width = Math.max(
+    0,
+    integerValue(
+      source.width ??
+        raw.source_width ??
+        result.source_width ??
+        raw.width,
+    ) || 0,
+  );
+  const height = Math.max(
+    0,
+    integerValue(
+      source.height ??
+        raw.source_height ??
+        result.source_height ??
+        raw.height,
+    ) || 0,
+  );
+  const lastAction =
+    raw.last_vam_action &&
+    typeof raw.last_vam_action === "object" &&
+    !Array.isArray(raw.last_vam_action)
+      ? raw.last_vam_action
+      : {};
+  const actionName = String(lastAction.action || "").toLowerCase();
+  const solutionRevision = String(
+    raw.solution_revision || lastAction.revision || "",
+  )
+    .trim()
+    .toLowerCase();
+  const actionState = String(
+    raw.action_state || lastAction.state || "",
+  ).trim().toLowerCase();
+  const actionMessage = String(
+    raw.action_message || lastAction.message || "",
+  ).trim();
+  const artifactUrls =
+    raw.artifact_urls &&
+    typeof raw.artifact_urls === "object" &&
+    !Array.isArray(raw.artifact_urls)
+      ? raw.artifact_urls
+      : {};
+  return {
+    ...raw,
+    id,
+    status: sam3dJobState(raw),
+    progressPercent: sam3dJobProgress(raw),
+    stage: String(
+      raw.stage ||
+        raw.progress?.stage ||
+        (sam3dJobSucceeded(raw) ? "Reconstruction ready" : raw.status || "Queued"),
+    ),
+    message: String(
+      raw.message ||
+        raw.progress?.message ||
+        raw.error?.message ||
+        raw.error ||
+        "",
+    ),
+    revision,
+    bodies,
+    selectedBodyIndex,
+    sourceName: String(
+      source.name ||
+        source.filename ||
+        raw.source_name ||
+        raw.filename ||
+        "Source image",
+    ),
+    sourceWidth: width,
+    sourceHeight: height,
+    createdAt:
+      raw.created_at_utc ||
+      raw.created_at ||
+      raw.createdAt ||
+      raw.started_at ||
+      raw.updated_at ||
+      "",
+    updatedAt:
+      raw.updated_at_utc ||
+      raw.updated_at ||
+      raw.updatedAt ||
+      "",
+    camera: {
+      horizontalFov: numberOr(
+        camera.horizontal_fov ??
+          camera.horizontalFov ??
+          camera.fov ??
+          result.horizontal_fov,
+        60,
+      ),
+    },
+    solutionRevision: SAM3D_JOB_ID_PATTERN.test(solutionRevision)
+      ? solutionRevision
+      : "",
+    targetUid: String(raw.target_uid || lastAction.target_uid || ""),
+    cameraUid: String(raw.camera_uid || lastAction.camera_uid || ""),
+    lastActionName: actionName,
+    vamActionState: actionState,
+    vamActionMessage: actionMessage,
+    captureRequested:
+      raw.capture_requested === true || actionName === "capture",
+    captureRequestId: String(
+      lastAction.request_id || lastAction.requestId || "",
+    ).trim(),
+    canUndo: Boolean(
+      raw.can_undo ?? raw.canUndo ?? result.can_undo ?? false,
+    ),
+    applied: Boolean(raw.applied ?? result.applied ?? false),
+    // The capture artifact URL is minted when the bridge request is queued,
+    // before the renderer has produced a readable image. Only an explicit
+    // ready flag or a successful browser image load counts as captured.
+    captured:
+      raw.captured === true ||
+      result.captured === true ||
+      app.sam3dCaptureReadyJobs.has(id),
+    artifactUrls,
+    rawResult: result,
+  };
+}
+
+function normalizeSam3dJobs(payload) {
+  const seen = new Set();
+  return sam3dRawJobs(payload)
+    .map(normalizeSam3dJob)
+    .filter((job) => {
+      if (!job || seen.has(job.id)) return false;
+      seen.add(job.id);
+      return true;
+    })
+    .slice(0, SAM3D_MAX_HISTORY);
+}
+
+function mergeSam3dJob(job) {
+  if (!job) return;
+  const existingIndex = app.sam3dJobs.findIndex(
+    (candidate) => candidate.id === job.id,
+  );
+  if (existingIndex >= 0) {
+    app.sam3dJobs.splice(existingIndex, 1, job);
+  } else {
+    app.sam3dJobs.unshift(job);
+    if (app.sam3dJobs.length > SAM3D_MAX_HISTORY) {
+      app.sam3dJobs.length = SAM3D_MAX_HISTORY;
+    }
+  }
+  if (app.sam3dSelectedJobId === job.id) {
+    app.sam3dSelectedJob = job;
+    app.sam3dSelectedBodyIndex = Math.min(
+      job.selectedBodyIndex,
+      Math.max(0, job.bodies.length - 1),
+    );
+    if (job.applied && job.solutionRevision) {
+      app.sam3dAppliedJobId = job.id;
+      app.sam3dAppliedRevision = job.solutionRevision;
+    } else if (app.sam3dAppliedJobId === job.id && !job.applied) {
+      app.sam3dAppliedJobId = "";
+      app.sam3dAppliedRevision = "";
+    }
+  }
+}
+
+async function loadSam3dWorkspace({ force = false, quiet = false } = {}) {
+  if (app.sam3dStatusInFlight || app.sam3dJobsInFlight) {
+    return;
+  }
+  app.sam3dStatusInFlight = true;
+  app.sam3dJobsInFlight = true;
+  setButtonBusy(elements.sam3dRefreshButton, true);
+  renderSam3dRuntime();
+  const sceneGeneration = beginPersonSnapshotRequest();
+  const [statusResult, jobsResult, sceneResult] = await Promise.allSettled([
+    Sam3dClient.status(),
+    Sam3dClient.listJobs(),
+    fetchLiveSceneSnapshot(),
+  ]);
+  if (statusResult.status === "fulfilled") {
+    app.sam3dStatus = statusResult.value || {};
+    app.sam3dStatusError = null;
+  } else {
+    app.sam3dStatus = null;
+    app.sam3dStatusError = statusResult.reason;
+  }
+  if (jobsResult.status === "fulfilled") {
+    app.sam3dJobs = normalizeSam3dJobs(jobsResult.value);
+    app.sam3dJobsError = null;
+  } else {
+    app.sam3dJobsError = jobsResult.reason;
+  }
+  if (sceneResult.status === "fulfilled") {
+    acceptPersonSnapshot(sceneResult.value || {}, sceneGeneration);
+  } else {
+    acceptPersonSnapshotError(sceneResult.reason, sceneGeneration);
+  }
+  app.sam3dStatusInFlight = false;
+  app.sam3dJobsInFlight = false;
+  setButtonBusy(elements.sam3dRefreshButton, false);
+
+  if (
+    app.sam3dSelectedJobId &&
+    !app.sam3dJobs.some((job) => job.id === app.sam3dSelectedJobId)
+  ) {
+    app.sam3dSelectedJobId = "";
+    app.sam3dSelectedJob = null;
+  }
+  if (!app.sam3dSelectedJobId && app.sam3dJobs.length) {
+    app.sam3dSelectedJobId = app.sam3dJobs[0].id;
+    app.sam3dSelectedJob = app.sam3dJobs[0];
+  } else if (app.sam3dSelectedJobId) {
+    app.sam3dSelectedJob =
+      app.sam3dJobs.find(
+        (job) => job.id === app.sam3dSelectedJobId,
+      ) || app.sam3dSelectedJob;
+  }
+
+  renderSam3dWorkspace();
+  if (app.sam3dSelectedJobId) {
+    await loadSam3dJob(app.sam3dSelectedJobId, { quiet: true });
+  }
+  if (app.sam3dJobs.some(sam3dJobNeedsPolling)) {
+    startSam3dPolling();
+  } else {
+    stopSam3dPolling();
+  }
+  if (
+    !quiet &&
+    app.sam3dStatusError &&
+    app.sam3dStatusError.status !== 404
+  ) {
+    toast(
+      "SAM 3D worker unavailable",
+      errorMessage(app.sam3dStatusError),
+      "error",
+    );
+  }
+}
+
+async function loadSam3dJob(jobId, { quiet = false } = {}) {
+  let normalizedId;
+  try {
+    normalizedId = sam3dJobId(jobId);
+  } catch (error) {
+    if (!quiet) toast("Could not load job", errorMessage(error), "error");
+    return null;
+  }
+  const generation = ++app.sam3dJobRequestGeneration;
+  try {
+    const payload = await Sam3dClient.job(normalizedId);
+    if (
+      generation !== app.sam3dJobRequestGeneration ||
+      app.sam3dSelectedJobId !== normalizedId
+    ) {
+      return null;
+    }
+    const job = normalizeSam3dJob(payload.job || payload);
+    if (!job) throw new Error("The manager returned an invalid SAM 3D job.");
+    mergeSam3dJob(job);
+    renderSam3dWorkspace();
+    if (sam3dJobNeedsPolling(job)) startSam3dPolling();
+    return job;
+  } catch (error) {
+    if (!quiet) {
+      toast("Could not load SAM 3D job", errorMessage(error), "error");
+    }
+    return null;
+  }
+}
+
+function startSam3dPolling() {
+  if (app.sam3dJobPollTimer !== null || app.view !== "sam3d") return;
+  app.sam3dJobPollTimer = window.setTimeout(pollSam3dJob, SAM3D_POLL_MS);
+}
+
+function stopSam3dPolling() {
+  if (app.sam3dJobPollTimer !== null) {
+    window.clearTimeout(app.sam3dJobPollTimer);
+    app.sam3dJobPollTimer = null;
+  }
+}
+
+async function pollSam3dJob() {
+  app.sam3dJobPollTimer = null;
+  if (app.view !== "sam3d") return;
+  const jobId = app.sam3dSelectedJobId;
+  if (!jobId) return;
+  const previousActionState = sam3dVamActionState(
+    app.sam3dSelectedJob,
+  );
+  const job = await loadSam3dJob(jobId, { quiet: true });
+  const actionState = sam3dVamActionState(job);
+  if (
+    ["queued", "running"].includes(previousActionState) &&
+    ["succeeded", "failed", "stale"].includes(actionState)
+  ) {
+    await loadPersons({ quiet: true });
+    if (actionState === "succeeded") {
+      toast(
+        "VaM action completed",
+        job?.vamActionMessage || "VaM confirmed the requested SAM 3D change.",
+      );
+    } else {
+      toast(
+        actionState === "stale"
+          ? "VaM action was not confirmed"
+          : "VaM action failed",
+        job?.vamActionMessage ||
+          "The bridge did not complete the requested SAM 3D change.",
+        "error",
+      );
+    }
+  }
+  if (job && sam3dJobNeedsPolling(job)) {
+    app.sam3dJobPollTimer = window.setTimeout(
+      pollSam3dJob,
+      SAM3D_POLL_MS,
+    );
+  }
+}
+
+function renderSam3dWorkspace() {
+  renderSam3dRuntime();
+  renderSam3dSource();
+  renderSam3dHistory();
+  renderSam3dJob();
+  renderSam3dResolutionOptions();
+  renderSam3dTargets();
+  renderSam3dApplyState();
+}
+
+function renderSam3dRuntime() {
+  const status = app.sam3dStatus;
+  const error = app.sam3dStatusError;
+  const checking = app.sam3dStatusInFlight;
+  const ready = sam3dStatusReady(status);
+  const worker =
+    status?.worker && typeof status.worker === "object"
+      ? status.worker
+      : {};
+
+  elements.sam3dRuntimeBadge.classList.toggle("is-ready", ready);
+  elements.sam3dRuntimeBadge.classList.toggle("is-error", Boolean(error));
+  elements.sam3dRuntimePanel.classList.toggle("is-ready", ready);
+  elements.sam3dRuntimePanel.classList.toggle("is-error", Boolean(error));
+  elements.sam3dRuntimeAction.hidden = !error;
+
+  if (checking) {
+    elements.sam3dRuntimeLabel.textContent = "Checking…";
+    elements.sam3dRuntimeTitle.textContent = "Checking the standalone worker";
+    elements.sam3dRuntimeMessage.textContent =
+      "Reading model, GPU, VaM bridge, and camera-plugin capabilities.";
+    elements.sam3dTabState.textContent = "…";
+  } else if (error) {
+    const missing = error.status === 404;
+    elements.sam3dRuntimeLabel.textContent = missing
+      ? "Not installed"
+      : "Unavailable";
+    elements.sam3dRuntimeTitle.textContent = missing
+      ? "SAM 3D support is not installed in this manager build"
+      : "The standalone SAM 3D worker is unavailable";
+    elements.sam3dRuntimeMessage.textContent = missing
+      ? "The rest of VAM-PIP remains usable. Update the manager to enable this workspace."
+      : errorMessage(error);
+    elements.sam3dTabState.textContent = "Offline";
+  } else if (ready) {
+    const model = String(
+      worker.model || status?.model || "SAM 3D Body",
+    );
+    const runtime = worker.environment
+      ? `Conda environment ${worker.environment}`
+      : worker.launcher === "dedicated-python"
+        ? "dedicated Python environment"
+        : "isolated worker environment";
+    elements.sam3dRuntimeLabel.textContent = "Worker ready";
+    elements.sam3dRuntimeTitle.textContent =
+      `${model} worker is ready`;
+    elements.sam3dRuntimeMessage.textContent =
+      `Using ${runtime}. Inference unloads before VaM capture.`;
+    elements.sam3dTabState.textContent = "Ready";
+  } else if (status) {
+    elements.sam3dRuntimeLabel.textContent = "Setup required";
+    elements.sam3dRuntimeTitle.textContent = String(
+      status.title ||
+        worker.title ||
+        "The standalone worker needs setup",
+    );
+    elements.sam3dRuntimeMessage.textContent = String(
+      status.message ||
+        worker.message ||
+        status.reason ||
+        asArray(worker.errors).join(" · ") ||
+        "Install or select the official SAM 3D Body checkpoint before running a job.",
+    );
+    elements.sam3dTabState.textContent = "Setup";
+  } else {
+    elements.sam3dRuntimeLabel.textContent = "Not checked";
+    elements.sam3dRuntimeTitle.textContent =
+      "Open or refresh this tab to check the worker";
+    elements.sam3dRuntimeMessage.textContent =
+      "ComfyUI is not used or modified by this workspace.";
+    elements.sam3dTabState.textContent = "—";
+  }
+  elements.sam3dRunButton.disabled =
+    !ready ||
+    !app.sam3dSourceFile ||
+    app.sam3dMutationInFlight;
+}
+
+function sam3dHistoryStateClass(job) {
+  if (sam3dJobFailed(job)) return "is-error";
+  if (sam3dJobSucceeded(job)) return "is-complete";
+  if (!sam3dJobIsTerminal(job)) return "is-running";
+  return "";
+}
+
+function sam3dJobDisplayDate(job) {
+  const value = job.updatedAt || job.createdAt;
+  if (!value) return sam3dJobState(job);
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return sam3dJobState(job);
+  return `${sam3dJobState(job)} · ${date.toLocaleString()}`;
+}
+
+function renderSam3dHistory() {
+  elements.sam3dHistoryCount.textContent = formatNumber(
+    app.sam3dJobs.length,
+  );
+  elements.sam3dHistoryList.replaceChildren();
+  if (!app.sam3dJobs.length) {
+    const empty = createElement("div", "inline-empty");
+    const message = document.createElement("p");
+    message.textContent = app.sam3dJobsError
+      ? "Job history is currently unavailable."
+      : "No reconstruction jobs yet.";
+    empty.append(message);
+    elements.sam3dHistoryList.append(empty);
+    return;
+  }
+  const fragment = document.createDocumentFragment();
+  for (const job of app.sam3dJobs) {
+    const item = button("", "sam3d-history-item");
+    item.dataset.sam3dJobId = job.id;
+    item.classList.toggle(
+      "active",
+      job.id === app.sam3dSelectedJobId,
+    );
+    const thumb = createElement("span", "sam3d-history-thumb");
+    thumb.textContent = "3D";
+    const sourceUrl = sam3dArtifactUrl(job, "source");
+    if (sourceUrl) {
+      const image = document.createElement("img");
+      image.alt = "";
+      image.loading = "lazy";
+      image.addEventListener("error", () => image.remove());
+      image.src = sourceUrl;
+      thumb.append(image);
+    }
+    const copy = createElement("span", "sam3d-history-copy");
+    const title = document.createElement("strong");
+    title.textContent = job.sourceName;
+    const detail = document.createElement("span");
+    detail.textContent = sam3dJobDisplayDate(job);
+    copy.append(title, detail);
+    const state = createElement(
+      "span",
+      `sam3d-history-state ${sam3dHistoryStateClass(job)}`.trim(),
+    );
+    state.setAttribute("aria-label", sam3dJobState(job));
+    item.append(thumb, copy, state);
+    fragment.append(item);
+  }
+  elements.sam3dHistoryList.append(fragment);
+}
+
+async function selectSam3dJob(jobId) {
+  let normalizedId;
+  try {
+    normalizedId = sam3dJobId(jobId);
+  } catch (_error) {
+    return;
+  }
+  if (app.sam3dSelectedJobId === normalizedId) return;
+  app.sam3dSelectedJobId = normalizedId;
+  app.sam3dSelectedJob =
+    app.sam3dJobs.find((job) => job.id === normalizedId) || null;
+  app.sam3dSelectedBodyIndex =
+    app.sam3dSelectedJob?.selectedBodyIndex || 0;
+  app.sam3dAppliedJobId = app.sam3dSelectedJob?.applied
+    ? normalizedId
+    : "";
+  app.sam3dAppliedRevision =
+    app.sam3dSelectedJob?.applied
+      ? app.sam3dSelectedJob.solutionRevision
+      : "";
+  app.sam3dPreviewKind = sam3dJobSucceeded(app.sam3dSelectedJob)
+    ? "overlay"
+    : "source";
+  renderSam3dWorkspace();
+  await loadSam3dJob(normalizedId);
+}
+
+function sam3dFileContentType(file) {
+  const type = String(file?.type || "").toLowerCase();
+  if (["image/jpeg", "image/png", "image/webp"].includes(type)) return type;
+  const name = String(file?.name || "");
+  if (/\.jpe?g$/i.test(name)) return "image/jpeg";
+  if (/\.png$/i.test(name)) return "image/png";
+  if (/\.webp$/i.test(name)) return "image/webp";
+  return "";
+}
+
+function sam3dFileTypeAllowed(file) {
+  return Boolean(sam3dFileContentType(file));
+}
+
+async function chooseSam3dSource(file) {
+  if (!(file instanceof File)) return;
+  if (!sam3dFileTypeAllowed(file)) {
+    toast(
+      "Unsupported source image",
+      "Choose a JPEG, PNG, or WebP image.",
+      "error",
+    );
+    elements.sam3dFileInput.value = "";
+    return;
+  }
+  if (file.size <= 0 || file.size > SAM3D_MAX_UPLOAD_BYTES) {
+    toast(
+      "Source image is too large",
+      `Choose an image smaller than ${formatBytes(SAM3D_MAX_UPLOAD_BYTES)}.`,
+      "error",
+    );
+    elements.sam3dFileInput.value = "";
+    return;
+  }
+
+  const objectUrl = URL.createObjectURL(file);
+  const image = new Image();
+  try {
+    await new Promise((resolve, reject) => {
+      image.addEventListener("load", resolve, { once: true });
+      image.addEventListener(
+        "error",
+        () => reject(new Error("The browser could not decode this image.")),
+        { once: true },
+      );
+      image.src = objectUrl;
+    });
+  } catch (error) {
+    URL.revokeObjectURL(objectUrl);
+    elements.sam3dFileInput.value = "";
+    toast("Could not read source image", errorMessage(error), "error");
+    return;
+  }
+
+  if (app.sam3dSourceUrl) URL.revokeObjectURL(app.sam3dSourceUrl);
+  app.sam3dSourceFile = file;
+  app.sam3dSourceUrl = objectUrl;
+  app.sam3dSourceImage = image;
+  app.sam3dSourceWidth = image.naturalWidth;
+  app.sam3dSourceHeight = image.naturalHeight;
+  app.sam3dSourceJobId = "";
+  app.sam3dBbox = { x: 0, y: 0, width: 100, height: 100 };
+  elements.sam3dManualBbox.checked = false;
+  elements.sam3dBboxFields.disabled = true;
+  syncSam3dBboxFields();
+  renderSam3dSource();
+  renderSam3dRuntime();
+  drawSam3dSourceCanvas();
+}
+
+function clearSam3dSource() {
+  if (app.sam3dSourceUrl) URL.revokeObjectURL(app.sam3dSourceUrl);
+  app.sam3dSourceFile = null;
+  app.sam3dSourceUrl = "";
+  app.sam3dSourceImage = null;
+  app.sam3dSourceWidth = 0;
+  app.sam3dSourceHeight = 0;
+  app.sam3dSourceJobId = "";
+  app.sam3dBbox = { x: 0, y: 0, width: 100, height: 100 };
+  app.sam3dBboxDrag = null;
+  elements.sam3dFileInput.value = "";
+  elements.sam3dManualBbox.checked = false;
+  elements.sam3dBboxFields.disabled = true;
+  syncSam3dBboxFields();
+  renderSam3dSource();
+  renderSam3dRuntime();
+  renderSam3dPreview();
+}
+
+function renderSam3dSource() {
+  const hasSource = Boolean(
+    app.sam3dSourceFile && app.sam3dSourceImage,
+  );
+  elements.sam3dDropZone.hidden = hasSource;
+  elements.sam3dSourceEditor.hidden = !hasSource;
+  elements.sam3dClearSource.hidden = !hasSource;
+  elements.sam3dCanvasHint.hidden =
+    !hasSource || !elements.sam3dManualBbox.checked;
+  if (!hasSource) return;
+  elements.sam3dSourceName.textContent = app.sam3dSourceFile.name;
+  elements.sam3dSourceMeta.textContent =
+    `${formatNumber(app.sam3dSourceWidth)} × ${formatNumber(
+      app.sam3dSourceHeight,
+    )} · ${formatBytes(app.sam3dSourceFile.size)}`;
+  window.requestAnimationFrame(drawSam3dSourceCanvas);
+}
+
+function clampSam3dBbox(bbox) {
+  const x = Math.max(0, Math.min(99.9, numberOr(bbox.x, 0)));
+  const y = Math.max(0, Math.min(99.9, numberOr(bbox.y, 0)));
+  const width = Math.max(
+    0.1,
+    Math.min(100 - x, numberOr(bbox.width, 100 - x)),
+  );
+  const height = Math.max(
+    0.1,
+    Math.min(100 - y, numberOr(bbox.height, 100 - y)),
+  );
+  return { x, y, width, height };
+}
+
+function syncSam3dBboxFields() {
+  const bbox = clampSam3dBbox(app.sam3dBbox);
+  app.sam3dBbox = bbox;
+  elements.sam3dBboxX.value = bbox.x.toFixed(1);
+  elements.sam3dBboxY.value = bbox.y.toFixed(1);
+  elements.sam3dBboxWidth.value = bbox.width.toFixed(1);
+  elements.sam3dBboxHeight.value = bbox.height.toFixed(1);
+}
+
+function readSam3dBboxFields() {
+  app.sam3dBbox = clampSam3dBbox({
+    x: elements.sam3dBboxX.value,
+    y: elements.sam3dBboxY.value,
+    width: elements.sam3dBboxWidth.value,
+    height: elements.sam3dBboxHeight.value,
+  });
+  drawSam3dSourceCanvas();
+}
+
+function resetSam3dBbox() {
+  app.sam3dBbox = { x: 0, y: 0, width: 100, height: 100 };
+  syncSam3dBboxFields();
+  drawSam3dSourceCanvas();
+}
+
+function sam3dCanvasPoint(event) {
+  const canvas = elements.sam3dSourceCanvas;
+  const bounds = canvas.getBoundingClientRect();
+  if (bounds.width <= 0 || bounds.height <= 0) return null;
+  return {
+    x: Math.max(
+      0,
+      Math.min(
+        100,
+        ((event.clientX - bounds.left) / bounds.width) * 100,
+      ),
+    ),
+    y: Math.max(
+      0,
+      Math.min(
+        100,
+        ((event.clientY - bounds.top) / bounds.height) * 100,
+      ),
+    ),
+  };
+}
+
+function beginSam3dBboxDrag(event) {
+  if (
+    !elements.sam3dManualBbox.checked ||
+    !app.sam3dSourceImage ||
+    event.button !== 0
+  ) {
+    return;
+  }
+  const point = sam3dCanvasPoint(event);
+  if (!point) return;
+  event.preventDefault();
+  elements.sam3dSourceCanvas.setPointerCapture(event.pointerId);
+  app.sam3dBboxDrag = { pointerId: event.pointerId, start: point };
+  app.sam3dBbox = {
+    x: point.x,
+    y: point.y,
+    width: 0.1,
+    height: 0.1,
+  };
+  syncSam3dBboxFields();
+  drawSam3dSourceCanvas();
+}
+
+function continueSam3dBboxDrag(event) {
+  const drag = app.sam3dBboxDrag;
+  if (!drag || drag.pointerId !== event.pointerId) return;
+  const point = sam3dCanvasPoint(event);
+  if (!point) return;
+  const left = Math.min(drag.start.x, point.x);
+  const top = Math.min(drag.start.y, point.y);
+  app.sam3dBbox = clampSam3dBbox({
+    x: left,
+    y: top,
+    width: Math.abs(point.x - drag.start.x),
+    height: Math.abs(point.y - drag.start.y),
+  });
+  syncSam3dBboxFields();
+  drawSam3dSourceCanvas();
+}
+
+function finishSam3dBboxDrag(event) {
+  const drag = app.sam3dBboxDrag;
+  if (!drag || drag.pointerId !== event.pointerId) return;
+  continueSam3dBboxDrag(event);
+  app.sam3dBboxDrag = null;
+  if (elements.sam3dSourceCanvas.hasPointerCapture(event.pointerId)) {
+    elements.sam3dSourceCanvas.releasePointerCapture(event.pointerId);
+  }
+}
+
+function drawSam3dSourceCanvas() {
+  const canvas = elements.sam3dSourceCanvas;
+  const context = canvas?.getContext("2d");
+  const image = app.sam3dSourceImage;
+  if (!context || !image) return;
+  const scale = Math.min(
+    1,
+    1600 / Math.max(image.naturalWidth, image.naturalHeight),
+  );
+  const width = Math.max(1, Math.round(image.naturalWidth * scale));
+  const height = Math.max(1, Math.round(image.naturalHeight * scale));
+  if (canvas.width !== width) canvas.width = width;
+  if (canvas.height !== height) canvas.height = height;
+  canvas.style.aspectRatio = `${width} / ${height}`;
+  context.clearRect(0, 0, width, height);
+  context.drawImage(image, 0, 0, width, height);
+  if (!elements.sam3dManualBbox.checked) return;
+
+  const bbox = clampSam3dBbox(app.sam3dBbox);
+  const x = (bbox.x / 100) * width;
+  const y = (bbox.y / 100) * height;
+  const boxWidth = (bbox.width / 100) * width;
+  const boxHeight = (bbox.height / 100) * height;
+  context.save();
+  context.fillStyle = "rgba(5, 8, 12, 0.48)";
+  context.beginPath();
+  context.rect(0, 0, width, height);
+  context.rect(x, y, boxWidth, boxHeight);
+  context.fill("evenodd");
+  context.strokeStyle = "#86e6b0";
+  context.lineWidth = Math.max(2, Math.min(width, height) / 300);
+  context.setLineDash([
+    Math.max(5, width / 150),
+    Math.max(4, width / 220),
+  ]);
+  context.strokeRect(x, y, boxWidth, boxHeight);
+  context.setLineDash([]);
+  context.fillStyle = "#86e6b0";
+  const handle = Math.max(6, Math.min(width, height) / 90);
+  for (const [handleX, handleY] of [
+    [x, y],
+    [x + boxWidth, y],
+    [x, y + boxHeight],
+    [x + boxWidth, y + boxHeight],
+  ]) {
+    context.fillRect(
+      handleX - handle / 2,
+      handleY - handle / 2,
+      handle,
+      handle,
+    );
+  }
+  context.restore();
+}
+
+function sam3dBboxPixels() {
+  if (!elements.sam3dManualBbox.checked) return null;
+  const bbox = clampSam3dBbox(app.sam3dBbox);
+  return [
+    (bbox.x / 100) * app.sam3dSourceWidth,
+    (bbox.y / 100) * app.sam3dSourceHeight,
+    ((bbox.x + bbox.width) / 100) * app.sam3dSourceWidth,
+    ((bbox.y + bbox.height) / 100) * app.sam3dSourceHeight,
+  ];
+}
+
+function sam3dKnownVerticalFov() {
+  const raw = String(elements.sam3dKnownVerticalFov.value || "").trim();
+  if (!raw) return null;
+  const value = Number(raw);
+  if (!Number.isFinite(value) || value < 5 || value > 170) {
+    throw new Error("Known vertical FOV must be between 5° and 170°.");
+  }
+  return value;
+}
+
+async function createSam3dJob() {
+  if (
+    app.sam3dMutationInFlight ||
+    !app.sam3dSourceFile ||
+    !sam3dStatusReady()
+  ) {
+    return;
+  }
+  app.sam3dMutationInFlight = true;
+  setButtonBusy(elements.sam3dRunButton, true, "Uploading…");
+  elements.sam3dJobProgress.hidden = false;
+  elements.sam3dJobProgress.className =
+    "sam3d-job-progress is-running";
+  elements.sam3dJobStage.textContent = "Uploading source image…";
+  elements.sam3dJobMessage.textContent =
+    "The image is being copied into VAM-PIP’s managed job storage.";
+  elements.sam3dJobPercent.textContent = "0%";
+  elements.sam3dJobProgressBar.value = 0;
+  elements.sam3dJobRetry.hidden = true;
+  let uploadedJob = null;
+  try {
+    const uploadPayload = await Sam3dClient.create(
+      app.sam3dSourceFile,
+      sam3dBboxPixels(),
+      sam3dKnownVerticalFov(),
+    );
+    uploadedJob = normalizeSam3dJob(
+      uploadPayload.job || uploadPayload,
+    );
+    if (!uploadedJob) {
+      throw new Error("The manager did not return a valid SAM 3D job.");
+    }
+    app.sam3dSelectedJobId = uploadedJob.id;
+    app.sam3dSelectedJob = uploadedJob;
+    app.sam3dSelectedBodyIndex = uploadedJob.selectedBodyIndex;
+    app.sam3dSourceJobId = uploadedJob.id;
+    app.sam3dPreviewKind = "source";
+    mergeSam3dJob(uploadedJob);
+    elements.sam3dJobStage.textContent = "Starting isolated worker…";
+    elements.sam3dJobMessage.textContent =
+      "The source is stored. VAM-PIP is queueing native SAM 3D Body inference.";
+    renderSam3dWorkspace();
+
+    const runPayload = await Sam3dClient.run(uploadedJob.id);
+    const queuedJob = normalizeSam3dJob(
+      runPayload.job || runPayload,
+    );
+    if (!queuedJob) {
+      throw new Error("The manager did not confirm the queued job.");
+    }
+    mergeSam3dJob(queuedJob);
+    renderSam3dWorkspace();
+    startSam3dPolling();
+    toast(
+      "SAM 3D job started",
+      "The standalone worker is reconstructing the pose and camera.",
+    );
+  } catch (error) {
+    elements.sam3dJobProgress.className =
+      "sam3d-job-progress is-error";
+    elements.sam3dJobStage.textContent = "Could not start the job";
+    elements.sam3dJobMessage.textContent = errorMessage(error);
+    elements.sam3dJobRetry.hidden = !uploadedJob;
+    toast("Could not start SAM 3D", errorMessage(error), "error");
+  } finally {
+    app.sam3dMutationInFlight = false;
+    setButtonBusy(elements.sam3dRunButton, false);
+    renderSam3dRuntime();
+  }
+}
+
+async function retrySam3dJob() {
+  const job = app.sam3dSelectedJob;
+  if (
+    app.sam3dMutationInFlight ||
+    !job ||
+    !["uploaded", "failed", "interrupted", "cancelled"].includes(
+      sam3dJobState(job),
+    )
+  ) {
+    return;
+  }
+  app.sam3dMutationInFlight = true;
+  setButtonBusy(elements.sam3dJobRetry, true, "Queueing…");
+  try {
+    const payload = await Sam3dClient.run(job.id);
+    const queued = normalizeSam3dJob(payload.job || payload);
+    if (!queued) throw new Error("The manager did not confirm the queued job.");
+    mergeSam3dJob(queued);
+    renderSam3dWorkspace();
+    startSam3dPolling();
+    toast("SAM 3D job restarted", "The isolated worker accepted the job.");
+  } catch (error) {
+    toast("Could not restart SAM 3D", errorMessage(error), "error");
+  } finally {
+    app.sam3dMutationInFlight = false;
+    setButtonBusy(elements.sam3dJobRetry, false);
+    renderSam3dWorkspace();
+  }
+}
+
+function sam3dArtifactCandidate(job, kind) {
+  const result = job?.rawResult || {};
+  const artifacts =
+    job?.artifacts && typeof job.artifacts === "object"
+      ? job.artifacts
+      : {};
+  const resultArtifacts =
+    result.artifacts && typeof result.artifacts === "object"
+      ? result.artifacts
+      : {};
+  const artifactUrls =
+    job?.artifactUrls && typeof job.artifactUrls === "object"
+      ? job.artifactUrls
+      : {};
+  const aliases = {
+    source: [
+      artifactUrls.source,
+      artifacts.source,
+      resultArtifacts.source,
+      job?.source_url,
+      job?.sourceUrl,
+      result.source_url,
+    ],
+    overlay: [
+      artifactUrls.overlay,
+      artifacts.overlay,
+      resultArtifacts.overlay,
+      job?.overlay_url,
+      job?.overlayUrl,
+      result.overlay_url,
+    ],
+    result: [
+      artifactUrls.capture,
+      artifacts.result,
+      resultArtifacts.result,
+      job?.result_url,
+      result.result_url,
+    ],
+    capture: [
+      artifactUrls.capture,
+      artifacts.capture,
+      resultArtifacts.capture,
+      job?.capture_url,
+      job?.captureUrl,
+      result.capture_url,
+    ],
+  };
+  for (const candidate of aliases[kind] || []) {
+    const value =
+      candidate && typeof candidate === "object"
+        ? candidate.url || candidate.href
+        : candidate;
+    if (typeof value === "string" && value.trim()) return value.trim();
+  }
+  return "";
+}
+
+function sam3dSafeArtifactUrl(candidate) {
+  if (!candidate) return "";
+  try {
+    const url = new URL(candidate, window.location.href);
+    if (url.origin !== window.location.origin) return "";
+    if (!url.pathname.startsWith("/api/sam3d/")) return "";
+    if (app.token && !url.searchParams.has("token")) {
+      url.searchParams.set("token", app.token);
+    }
+    return `${url.pathname}${url.search}`;
+  } catch (_error) {
+    return "";
+  }
+}
+
+function sam3dArtifactUrl(job, kind) {
+  if (!job?.id) return "";
+  if (
+    kind === "source" &&
+    job.id === app.sam3dSourceJobId &&
+    app.sam3dSourceUrl
+  ) {
+    return app.sam3dSourceUrl;
+  }
+  const supplied = sam3dSafeArtifactUrl(
+    sam3dArtifactCandidate(job, kind),
+  );
+  if (supplied) return supplied;
+  try {
+    const fallbackKind = kind === "result" ? "capture" : kind;
+    return Sam3dClient.artifactUrl(job.id, fallbackKind);
+  } catch (_error) {
+    return "";
+  }
+}
+
+function sam3dBodyLabel(body, index) {
+  const score = Number(
+    body?.score ?? body?.confidence ?? body?.detection_score,
+  );
+  const scoreLabel = Number.isFinite(score)
+    ? ` · ${Math.round(Math.max(0, Math.min(1, score)) * 100)}%`
+    : "";
+  return String(
+    body?.label ||
+      body?.name ||
+      `Body ${index + 1}${scoreLabel}`,
+  );
+}
+
+function renderSam3dJob() {
+  const job = app.sam3dSelectedJob;
+  const hasJob = Boolean(job);
+  elements.sam3dJobProgress.hidden = !hasJob;
+  elements.sam3dResultPanel.hidden =
+    !hasJob || !sam3dJobSucceeded(job);
+  elements.sam3dApplyPanel.hidden =
+    !hasJob || !sam3dJobSucceeded(job);
+  if (!job) return;
+
+  const succeeded = sam3dJobSucceeded(job);
+  const failed = sam3dJobFailed(job);
+  const running = sam3dJobIsActive(job);
+  elements.sam3dJobProgress.className =
+    `sam3d-job-progress ${
+      failed ? "is-error" : succeeded ? "is-complete" : running ? "is-running" : ""
+    }`;
+  const progress = succeeded ? 100 : job.progressPercent;
+  elements.sam3dJobProgressBar.value = progress;
+  elements.sam3dJobPercent.textContent = `${Math.round(progress)}%`;
+  elements.sam3dJobStage.textContent = failed
+    ? "Reconstruction failed"
+    : job.stage || (running ? "Reconstructing…" : "Job finished");
+  elements.sam3dJobMessage.textContent =
+    job.message ||
+    (succeeded
+      ? "Pose and camera reconstruction are ready for review."
+      : running
+        ? "The standalone worker is processing this image."
+        : sam3dJobState(job) === "uploaded"
+          ? "The source is stored. Start the worker to run inference."
+          : "The job ended without a reconstruction.");
+  elements.sam3dJobRetry.hidden =
+    !["uploaded", "failed", "interrupted", "cancelled"].includes(
+      sam3dJobState(job),
+    );
+
+  if (!succeeded) return;
+  const bodies = job.bodies.length ? job.bodies : [{}];
+  app.sam3dSelectedBodyIndex = Math.max(
+    0,
+    Math.min(app.sam3dSelectedBodyIndex, bodies.length - 1),
+  );
+  elements.sam3dBodySelect.replaceChildren(
+    ...bodies.map(
+      (body, index) =>
+        new Option(sam3dBodyLabel(body, index), String(index)),
+    ),
+  );
+  elements.sam3dBodySelect.value = String(
+    app.sam3dSelectedBodyIndex,
+  );
+  elements.sam3dBodySelect.disabled =
+    bodies.length <= 1 || app.sam3dMutationInFlight;
+  elements.sam3dRevision.textContent = job.revision
+    ? `Revision ${job.revision}`
+    : "Revision unavailable";
+
+  if (elements.sam3dApplyPanel.dataset.jobId !== job.id) {
+    elements.sam3dApplyPanel.dataset.jobId = job.id;
+    elements.sam3dCameraFov.value = "";
+    elements.sam3dPersonHeight.value = "1.65";
+    elements.sam3dAspectRatio.value = "16:9";
+    renderSam3dResolutionOptions("1920x1080 (FHD)");
+    elements.sam3dImageFormat.value = "jpeg";
+  }
+  renderSam3dPreview();
+}
+
+function setSam3dPreview(kind) {
+  if (!["source", "overlay", "result"].includes(kind)) return;
+  app.sam3dPreviewKind = kind;
+  if (kind === "result") app.sam3dCapturePollAttempts = 0;
+  renderSam3dPreview();
+}
+
+function sam3dCaptureBridgeError(job) {
+  if (!job?.captureRequestId) return "";
+  if (["failed", "stale"].includes(sam3dVamActionState(job))) {
+    return (
+      job.vamActionMessage ||
+      "The VaM bridge did not complete the capture request."
+    );
+  }
+  const bridge =
+    app.person?.bridge && typeof app.person.bridge === "object"
+      ? app.person.bridge
+      : {};
+  const requestId = String(
+    bridge.requestId || bridge.request_id || "",
+  ).trim();
+  const state = String(bridge.state || "").trim().toLowerCase();
+  if (requestId !== job.captureRequestId || state !== "error") return "";
+  return (
+    String(bridge.message || "").trim() ||
+    "The VaM bridge reported that the capture failed."
+  );
+}
+
+function setSam3dPreviewEmpty(title, detail, visible) {
+  elements.sam3dPreviewEmptyTitle.textContent = title;
+  elements.sam3dPreviewEmptyDetail.textContent = detail;
+  elements.sam3dPreviewEmpty.hidden = !visible;
+}
+
+function renderSam3dPreview() {
+  const job = app.sam3dSelectedJob;
+  const kind = app.sam3dPreviewKind;
+  for (const buttonElement of [
+    elements.sam3dPreviewSource,
+    elements.sam3dPreviewOverlay,
+    elements.sam3dPreviewResult,
+  ]) {
+    const active = buttonElement.dataset.sam3dPreview === kind;
+    buttonElement.classList.toggle("active", active);
+    buttonElement.setAttribute("aria-selected", String(active));
+  }
+  if (!job) {
+    elements.sam3dPreviewImage.removeAttribute("src");
+    setSam3dPreviewEmpty(
+      "No reconstruction selected",
+      "Choose a completed job from the history.",
+      true,
+    );
+    return;
+  }
+  const artifactKind = kind === "result" ? "capture" : kind;
+  const captureReady =
+    job.captured || app.sam3dCaptureReadyJobs.has(job.id);
+  const captureRequested = job.captureRequested || captureReady;
+  const captureError =
+    kind === "result" ? sam3dCaptureBridgeError(job) : "";
+  const captureTimedOut =
+    kind === "result" &&
+    captureRequested &&
+    !captureReady &&
+    app.sam3dCapturePollAttempts >= SAM3D_CAPTURE_POLL_ATTEMPTS;
+  const knownMissing = kind === "result" && !captureRequested;
+  const url = knownMissing ? "" : sam3dArtifactUrl(job, artifactKind);
+  const captions = {
+    source: "Original source image",
+    overlay: `Detected joints · body ${app.sam3dSelectedBodyIndex + 1}`,
+    result: captureReady
+      ? "VaM capture ready · VR Video & Funscript Exporter"
+      : captureRequested
+        ? "Waiting for VaM capture · VR Video & Funscript Exporter"
+        : "VaM screenshot from VR Video & Funscript Exporter",
+  };
+  elements.sam3dPreviewCaption.textContent = captions[kind];
+  if (kind === "result") {
+    if (captureError) {
+      setSam3dPreviewEmpty("VaM capture failed", captureError, true);
+    } else if (captureTimedOut) {
+      setSam3dPreviewEmpty(
+        "Capture is still unavailable",
+        "The five-minute render window elapsed without a readable image. Check VaM, then request the capture again.",
+        true,
+      );
+    } else if (captureRequested && !captureReady) {
+      setSam3dPreviewEmpty(
+        "VaM capture is rendering",
+        "The VR Video & Funscript exporter may need up to five minutes to render and encode this image.",
+        true,
+      );
+    } else if (!captureRequested) {
+      setSam3dPreviewEmpty(
+        "No VaM capture yet",
+        "Apply the result and capture through the VR Video & Funscript camera.",
+        true,
+      );
+    } else {
+      setSam3dPreviewEmpty("", "", false);
+    }
+  } else {
+    setSam3dPreviewEmpty(
+      "Preview unavailable",
+      "This reconstruction artifact could not be loaded.",
+      !url,
+    );
+  }
+  if (!url) {
+    elements.sam3dPreviewImage.removeAttribute("src");
+    return;
+  }
+  elements.sam3dPreviewImage.alt = captions[kind];
+  elements.sam3dPreviewImage.onload = () => {
+    app.sam3dCapturePollAttempts = 0;
+    if (kind === "result") {
+      const firstReady = !app.sam3dCaptureReadyJobs.has(job.id);
+      app.sam3dCaptureReadyJobs.add(job.id);
+      job.captured = true;
+      elements.sam3dPreviewCaption.textContent =
+        "VaM capture ready · VR Video & Funscript Exporter";
+      if (firstReady) {
+        toast(
+          "VaM capture ready",
+          "The rendered image is now available in VAM-PIP.",
+        );
+      }
+    }
+    setSam3dPreviewEmpty("", "", false);
+  };
+  elements.sam3dPreviewImage.onerror = () => {
+    elements.sam3dPreviewImage.removeAttribute("src");
+    if (kind !== "result") {
+      setSam3dPreviewEmpty(
+        "Preview unavailable",
+        "This reconstruction artifact could not be loaded.",
+        true,
+      );
+    }
+    if (
+      kind === "result" &&
+      captureRequested &&
+      !captureError &&
+      app.view === "sam3d" &&
+      app.sam3dSelectedJobId === job.id &&
+      app.sam3dCapturePollAttempts < SAM3D_CAPTURE_POLL_ATTEMPTS
+    ) {
+      app.sam3dCapturePollAttempts += 1;
+      window.setTimeout(() => {
+        if (
+          app.view === "sam3d" &&
+          app.sam3dPreviewKind === "result" &&
+          app.sam3dSelectedJobId === job.id
+        ) {
+          renderSam3dPreview();
+        }
+      }, 1_000);
+    }
+  };
+  elements.sam3dPreviewImage.src = url;
+}
+
+function selectSam3dBody(value) {
+  const job = app.sam3dSelectedJob;
+  const bodyIndex = integerValue(value);
+  if (
+    !job ||
+    bodyIndex === null ||
+    bodyIndex < 0 ||
+    bodyIndex >= Math.max(1, job.bodies.length) ||
+    bodyIndex === app.sam3dSelectedBodyIndex
+  ) {
+    return;
+  }
+  app.sam3dSelectedBodyIndex = bodyIndex;
+  app.sam3dPreviewKind = "overlay";
+  renderSam3dJob();
+  renderSam3dApplyState();
+}
+
+function sam3dTargetEntries(kind) {
+  const status = app.sam3dStatus || {};
+  const vam =
+    status.vam && typeof status.vam === "object" ? status.vam : {};
+  const targets =
+    status.targets && typeof status.targets === "object"
+      ? status.targets
+      : {};
+  const vamTargets =
+    vam.targets && typeof vam.targets === "object" ? vam.targets : {};
+  const keys =
+    kind === "person"
+      ? ["persons", "people", "person_targets"]
+      : ["cameras", "camera_targets", "vr_funscript_cameras"];
+  let raw = [];
+  for (const container of [targets, vamTargets, vam, status]) {
+    for (const key of keys) {
+      if (Array.isArray(container[key])) {
+        raw = container[key];
+        break;
+      }
+    }
+    if (raw.length) break;
+  }
+  return raw
+    .map((entry) => {
+      if (typeof entry === "string") {
+        return { uid: entry, label: entry, selected: false };
+      }
+      if (!entry || typeof entry !== "object") return null;
+      const uid = String(
+        entry.uid || entry.id || entry.target_uid || "",
+      ).trim();
+      if (!uid) return null;
+      return {
+        uid,
+        label: String(entry.label || entry.name || uid),
+        selected: Boolean(entry.selected),
+      };
+    })
+    .filter(Boolean);
+}
+
+function sam3dCameraAtomIsVerified(atom) {
+  if (!atom || atom.type.toLowerCase() !== "empty") return false;
+  const cameraStatus =
+    atom.sam3dCamera && typeof atom.sam3dCamera === "object"
+      ? atom.sam3dCamera
+      : atom.sam3d_camera;
+  if (
+    atom.sam3d_camera === true ||
+    atom.vr_funscript_camera === true ||
+    atom.camera_ready === true ||
+    cameraStatus?.compatible === true
+  ) {
+    return true;
+  }
+  const marker = JSON.stringify([
+    atom.camera,
+    atom.sam3dCamera,
+    atom.sam3d_camera,
+    atom.renderer,
+    atom.plugins,
+    atom.plugin,
+  ]).toLowerCase();
+  return (
+    marker.includes("vrvideoandfunscript") ||
+    marker.includes("vr video & funscript") ||
+    marker.includes("vamrobot_vrvideoandfunscriptexporter")
+  );
+}
+
+function renderSam3dTargets() {
+  const previousPerson = elements.sam3dPersonTarget.value;
+  const previousCamera = elements.sam3dCameraTarget.value;
+  const selectedJob = app.sam3dSelectedJob;
+  const alreadyApplied = sam3dJobIsApplied(selectedJob);
+  const appliedCameraUid = alreadyApplied
+    ? String(selectedJob?.cameraUid || "").trim()
+    : "";
+  let persons = sam3dTargetEntries("person");
+  if (!persons.length) {
+    persons = personList().map((person) => ({
+      uid: person.uid,
+      label: person.uid,
+      selected: Boolean(person.selected),
+    }));
+  }
+  let cameras = sam3dTargetEntries("camera");
+  if (!cameras.length) {
+    cameras = atomList()
+      .filter(sam3dCameraAtomIsVerified)
+      .map((atom) => ({
+        uid: atom.uid,
+        label: `${atom.uid} · VR + Funscript`,
+        selected: Boolean(atom.selected),
+      }));
+  }
+
+  elements.sam3dPersonTarget.replaceChildren();
+  if (persons.length) {
+    for (const person of persons) {
+      const suffix = person.selected ? " · selected in VaM" : "";
+      elements.sam3dPersonTarget.append(
+        new Option(`${person.label}${suffix}`, person.uid),
+      );
+    }
+    const preferred =
+      persons.find((person) => person.uid === previousPerson)?.uid ||
+      persons.find((person) => person.uid === app.selectedPersonUid)?.uid ||
+      persons.find((person) => person.selected)?.uid ||
+      persons[0].uid;
+    elements.sam3dPersonTarget.value = preferred;
+  } else {
+    elements.sam3dPersonTarget.append(
+      new Option(
+        personVamRunning() ? "No Person atoms found" : "Start VaM first",
+        "",
+      ),
+    );
+  }
+
+  elements.sam3dCameraTarget.replaceChildren();
+  if (cameras.length) {
+    for (const camera of cameras) {
+      const suffix = camera.selected ? " · selected in VaM" : "";
+      elements.sam3dCameraTarget.append(
+        new Option(`${camera.label}${suffix}`, camera.uid),
+      );
+    }
+  }
+  const capabilities = sam3dCapabilitySet();
+  const fixedCameraUidExists = atomList().some(
+    (atom) => atom.uid === SAM3D_DEFAULT_CAMERA_UID,
+  );
+  if (
+    !alreadyApplied &&
+    !fixedCameraUidExists &&
+    (
+      capabilities.has("sam3d-camera-create-v1") ||
+      capabilities.has("sam3d-camera-create") ||
+      sam3dApplyCapabilityAvailable()
+    )
+  ) {
+    elements.sam3dCameraTarget.append(
+      new Option("Create VAM-PIP camera · Empty + VR/Funscript", "__create__"),
+    );
+  }
+  if (elements.sam3dCameraTarget.options.length) {
+    const knownPrevious = Array.from(
+      elements.sam3dCameraTarget.options,
+    ).some(
+      (option) =>
+        option.value === previousCamera &&
+        !(
+          previousCamera === "__create__" &&
+          cameras.some(
+            (camera) => camera.uid === SAM3D_DEFAULT_CAMERA_UID,
+          )
+        ),
+    );
+    elements.sam3dCameraTarget.value = knownPrevious
+      ? appliedCameraUid || previousCamera
+      : cameras.find((camera) => camera.uid === appliedCameraUid)?.uid ||
+        cameras.find(
+          (camera) => camera.uid === SAM3D_DEFAULT_CAMERA_UID,
+        )?.uid ||
+        cameras.find((camera) => camera.selected)?.uid ||
+        cameras[0]?.uid ||
+        "__create__";
+  } else {
+    elements.sam3dCameraTarget.append(
+      new Option(
+        personVamRunning()
+          ? "No verified VR/Funscript camera"
+          : "Start VaM first",
+        "",
+      ),
+    );
+  }
+  elements.sam3dPersonTarget.disabled =
+    !persons.length || app.sam3dMutationInFlight || alreadyApplied;
+  elements.sam3dCameraTarget.disabled =
+    !elements.sam3dCameraTarget.value ||
+    app.sam3dMutationInFlight ||
+    alreadyApplied;
+}
+
+function sam3dApplyCapabilityAvailable() {
+  const capabilities = new Set([
+    ...sam3dCapabilitySet(),
+    ...personCapabilities(),
+  ]);
+  return (
+    capabilities.has("sam3d-apply-v1") &&
+    capabilities.has("sam3d-camera-vrfunscript-v1")
+  );
+}
+
+function sam3dCaptureCapabilityAvailable() {
+  const capabilities = new Set([
+    ...sam3dCapabilitySet(),
+    ...personCapabilities(),
+  ]);
+  return (
+    capabilities.has("sam3d-capture-v1") &&
+    capabilities.has("sam3d-camera-vrfunscript-v1")
+  );
+}
+
+function renderSam3dResolutionOptions(preferred = "") {
+  const aspectValues = Object.keys(SAM3D_RENDERER_RESOLUTIONS);
+  if (elements.sam3dAspectRatio.options.length !== aspectValues.length) {
+    const current = elements.sam3dAspectRatio.value;
+    elements.sam3dAspectRatio.replaceChildren(
+      ...aspectValues.map((value) => new Option(value, value)),
+    );
+    elements.sam3dAspectRatio.value = aspectValues.includes(current)
+      ? current
+      : "16:9";
+  }
+  const aspect = elements.sam3dAspectRatio.value || "16:9";
+  const choices = SAM3D_RENDERER_RESOLUTIONS[aspect] || [];
+  const current = preferred || elements.sam3dOutputResolution.value;
+  elements.sam3dOutputResolution.replaceChildren(
+    ...choices.map((value) => new Option(value, value)),
+  );
+  elements.sam3dOutputResolution.value = choices.includes(current)
+    ? current
+    : aspect === "16:9" && choices.includes("1920x1080 (FHD)")
+      ? "1920x1080 (FHD)"
+      : choices[0] || "";
+}
+
+function sam3dApplySettings() {
+  const fovRaw = String(elements.sam3dCameraFov.value || "").trim();
+  const horizontalFov = fovRaw ? Number(fovRaw) : null;
+  if (
+    horizontalFov !== null &&
+    (!Number.isFinite(horizontalFov) ||
+      horizontalFov < 5 ||
+      horizontalFov > 170)
+  ) {
+    throw new Error("Horizontal FOV override must be between 5° and 170°.");
+  }
+  const heightM = Number(elements.sam3dPersonHeight.value);
+  if (!Number.isFinite(heightM) || heightM < 0.5 || heightM > 3) {
+    throw new Error("Estimated body height must be between 0.5 m and 3 m.");
+  }
+  const aspectRatio = elements.sam3dAspectRatio.value;
+  const outputResolution = elements.sam3dOutputResolution.value;
+  const choices = SAM3D_RENDERER_RESOLUTIONS[aspectRatio];
+  if (!choices || !choices.includes(outputResolution)) {
+    throw new Error("Choose a supported VRRendererX output resolution.");
+  }
+  const imageFormat = elements.sam3dImageFormat.value;
+  if (!["jpeg", "png"].includes(imageFormat)) {
+    throw new Error("Choose JPEG or PNG capture.");
+  }
+  return {
+    horizontalFov,
+    heightM,
+    aspectRatio,
+    outputResolution,
+    imageFormat,
+  };
+}
+
+function sam3dSolutionRevision(job = app.sam3dSelectedJob) {
+  if (!job) return "";
+  if (
+    app.sam3dAppliedJobId === job.id &&
+    SAM3D_JOB_ID_PATTERN.test(app.sam3dAppliedRevision)
+  ) {
+    return app.sam3dAppliedRevision;
+  }
+  return SAM3D_JOB_ID_PATTERN.test(job.solutionRevision)
+    ? job.solutionRevision
+    : "";
+}
+
+function sam3dJobIsApplied(job = app.sam3dSelectedJob) {
+  return Boolean(
+    job &&
+      (
+        job.applied ||
+        (
+          app.sam3dAppliedJobId === job.id &&
+          SAM3D_JOB_ID_PATTERN.test(app.sam3dAppliedRevision)
+        )
+      ),
+  );
+}
+
+function sam3dApplySettingsError() {
+  try {
+    sam3dApplySettings();
+    return "";
+  } catch (error) {
+    return errorMessage(error);
+  }
+}
+
+function setSam3dApplyControlsDisabled(disabled) {
+  for (const control of [
+    elements.sam3dCameraFov,
+    elements.sam3dPersonHeight,
+    elements.sam3dAspectRatio,
+    elements.sam3dOutputResolution,
+    elements.sam3dImageFormat,
+  ]) {
+    control.disabled = disabled;
+  }
+}
+
+function renderSam3dApplyState() {
+  const job = app.sam3dSelectedJob;
+  if (!job || !sam3dJobSucceeded(job)) return;
+  const revisionReady = SAM3D_JOB_ID_PATTERN.test(job.revision);
+  const solutionRevision = sam3dSolutionRevision(job);
+  const hasPerson = Boolean(elements.sam3dPersonTarget.value);
+  const hasCamera = Boolean(elements.sam3dCameraTarget.value);
+  const alreadyApplied = sam3dJobIsApplied(job);
+  const appliedCameraUid = String(job.cameraUid || "").trim();
+  const hasAppliedCamera =
+    alreadyApplied &&
+    Boolean(appliedCameraUid) &&
+    Array.from(elements.sam3dCameraTarget.options).some(
+      (option) =>
+        option.value === appliedCameraUid &&
+        option.value !== "__create__",
+    );
+  const bridgeBusy = snapshotBridgeBusy();
+  const vamReady =
+    personVamRunning() &&
+    Boolean(app.person?.available) &&
+    !Boolean(app.person?.loading);
+  const canApply = sam3dApplyCapabilityAvailable();
+  const canCapture = sam3dCaptureCapabilityAvailable();
+  const busy = app.sam3dMutationInFlight || bridgeBusy;
+  const settingsError = sam3dApplySettingsError();
+  const actionState = sam3dVamActionState(job);
+
+  setSam3dApplyControlsDisabled(busy || alreadyApplied);
+  elements.sam3dApplyButton.disabled =
+    busy ||
+    alreadyApplied ||
+    !revisionReady ||
+    !hasPerson ||
+    !hasCamera ||
+    !vamReady ||
+    !canApply ||
+    Boolean(settingsError);
+  elements.sam3dUndoButton.disabled =
+    busy ||
+    !solutionRevision ||
+    !(job.canUndo || app.sam3dAppliedRevision);
+  elements.sam3dCaptureButton.disabled =
+    busy ||
+    !solutionRevision ||
+    !hasAppliedCamera ||
+    !vamReady ||
+    !canCapture ||
+    !(job.applied || app.sam3dAppliedRevision);
+
+  elements.sam3dApplyNote.classList.remove("is-error");
+  let note =
+    "Auto FOV uses SAM intrinsics. Pose and camera are applied as one revision-checked bridge request.";
+  if (!revisionReady) {
+    note = "The result has no valid job revision. Refresh it before applying.";
+    elements.sam3dApplyNote.classList.add("is-error");
+  } else if (settingsError) {
+    note = settingsError;
+    elements.sam3dApplyNote.classList.add("is-error");
+  } else if (!personVamRunning()) {
+    note = "Start VaM before applying this reconstruction.";
+  } else if (!app.person?.available) {
+    note = "Waiting for a fresh scene snapshot from the VAM-PIP bridge.";
+  } else if (app.person?.loading) {
+    note = "VaM is loading the scene. Apply controls will resume when it is ready.";
+  } else if (bridgeBusy) {
+    note =
+      String(app.person?.bridge?.message || "").trim() ||
+      "The VaM bridge is processing another request.";
+  } else if (["failed", "stale"].includes(actionState)) {
+    note =
+      job.vamActionMessage ||
+      (actionState === "stale"
+        ? "VaM restarted before the previous SAM 3D action was confirmed."
+        : "The previous SAM 3D action failed inside VaM.");
+    elements.sam3dApplyNote.classList.add("is-error");
+  } else if (!canApply) {
+    note = "Reload the updated VAM-PIP bridge to enable SAM 3D pose + VR/Funscript camera apply.";
+  } else if (!hasPerson) {
+    note = "Add or select a Person atom in VaM.";
+  } else if (!hasCamera) {
+    note =
+      "Add an Empty atom with VR Video & Funscript Exporter, or enable camera creation.";
+  } else if (!canCapture) {
+    note =
+      "Pose + camera can be applied. Screenshot capture needs the updated VR Video & Funscript plugin.";
+  } else if (alreadyApplied && !hasAppliedCamera) {
+    note =
+      "The applied camera is no longer available in the current VaM scene. Undo or restore that camera before capturing.";
+    elements.sam3dApplyNote.classList.add("is-error");
+  } else if (alreadyApplied) {
+    note =
+      `Applied to ${job.targetUid || "the Person"} with ${appliedCameraUid}. ` +
+      "Capture uses that exact camera; undo before changing targets or settings.";
+  }
+  elements.sam3dApplyNote.textContent = note;
+}
+
+async function applySam3dResult() {
+  const job = app.sam3dSelectedJob;
+  if (!job || elements.sam3dApplyButton.disabled) return;
+  const personUid = elements.sam3dPersonTarget.value;
+  const cameraValue = elements.sam3dCameraTarget.value;
+  const createCamera = cameraValue === "__create__";
+  const settings = sam3dApplySettings();
+  const confirmed = await showDialog({
+    eyebrow: "Apply SAM 3D reconstruction",
+    title: "Replace this Person’s pose and move the camera?",
+    message:
+      "VAM-PIP will change the mapped Person controllers and the VR Video & Funscript camera together. One-level undo is kept for this apply.",
+    confirmLabel: "Apply pose + camera",
+    icon: "warning",
+    plan: [
+      ["Person", personUid],
+      ["Camera", createCamera ? "Create camera" : cameraValue],
+      ["Body", app.sam3dSelectedBodyIndex + 1],
+    ],
+  });
+  if (!confirmed) return;
+
+  app.sam3dMutationInFlight = true;
+  setButtonBusy(elements.sam3dApplyButton, true, "Applying…");
+  renderSam3dApplyState();
+  try {
+    const request = {
+      expected_job_revision: job.revision,
+      target_uid: personUid,
+      camera_uid: createCamera ? SAM3D_DEFAULT_CAMERA_UID : cameraValue,
+      create_camera: createCamera,
+      person_index: app.sam3dSelectedBodyIndex,
+      height_m: settings.heightM,
+      aspect_ratio: settings.aspectRatio,
+      output_resolution: settings.outputResolution,
+      image_format: settings.imageFormat,
+    };
+    if (settings.horizontalFov !== null) {
+      request.horizontal_fov = settings.horizontalFov;
+    }
+    const payload = await Sam3dClient.apply(job.id, request);
+    const solutionRevision = String(
+      payload.solution_revision || "",
+    ).toLowerCase();
+    if (!SAM3D_JOB_ID_PATTERN.test(solutionRevision)) {
+      throw new Error("The manager returned an invalid solution revision.");
+    }
+    app.sam3dCaptureReadyJobs.delete(job.id);
+    mergeSam3dJob({
+      ...job,
+      applied: false,
+      canUndo: false,
+      captured: false,
+      captureRequested: false,
+      captureRequestId: "",
+      solutionRevision,
+      cameraUid: String(payload.camera_uid || request.camera_uid),
+      vamActionState: "queued",
+      vamActionMessage:
+        "Waiting for the VaM bridge to apply the reconstruction.",
+    });
+    toast(
+      "Pose and camera queued",
+      "The bridge is applying the reconstruction inside VaM.",
+    );
+    await loadPersons({ quiet: true });
+    await loadSam3dJob(job.id, { quiet: true });
+  } catch (error) {
+    toast("Could not apply SAM 3D result", errorMessage(error), "error");
+  } finally {
+    app.sam3dMutationInFlight = false;
+    setButtonBusy(elements.sam3dApplyButton, false);
+    renderSam3dWorkspace();
+  }
+}
+
+async function undoSam3dApply() {
+  const job = app.sam3dSelectedJob;
+  const solutionRevision = sam3dSolutionRevision(job);
+  if (!job || !solutionRevision || elements.sam3dUndoButton.disabled) return;
+  app.sam3dMutationInFlight = true;
+  setButtonBusy(elements.sam3dUndoButton, true, "Restoring…");
+  renderSam3dApplyState();
+  try {
+    const payload = await Sam3dClient.undo(job.id, solutionRevision);
+    mergeSam3dJob({
+      ...job,
+      vamActionState: String(payload.action_state || "queued"),
+      vamActionMessage:
+        "Waiting for the VaM bridge to restore the previous state.",
+    });
+    toast(
+      "Previous pose queued for restore",
+      "The bridge is restoring its one-level SAM 3D snapshot.",
+    );
+    await loadPersons({ quiet: true });
+    await loadSam3dJob(job.id, { quiet: true });
+  } catch (error) {
+    toast("Could not undo SAM 3D apply", errorMessage(error), "error");
+  } finally {
+    app.sam3dMutationInFlight = false;
+    setButtonBusy(elements.sam3dUndoButton, false);
+    renderSam3dWorkspace();
+  }
+}
+
+async function captureSam3dResult() {
+  const job = app.sam3dSelectedJob;
+  const solutionRevision = sam3dSolutionRevision(job);
+  if (!job || !solutionRevision || elements.sam3dCaptureButton.disabled) return;
+  const cameraUid = String(job.cameraUid || "").trim();
+  if (!cameraUid) {
+    toast(
+      "Could not capture VaM screenshot",
+      "The applied SAM 3D camera identity is unavailable. Refresh the job and scene state.",
+      "error",
+    );
+    return;
+  }
+  app.sam3dMutationInFlight = true;
+  setButtonBusy(elements.sam3dCaptureButton, true, "Capturing…");
+  renderSam3dApplyState();
+  try {
+    const payload = await Sam3dClient.capture(job.id, {
+      expected_revision: solutionRevision,
+      camera_uid: cameraUid,
+    });
+    const captureRequestId = String(
+      payload.bridge_request || "",
+    ).trim();
+    app.sam3dCaptureReadyJobs.delete(job.id);
+    mergeSam3dJob({
+      ...job,
+      applied: true,
+      captured: false,
+      captureRequested: true,
+      captureRequestId,
+      solutionRevision,
+      cameraUid,
+      vamActionState: String(payload.action_state || "queued"),
+      vamActionMessage:
+        "Waiting for the VaM bridge and renderer to finish the capture.",
+    });
+    app.sam3dPreviewKind = "result";
+    app.sam3dCapturePollAttempts = 0;
+    await loadPersons({ quiet: true });
+    await loadSam3dJob(job.id, { quiet: true });
+    renderSam3dWorkspace();
+    toast(
+      "VaM screenshot requested",
+      "VR Video & Funscript Exporter is rendering the selected frame.",
+    );
+  } catch (error) {
+    toast("Could not capture VaM screenshot", errorMessage(error), "error");
+  } finally {
+    app.sam3dMutationInFlight = false;
+    setButtonBusy(elements.sam3dCaptureButton, false);
+    renderSam3dWorkspace();
+  }
+}
+
+/*
+ * Keep the SAM 3D contract above separate from Timeline. Both are live VaM
+ * surfaces, but their revision domains and bridge commands are independent.
+ */
 
 const TimelineClient = Object.freeze({
   snapshotPath: "/api/vam/timeline",
@@ -11497,7 +13865,14 @@ function setView(
   } = {},
 ) {
   if (
-    !["resources", "workspace", "timeline", "packages", "access"].includes(view) ||
+    ![
+      "resources",
+      "workspace",
+      "timeline",
+      "sam3d",
+      "packages",
+      "access",
+    ].includes(view) ||
     app.view === view
   ) {
     return;
@@ -11519,25 +13894,36 @@ function setView(
   const isAccess = view === "access";
   const isWorkspace = view === "workspace";
   const isTimeline = view === "timeline";
-  elements.libraryView.hidden = isAccess || isTimeline;
+  const isSam3d = view === "sam3d";
+  elements.libraryView.hidden = isAccess || isTimeline || isSam3d;
   elements.accessView.hidden = !isAccess;
   elements.timelineView.hidden = !isTimeline;
+  elements.sam3dView.hidden = !isSam3d;
   elements.assetWorkspace.hidden = !isWorkspace;
   updateViewRoute(view);
   if (isAccess) {
     stopTimelinePolling();
+    stopSam3dPolling();
     renderAccess();
     return;
   }
   if (isTimeline) {
+    stopSam3dPolling();
     renderTimeline();
     startTimelinePolling();
     startTimelineRenderLoop();
     loadTimeline({ quiet: Boolean(app.timeline) });
     return;
   }
+  if (isSam3d) {
+    stopTimelinePolling();
+    renderSam3dWorkspace();
+    loadSam3dWorkspace({ quiet: Boolean(app.sam3dStatus) });
+    return;
+  }
 
   stopTimelinePolling();
+  stopSam3dPolling();
   elements.typeFilterWrap.hidden = view !== "resources";
   updateWorkspaceSearchPlaceholder();
   configureStateFilter();

@@ -1051,10 +1051,31 @@ class ManagerServiceTests(unittest.TestCase):
 
     def test_bridge_installer_is_idempotent_and_refuses_overwrite(self) -> None:
         installed = install_bridge(self.vam_root)
-        self.assertEqual(len(installed), 2)
+        self.assertGreater(len(installed), 4)
         self.assertTrue(all(path.is_file() for path in installed))
-        source = installed[0].read_text(encoding="utf-8")
-        self.assertIn('BridgeVersion = "0.9.0"', source)
+        bridge_script = next(
+            path for path in installed if path.name == "VAMPipBridge.cs"
+        )
+        camera_preset = next(
+            path
+            for path in installed
+            if path.name == "Preset_VAMPipSAM3DCamera.vap"
+        )
+        renderer_list = next(
+            path
+            for path in installed
+            if path.name == "Eosin_VRRenderer.cslist"
+        )
+        self.assertEqual(
+            camera_preset.relative_to(self.vam_root),
+            Path("Custom/Atom/Empty/Preset_VAMPipSAM3DCamera.vap"),
+        )
+        self.assertEqual(
+            renderer_list.relative_to(self.vam_root),
+            Path("Custom/Scripts/VAMPip/VRRendererX/Eosin_VRRenderer.cslist"),
+        )
+        source = bridge_script.read_text(encoding="utf-8")
+        self.assertRegex(source, r'BridgeVersion = "[0-9]+\.[0-9]+\.[0-9]+"')
         self.assertNotRegex(source, r"(?m)^\s*Type(?:\s|\.)")
         self.assertNotIn("new Type[]", source)
         self.assertNotIn("System.Reflection", source)
@@ -1063,10 +1084,59 @@ class ManagerServiceTests(unittest.TestCase):
         self.assertNotIn("TargetInvocationException", source)
         self.assertNotIn(".GetType(", source)
         self.assertNotIn("typeof(", source)
-        self.assertEqual(install_bridge(self.vam_root), installed)
-        installed[0].write_text("different", encoding="utf-8")
+        self.assertEqual(set(install_bridge(self.vam_root)), set(installed))
+        bridge_script.write_text("different", encoding="utf-8")
         with self.assertRaises(FileExistsError):
             install_bridge(self.vam_root)
+
+    def test_bridge_installer_preflights_late_renderer_conflict(self) -> None:
+        renderer_conflict = (
+            self.vam_root
+            / "Custom"
+            / "Scripts"
+            / "VAMPip"
+            / "VRRendererX"
+            / "src"
+            / "vamrobot_VRVideoAndFunscriptExporter.cs"
+        )
+        renderer_conflict.parent.mkdir(parents=True, exist_ok=True)
+        renderer_conflict.write_text("local renderer edit", encoding="utf-8")
+
+        with self.assertRaises(FileExistsError) as raised:
+            install_bridge(self.vam_root)
+
+        self.assertIn(str(renderer_conflict), str(raised.exception))
+        self.assertEqual(
+            renderer_conflict.read_text(encoding="utf-8"),
+            "local renderer edit",
+        )
+        for absent_target in (
+            self.vam_root
+            / "Custom"
+            / "Scripts"
+            / "VAMPip"
+            / "Bridge"
+            / "VAMPipBridge.cs",
+            self.vam_root
+            / "Custom"
+            / "Scripts"
+            / "VAMPip"
+            / "Bridge"
+            / "VAMPipBridge.cslist",
+            self.vam_root
+            / "Custom"
+            / "Atom"
+            / "Empty"
+            / "Preset_VAMPipSAM3DCamera.vap",
+            self.vam_root
+            / "Custom"
+            / "Scripts"
+            / "VAMPip"
+            / "VRRendererX"
+            / ".gitignore",
+        ):
+            with self.subTest(target=absent_target):
+                self.assertFalse(absent_target.exists())
 
     def test_timeline_roster_is_bounded_and_controls_use_published_tokens(
         self,

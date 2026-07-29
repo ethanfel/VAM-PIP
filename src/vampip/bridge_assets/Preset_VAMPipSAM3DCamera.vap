@@ -1,0 +1,31 @@
+{
+  "setUnlistedParamsToDefault": "false",
+  "storables": [
+    {
+      "id": "PluginManager",
+      "plugins": {
+        "plugin#0": "Custom/Scripts/VAMPip/VRRendererX/Eosin_VRRenderer.cslist"
+      }
+    },
+    {
+      "id": "plugin#0_Eosin.VRRenderer",
+      "enabled": "true",
+      "Preview": "false",
+      "Preview Stays Open": "false",
+      "Preview Audio From Cam Pos": "false",
+      "Empty and Target Stay Visible": "true",
+      "Use Post-Processing Effects": "false",
+      "Use Command Buffer Effects": "false",
+      "Generate Funscripts": "false",
+      "Record Audio": "false",
+      "Render Mode": "Flat",
+      "Aspect Ratio": "16:9",
+      "Output Resolution": "1280x720 (HD)",
+      "Image Format": "JPEG (Lossy, Small & Fast)\nNo Transparency",
+      "Camera Target": "None",
+      "Flat Horizontal FOV": "80",
+      "Flat Supersampling Multiplier": "1",
+      "VR & Flat MSAA": "2x"
+    }
+  ]
+}

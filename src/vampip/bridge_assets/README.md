@@ -377,12 +377,41 @@ Timeline 291 remains usable through its fixed public storables for transport,
 clip selection, time, speed, weight, and lock controls; it cannot publish
 exact layer/current-clip state.
 
+## SAM 3D result contract
+
+The manager writes one schema-1 solution to the fixed
+`Saves\PluginData\VAMPip\SAM3D\<jobId>.json` location. The mailbox never
+accepts a solution path. `jobId` and `expectedRevision` are lowercase 32-hex
+tokens, while `solutionSha256` binds the exact file bytes; the bridge
+independently requires exactly 19 allowlisted Person controllers and a bounded
+camera configuration.
+
+The three commands are:
+
+```json
+{"protocol":2,"requestId":"unique-apply","command":"applySam3dResult","jobId":"0123456789abcdef0123456789abcdef","expectedRevision":"abcdef0123456789abcdef0123456789","solutionSha256":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","targetUid":"Person","cameraUid":"SAM3D Camera","createCamera":true}
+{"protocol":2,"requestId":"unique-undo","command":"undoSam3dResult","jobId":"0123456789abcdef0123456789abcdef","expectedRevision":"abcdef0123456789abcdef0123456789"}
+{"protocol":2,"requestId":"unique-capture","command":"captureSam3dResult","jobId":"0123456789abcdef0123456789abcdef","expectedRevision":"abcdef0123456789abcdef0123456789","solutionSha256":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","cameraUid":"SAM3D Camera"}
+```
+
+Apply targets an existing Person and either an existing compatible Empty atom
+or the fixed `Custom/Atom/Empty/Preset_VAMPipSAM3DCamera.vap` camera. It takes
+one in-memory undo snapshot before changing the Person and camera. Undo and
+capture require the exact currently applied job, revision, and camera; that
+state is cleared on undo or plugin restart. Captures use the renderer's fixed
+VAM-PIP interface and fixed output name.
+
+The bridge advertises `sam3d-apply-v1`, `sam3d-undo-v1`,
+`sam3d-capture-v1`, and `sam3d-camera-vrfunscript-v1`. `scene.json` publishes
+the authoritative current `sam3d` identity, undo availability, and bounded
+last action outcome.
+
 The bridge writes `status.json`:
 
 ```json
 {
   "protocol": 2,
-  "bridgeVersion": "0.9.0",
+  "bridgeVersion": "1.0.0",
   "instanceId": "id-created-when-the-plugin-started",
   "requestId": "a-new-unique-id",
   "lastCompletedRequestId": "a-new-unique-id",
@@ -423,13 +452,18 @@ The bridge writes `status.json`:
     "timeline-roster",
     "timeline-transport",
     "timeline-animation-play",
-    "timeline-adapter-v1"
+    "timeline-adapter-v1",
+    "sam3d-apply-v1",
+    "sam3d-undo-v1",
+    "sam3d-capture-v1",
+    "sam3d-camera-vrfunscript-v1"
   ]
 }
 ```
 
 Valid request stages are `queued`, `deferred-loading`, `rescanning`,
-`applying`, `adding`, `selecting`, `loading-scene`, `ok`, and `error`.
+`applying`, `adding`, `selecting`, `loading-scene`, `applying-sam3d`,
+`capturing-sam3d`, `ok`, and `error`.
 Status writes are not guaranteed to be atomic, so readers should retry a
 transient JSON parse failure.
 
@@ -450,7 +484,7 @@ The bridge refreshes `scene.json` once per second:
 ```json
 {
   "protocol": 2,
-  "bridgeVersion": "0.9.0",
+  "bridgeVersion": "1.0.0",
   "instanceId": "id-created-when-the-plugin-started",
   "updatedAtUtc": "2026-07-28T12:00:02.0000000Z",
   "loading": false,
@@ -559,7 +593,11 @@ The bridge refreshes `scene.json` once per second:
     "person-hair-roster",
     "person-hair-item-toggle",
     "person-add",
-    "person-select"
+    "person-select",
+    "sam3d-apply-v1",
+    "sam3d-undo-v1",
+    "sam3d-capture-v1",
+    "sam3d-camera-vrfunscript-v1"
   ]
 }
 ```
