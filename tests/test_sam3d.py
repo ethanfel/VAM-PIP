@@ -601,6 +601,131 @@ class Sam3dBackendTests(unittest.TestCase):
         self.assertNotIn("requestId", camera)
         self.assertRegex(solution["revision"], r"^[0-9a-f]{32}$")
 
+    def test_vam_solution_maps_head_to_vam_pivot_and_full_face_frame(self) -> None:
+        job_id = "c" * 32
+        manifest = sample_manifest(job_id)
+        points = manifest["people"][0]["keypoints3d"]
+        face = {
+            "nose": [0.0, -0.715, 0.08],
+            "left-eye": [-0.04, -0.735, 0.05],
+            "right-eye": [0.04, -0.735, 0.05],
+            "left-ear": [-0.09, -0.735, 0.0],
+            "right-ear": [0.09, -0.735, 0.0],
+        }
+        for name, point in face.items():
+            points[MHR70_NAMES.index(name)] = point
+        solution = build_vam_solution(
+            manifest,
+            job_id=job_id,
+            height_m=1.65,
+        )
+        controllers = {item["id"]: item for item in solution["controllers"]}
+        neck = controllers["neckControl"]
+        head = controllers["headControl"]
+        offset = [
+            head["position"][axis] - neck["position"][axis]
+            for axis in range(3)
+        ]
+        self.assertAlmostEqual(offset[0], 0.0, places=6)
+        self.assertAlmostEqual(offset[1], 1.65 * 0.0655, places=6)
+        self.assertAlmostEqual(offset[2], 1.65 * 0.0045, places=6)
+        for actual, expected in zip(
+            head["rotation"],
+            [0.0, 0.0, 0.0, 1.0],
+        ):
+            self.assertAlmostEqual(actual, expected, places=6)
+
+    def test_vam_solution_head_matches_front_camera_body_yaw(self) -> None:
+        job_id = "f" * 32
+        manifest = sample_manifest(job_id)
+        points = manifest["people"][0]["keypoints3d"]
+        for left_name, right_name in (
+            ("left-hip", "right-hip"),
+            ("left-shoulder", "right-shoulder"),
+        ):
+            left = points[MHR70_NAMES.index(left_name)]
+            right = points[MHR70_NAMES.index(right_name)]
+            left[0], right[0] = abs(left[0]), -abs(right[0])
+        face = {
+            "nose": [0.0, -0.715, -0.08],
+            "left-eye": [0.04, -0.735, -0.05],
+            "right-eye": [-0.04, -0.735, -0.05],
+            "left-ear": [0.09, -0.735, 0.0],
+            "right-ear": [-0.09, -0.735, 0.0],
+        }
+        for name, point in face.items():
+            points[MHR70_NAMES.index(name)] = point
+
+        solution = build_vam_solution(manifest, job_id=job_id)
+        controllers = {item["id"]: item for item in solution["controllers"]}
+        neck_rotation = controllers["neckControl"]["rotation"]
+        head_rotation = controllers["headControl"]["rotation"]
+        self.assertAlmostEqual(
+            abs(sum(a * b for a, b in zip(neck_rotation, head_rotation))),
+            1.0,
+            places=6,
+        )
+        self.assertAlmostEqual(abs(head_rotation[1]), 1.0, places=6)
+
+    def test_vam_solution_head_frame_falls_back_for_degenerate_face(self) -> None:
+        job_id = "d" * 32
+        manifest = sample_manifest(job_id)
+        person = manifest["people"][0]
+        points = person["keypoints3d"]
+        collapsed = [0.0, -0.62, 0.0]
+        for name in (
+            "nose",
+            "left-eye",
+            "right-eye",
+            "left-ear",
+            "right-ear",
+        ):
+            points[MHR70_NAMES.index(name)] = list(collapsed)
+
+        solution = build_vam_solution(manifest, job_id=job_id)
+        controllers = {item["id"]: item for item in solution["controllers"]}
+        self.assertEqual(
+            controllers["headControl"]["rotation"],
+            controllers["neckControl"]["rotation"],
+        )
+        neck = controllers["neckControl"]["position"]
+        head = controllers["headControl"]["position"]
+        self.assertAlmostEqual(head[1] - neck[1], 1.65 * 0.0655, places=6)
+        self.assertAlmostEqual(head[2] - neck[2], 1.65 * 0.0045, places=6)
+        self.assertAlmostEqual(
+            sum(
+                component * component
+                for component in controllers["headControl"]["rotation"]
+            ),
+            1.0,
+            places=6,
+        )
+
+    def test_vam_solution_preserves_an_inverted_head_frame(self) -> None:
+        job_id = "e" * 32
+        manifest = sample_manifest(job_id)
+        points = manifest["people"][0]["keypoints3d"]
+        face = {
+            "nose": [0.0, -0.755, 0.08],
+            "left-eye": [0.04, -0.735, 0.05],
+            "right-eye": [-0.04, -0.735, 0.05],
+            "left-ear": [0.09, -0.735, 0.0],
+            "right-ear": [-0.09, -0.735, 0.0],
+        }
+        for name, point in face.items():
+            points[MHR70_NAMES.index(name)] = point
+
+        solution = build_vam_solution(manifest, job_id=job_id)
+        head = next(
+            item
+            for item in solution["controllers"]
+            if item["id"] == "headControl"
+        )
+        self.assertAlmostEqual(head["rotation"][0], 0.0, places=6)
+        self.assertAlmostEqual(head["rotation"][1], 0.0, places=6)
+        self.assertAlmostEqual(abs(head["rotation"][2]), 1.0, places=6)
+        self.assertAlmostEqual(head["rotation"][3], 0.0, places=6)
+
     def test_vam_solution_rejects_camera_outside_bridge_bounds(self) -> None:
         job_id = "b" * 32
         manifest = sample_manifest(job_id)

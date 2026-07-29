@@ -162,6 +162,12 @@ VR_RENDERER_RESOLUTIONS: dict[str, dict[str, tuple[int, int]]] = {
 Vector = tuple[float, float, float]
 Quaternion = tuple[float, float, float, float]
 
+# VaM's headControl pivot sits inside the skull rather than on a visible facial
+# landmark. These measured bind offsets are normalized by character height;
+# the inferred face frame rotates them into the source pose.
+_VAM_HEAD_UP_PER_HEIGHT = 0.0655
+_VAM_HEAD_FORWARD_PER_HEIGHT = 0.0045
+
 
 def sam3d_solution_revision(document: dict[str, object]) -> str:
     """Return the canonical revision for a bridge solution document."""
@@ -307,7 +313,7 @@ def _quat_from_basis(x_axis: Vector, y_axis: Vector, z_axis: Vector) -> Quaterni
     )
 
 
-def _body_frame(points: dict[str, Vector]) -> Quaternion:
+def _body_axes(points: dict[str, Vector]) -> tuple[Vector, Vector, Vector]:
     pelvis = _mean(points["left-hip"], points["right-hip"])
     shoulders = _mean(points["left-shoulder"], points["right-shoulder"])
     # MHR semantic right/left preserves a body's own lateral direction even
@@ -320,7 +326,51 @@ def _body_frame(points: dict[str, Vector]) -> Quaternion:
     forward = _unit(_cross(right, up), (0.0, 0.0, 1.0))
     right = _unit(_cross(up, forward), right)
     forward = _unit(_cross(right, up), forward)
-    return _quat_from_basis(right, up, forward)
+    return right, up, forward
+
+
+def _head_axes(
+    points: dict[str, Vector],
+    fallback: tuple[Vector, Vector, Vector],
+) -> tuple[Vector, Vector, Vector]:
+    """Build a complete anatomical frame from stable facial landmarks."""
+
+    fallback_right, fallback_up, fallback_forward = fallback
+    ear_mid = _mean(points["left-ear"], points["right-ear"])
+    eye_mid = _mean(points["left-eye"], points["right-eye"])
+
+    right_raw = _sub(points["right-ear"], points["left-ear"])
+    if _length(right_raw) < 1e-6:
+        right_raw = _sub(points["right-eye"], points["left-eye"])
+    if _length(right_raw) < 1e-6:
+        return fallback
+    right = _unit(right_raw, fallback_right)
+
+    # Eye-to-ear depth provides pitch while the nose disambiguates which side
+    # of the face is forward. Remove the lateral component before normalizing.
+    forward_raw = _sub(eye_mid, ear_mid)
+    forward_raw = _sub(forward_raw, _mul(right, _dot(forward_raw, right)))
+    nose_direction = _sub(points["nose"], ear_mid)
+    nose_direction = _sub(
+        nose_direction,
+        _mul(right, _dot(nose_direction, right)),
+    )
+    if _length(forward_raw) < 1e-6:
+        forward_raw = nose_direction
+    if _length(forward_raw) < 1e-6:
+        return fallback
+    forward = _unit(forward_raw, fallback_forward)
+    if _dot(forward, nose_direction) < 0.0:
+        forward = _mul(forward, -1.0)
+
+    up_raw = _cross(forward, right)
+    if _length(up_raw) < 1e-6:
+        return fallback
+    up = _unit(up_raw, fallback_up)
+
+    right = _unit(_cross(up, forward), right)
+    forward = _unit(_cross(right, up), forward)
+    return right, up, forward
 
 
 def _cv_to_unity(value: Vector) -> Vector:
@@ -492,14 +542,17 @@ def build_vam_solution(
         for name, value in raw_points.items()
     }
     shoulder_mid = _mean(points["left-shoulder"], points["right-shoulder"])
-    head = _mean(
-        points["nose"],
-        points["left-eye"],
-        points["right-eye"],
-        points["left-ear"],
-        points["right-ear"],
+    torso_axes = _body_axes(points)
+    torso_rotation = _quat_from_basis(*torso_axes)
+    head_axes = _head_axes(points, torso_axes)
+    head_rotation = _quat_from_basis(*head_axes)
+    head = _add(
+        points["neck"],
+        _add(
+            _mul(head_axes[1], height_m * _VAM_HEAD_UP_PER_HEIGHT),
+            _mul(head_axes[2], height_m * _VAM_HEAD_FORWARD_PER_HEIGHT),
+        ),
     )
-    torso_rotation = _body_frame(points)
 
     controller_values: list[dict[str, object]] = [
         _controller("hipControl", (0.0, 0.0, 0.0), torso_rotation),
@@ -517,7 +570,7 @@ def build_vam_solution(
         _controller(
             "headControl",
             head,
-            _segment_rotation(points["neck"], head, (0.0, 1.0, 0.0)),
+            head_rotation,
         ),
     ]
 
