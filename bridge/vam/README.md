@@ -396,10 +396,14 @@ The three commands are:
 
 Apply targets an existing Person and either an existing compatible Empty atom
 or the fixed `Custom/Atom/Empty/Preset_VAMPipSAM3DCamera.vap` camera. It takes
-one in-memory undo snapshot before changing the Person and camera. Undo and
-capture require the exact currently applied job, revision, and camera; that
-state is cleared on undo or plugin restart. Captures use the renderer's fixed
-VAM-PIP interface and fixed output name.
+one in-memory undo snapshot before changing the Person and camera. The 19
+driven Person controllers and camera stay kinematic after Apply, while the
+Person's original collision setting is restored immediately. Undo restores
+the saved transforms and physics settings; failed Apply and plugin unload
+release the saved physics lock. Undo and capture require the exact currently
+applied job, revision, and camera; that state is cleared on undo or plugin
+restart. Captures use the renderer's fixed VAM-PIP interface and fixed output
+name.
 
 The bridge advertises `sam3d-apply-v1`, `sam3d-undo-v1`,
 `sam3d-capture-v1`, and `sam3d-camera-vrfunscript-v1`. `scene.json` publishes

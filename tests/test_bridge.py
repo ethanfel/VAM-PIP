@@ -1362,7 +1362,7 @@ class BridgeSourceTests(unittest.TestCase):
         )
         action_source = source[apply_start:undo_end]
         restore_start = pose_source.index(
-            "private static void RestoreSam3dSnapshotContents("
+            "private static bool RestoreSam3dSnapshotContents("
         )
         restore_end = pose_source.index(
             "private static void SnapSam3dControllerPhysicalPose(",
@@ -1382,18 +1382,160 @@ class BridgeSourceTests(unittest.TestCase):
         apply_contents_source = pose_source[
             apply_contents_start:apply_contents_end
         ]
+        lock_start = pose_source.index(
+            "private static void LockSam3dSavedPhysics("
+        )
+        lock_end = pose_source.index(
+            "private static void CommitSam3dPoseLock(",
+            lock_start,
+        )
+        lock_source = pose_source[lock_start:lock_end]
+        commit_start = lock_end
+        commit_end = pose_source.index(
+            "private static void RestoreSam3dSavedPhysicsAndCollision(",
+            commit_start,
+        )
+        commit_source = pose_source[commit_start:commit_end]
+        restore_physics_start = commit_end
+        restore_physics_end = pose_source.index(
+            "private static void FinishSam3dPoseTransaction(",
+            restore_physics_start,
+        )
+        restore_physics_source = pose_source[
+            restore_physics_start:restore_physics_end
+        ]
 
         self.assertIn("Sam3dPhysicsResetFrames = 5", source)
         self.assertIn("saved.Position = controller.control.position;", pose_source)
         self.assertIn("saved.Rotation = controller.control.rotation;", pose_source)
         self.assertIn("saved.PhysicsEnabled = controller.physicsEnabled;", pose_source)
+        self.assertIn("saved.PhysicalBody = controller.followWhenOffRB;", pose_source)
+        self.assertIn(
+            "saved.PhysicalBodyWasPresent =\n"
+            "                    !object.ReferenceEquals(",
+            pose_source,
+        )
+        self.assertIn(
+            "snapshot.CameraPhysicalBodyWasPresent =\n"
+            "                !object.ReferenceEquals(",
+            pose_source,
+        )
+        self.assertIn(
+            "saved.PhysicalBodyKinematic =\n"
+            "                        saved.PhysicalBody.isKinematic;",
+            pose_source,
+        )
         self.assertIn("snapshot.PersonCollisionEnabled", pose_source)
         self.assertIn("snapshot.Person.collisionEnabled = false;", pose_source)
-        self.assertIn("saved.Controller.physicsEnabled = false;", pose_source)
+        self.assertIn(
+            "snapshot.Controllers.Count != Sam3dControllerCount",
+            lock_source,
+        )
+        self.assertIn("saved.Controller.physicsEnabled = false;", lock_source)
+        self.assertIn("saved.PhysicalBody.isKinematic = true;", lock_source)
+        self.assertIn(
+            "snapshot.CameraController.physicsEnabled = false;",
+            lock_source,
+        )
+        self.assertIn(
+            "snapshot.CameraPhysicalBody.isKinematic = true;",
+            lock_source,
+        )
+        self.assertIn(
+            "private static bool IsSam3dSavedPhysicalBodyAvailable(",
+            lock_source,
+        )
+        self.assertIn(
+            "return wasPresent\n"
+            "                ? body != null\n"
+            "                : object.ReferenceEquals(body, null);",
+            lock_source,
+        )
+        self.assertGreaterEqual(
+            lock_source.count(
+                "IsSam3dSavedPhysicalBodyAvailable("
+            ),
+            3,
+        )
         self.assertIn(
             "saved.Controller.physicsEnabled =\n"
             "                            saved.PhysicsEnabled;",
-            pose_source,
+            restore_physics_source,
+        )
+        controller_restore_guard = (
+            "saved.Controller == null ||\n"
+            "                            !IsSam3dSavedPhysicalBodyAvailable(\n"
+            "                                saved.PhysicalBodyWasPresent,\n"
+            "                                saved.PhysicalBody) ||\n"
+            "                            !object.ReferenceEquals(\n"
+            "                                saved.Controller.followWhenOffRB,\n"
+            "                                saved.PhysicalBody)"
+        )
+        self.assertIn(controller_restore_guard, restore_physics_source)
+        self.assertLess(
+            restore_physics_source.index(controller_restore_guard),
+            restore_physics_source.index(
+                "saved.Controller.physicsEnabled ="
+            ),
+        )
+        self.assertIn(
+            "saved.PhysicalBody.isKinematic =\n"
+            "                                saved.PhysicalBodyKinematic;",
+            restore_physics_source,
+        )
+        self.assertIn(
+            "snapshot.CameraController.physicsEnabled =\n"
+            "                        snapshot.CameraPhysicsEnabled;",
+            restore_physics_source,
+        )
+        camera_restore_guard = (
+            "cameraControllerAvailable &&\n"
+            "                cameraPhysicalBodyAvailable &&\n"
+            "                object.ReferenceEquals(\n"
+            "                    snapshot.CameraController.followWhenOffRB,\n"
+            "                    snapshot.CameraPhysicalBody)"
+        )
+        self.assertIn(camera_restore_guard, restore_physics_source)
+        self.assertLess(
+            restore_physics_source.index(camera_restore_guard),
+            restore_physics_source.index(
+                "snapshot.CameraController.physicsEnabled ="
+            ),
+        )
+        self.assertIn(
+            "snapshot.CameraPhysicalBody.isKinematic =\n"
+            "                        snapshot.CameraPhysicalBodyKinematic;",
+            restore_physics_source,
+        )
+        self.assertNotIn(
+            "snapshot.CameraCreated",
+            restore_physics_source,
+        )
+        self.assertIn(
+            "else if (!cameraRemovedByUndo &&",
+            restore_physics_source,
+        )
+        self.assertIn(
+            "if (!cameraPhysicalBodyAvailable)\n"
+            "                {\n"
+            "                    if (!cameraRemovedByUndo)",
+            restore_physics_source,
+        )
+        self.assertIn(
+            "snapshot.Person.collisionEnabled =\n"
+            "                    snapshot.PersonCollisionEnabled;",
+            restore_physics_source,
+        )
+        self.assertIn(
+            "snapshot.CameraController == null ||",
+            pose_source[
+                pose_source.index(
+                    "private Sam3dUndoSnapshot CurrentSam3dSnapshot()"
+                ) :
+                pose_source.index(
+                    "private void ReleaseSam3dPoseLockWithoutRestoringPose("
+                )
+            ],
         )
         self.assertIn("controller.control.position =", pose_source)
         self.assertIn("controller.control.rotation =", pose_source)
@@ -1456,17 +1598,90 @@ class BridgeSourceTests(unittest.TestCase):
                 "FreeControllerV3 cameraController = camera.mainController;"
             ),
         )
+        camera_start = apply_contents_source.index(
+            "FreeControllerV3 cameraController = camera.mainController;"
+        )
+        camera_source = apply_contents_source[camera_start:]
+        self.assertLess(
+            camera_source.index(
+                "cameraController.control.rotation ="
+            ),
+            camera_source.index(
+                "SnapSam3dControllerPhysicalPose(cameraController);"
+            ),
+        )
         self.assertIn(
             "SuperController.singleton.ResetSimulation(",
             pose_source,
         )
         self.assertIn(
-            "finally\n"
-            "            {\n"
-            "                FinishSam3dPoseTransaction(",
+            "if (applied)\n"
+            "                {\n"
+            "                    CommitSam3dPoseLock(snapshot);",
             pose_source,
         )
+        self.assertIn(
+            "else\n"
+            "                {\n"
+            "                    FinishSam3dPoseTransaction(",
+            pose_source,
+        )
+        self.assertIn("LockSam3dSavedPhysics(snapshot);", commit_source)
+        self.assertIn(
+            "snapshot.Person.collisionEnabled =\n"
+            "                        snapshot.PersonCollisionEnabled;",
+            commit_source,
+        )
+        self.assertNotIn(
+            "RestoreSam3dSavedPhysicsAndCollision(snapshot);",
+            commit_source,
+        )
         self.assertIn("RestoreSam3dSnapshot(snapshot);", action_source)
+        self.assertIn(
+            "bool cameraRemovedByUndo = false;",
+            pose_source,
+        )
+        self.assertIn(
+            "cameraRemovedByUndo =\n"
+            "                    RestoreSam3dSnapshotContents(snapshot);",
+            pose_source,
+        )
+        self.assertIn(
+            '"Restore VAM-PIP SAM3D pose",\n'
+            "                    cameraRemovedByUndo);",
+            pose_source,
+        )
+        self.assertIn(
+            "SuperController.singleton.RemoveAtom(createdCamera);\n"
+            "                return true;",
+            restore_source,
+        )
+        self.assertIn("return false;", restore_source)
+        track_request = (
+            "_inFlightSam3dCameraRequest = request;"
+        )
+        track_result = (
+            "_inFlightSam3dCameraResult = cameraResult;"
+        )
+        ensure_camera = (
+            "yield return EnsureSam3dCamera(request, cameraResult);"
+        )
+        self.assertIn(track_request, action_source)
+        self.assertIn(track_result, action_source)
+        self.assertLess(
+            action_source.index(track_request),
+            action_source.index(ensure_camera),
+        )
+        self.assertLess(
+            action_source.index(track_result),
+            action_source.index(ensure_camera),
+        )
+        self.assertGreaterEqual(
+            action_source.count(
+                "ClearInFlightSam3dCamera("
+            ),
+            3,
+        )
         self.assertIn(
             "yield return WaitForSam3dPhysicsSettlement();",
             action_source,
@@ -1486,6 +1701,129 @@ class BridgeSourceTests(unittest.TestCase):
             action_source.index(
                 "CaptureSam3dSettledDiagnostics("
             ),
+        )
+
+    def test_bridge_sam3d_pose_lock_lifecycle_cleanup_is_no_pose_and_idempotent(
+        self,
+    ) -> None:
+        repository = Path(__file__).resolve().parents[1]
+        source = (
+            repository / "src" / "vampip" / "bridge_assets" / "VAMPipBridge.cs"
+        ).read_text(encoding="utf-8")
+
+        disable = source[
+            source.index("private void OnDisable()") :
+            source.index("private void OnDestroy()")
+        ]
+        stop_start = source.index(
+            "private void StopBridgeWorkForLifecycle("
+        )
+        destroy = source[
+            source.index("private void OnDestroy()") :
+            stop_start
+        ]
+        stop = source[
+            stop_start :
+            source.index("private void Update()", stop_start)
+        ]
+        release_start = source.index(
+            "private void ReleaseSam3dPoseLockWithoutRestoringPose("
+        )
+        release_end = source.index(
+            "private static Sam3dApplyDiagnostics",
+            release_start,
+        )
+        release = source[release_start:release_end]
+        current_start = source.index(
+            "private Sam3dUndoSnapshot CurrentSam3dSnapshot()"
+        )
+        current = source[current_start:release_start]
+
+        for lifecycle in (disable, destroy):
+            self.assertIn(
+                "StopBridgeWorkForLifecycle(",
+                lifecycle,
+            )
+        self.assertNotIn("_operational = false;", disable)
+        self.assertIn("_operational = false;", destroy)
+        self.assertNotIn("_operational = false;", stop)
+        self.assertIn("StopAllCoroutines();", stop)
+        self.assertIn("_requestInProgress = false;", stop)
+        self.assertIn("_pendingRequest = null;", stop)
+        self.assertIn("_skipPendingProcessing = false;", stop)
+        self.assertIn('_mailboxRejectedRequestId = "";', stop)
+        self.assertIn('_mailboxRejectedMessage = "";', stop)
+        self.assertIn(
+            "RemoveInFlightCreatedSam3dCamera();",
+            stop,
+        )
+        self.assertIn(
+            "ReleaseSam3dPoseLockWithoutRestoringPose(",
+            stop,
+        )
+        self.assertIn("RecordSam3dAction(", stop)
+        self.assertIn("FailRequest(", stop)
+        self.assertLess(
+            stop.index("StopAllCoroutines();"),
+            stop.index("_requestInProgress = false;"),
+        )
+        self.assertLess(
+            stop.index("_requestInProgress = false;"),
+            stop.index("RemoveInFlightCreatedSam3dCamera();"),
+        )
+        self.assertLess(
+            stop.index("RemoveInFlightCreatedSam3dCamera();"),
+            stop.index(
+                "ReleaseSam3dPoseLockWithoutRestoringPose("
+            ),
+        )
+        self.assertLess(
+            stop.index(
+                "ReleaseSam3dPoseLockWithoutRestoringPose("
+            ),
+            stop.index("FailRequest("),
+        )
+        self.assertIn("_sam3dUndoSnapshot = null;", release)
+        self.assertIn(
+            "RestoreSam3dSavedPhysicsAndCollision(\n"
+            "                    snapshot,\n"
+            "                    false);",
+            release,
+        )
+        self.assertNotIn("RestoreSam3dSnapshot(", release)
+        self.assertNotIn("RestoreSam3dSnapshotContents(", release)
+        self.assertNotIn(".control.position", release)
+        self.assertNotIn(".control.rotation", release)
+        self.assertNotIn("ResetSimulation(", release)
+        self.assertGreaterEqual(
+            current.count(
+                "ReleaseSam3dPoseLockWithoutRestoringPose("
+            ),
+            5,
+        )
+        self.assertIn("LockSam3dSavedPhysics(snapshot);", current)
+        self.assertIn(
+            "_inFlightSam3dCameraRequest = null;",
+            stop,
+        )
+        self.assertIn(
+            "_inFlightSam3dCameraResult = null;",
+            stop,
+        )
+        self.assertIn("!result.Created", stop)
+        self.assertIn(
+            "return RemoveCreatedSam3dCamera(request, result);",
+            stop,
+        )
+        self.assertIn(
+            "object.ReferenceEquals(\n"
+            "                    _inFlightSam3dCameraRequest,\n"
+            "                    request)",
+            stop,
+        )
+        self.assertIn(
+            "!object.ReferenceEquals(result.Atom, null)",
+            source,
         )
 
     def test_bridge_sam3d_settlement_diagnostics_are_fixed_and_bounded(

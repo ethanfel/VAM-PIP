@@ -260,6 +260,9 @@ namespace VAMPip
             public FreeControllerV3.PositionState PositionState;
             public FreeControllerV3.RotationState RotationState;
             public bool PhysicsEnabled;
+            public Rigidbody PhysicalBody;
+            public bool PhysicalBodyWasPresent;
+            public bool PhysicalBodyKinematic;
         }
 
         private sealed class Sam3dUndoSnapshot
@@ -278,6 +281,9 @@ namespace VAMPip
             public FreeControllerV3.PositionState CameraPositionState;
             public FreeControllerV3.RotationState CameraRotationState;
             public bool CameraPhysicsEnabled;
+            public Rigidbody CameraPhysicalBody;
+            public bool CameraPhysicalBodyWasPresent;
+            public bool CameraPhysicalBodyKinematic;
             public MVRScript Renderer;
             public float FlatHorizontalFov;
             public string CameraTarget;
@@ -448,6 +454,8 @@ namespace VAMPip
             _timelineSnapshots =
                 new Dictionary<string, TimelineSnapshot>();
         private Sam3dUndoSnapshot _sam3dUndoSnapshot;
+        private BridgeRequest _inFlightSam3dCameraRequest;
+        private Sam3dCameraResult _inFlightSam3dCameraResult;
         private string _lastSam3dRequestId = "";
         private string _lastSam3dCommand = "";
         private string _lastSam3dJobId = "";
@@ -498,6 +506,129 @@ namespace VAMPip
                 string message = "Initialization failed: " + DescribeException(exception);
                 PublishStatus(StateError, "", "", UtcNow(), "", message);
                 SuperController.LogError("[VAM-PIP Bridge] " + message);
+            }
+        }
+
+        private void OnDisable()
+        {
+            StopBridgeWorkForLifecycle("disabled");
+        }
+
+        private void OnDestroy()
+        {
+            _operational = false;
+            StopBridgeWorkForLifecycle("destroyed");
+        }
+
+        private void StopBridgeWorkForLifecycle(
+            string lifecycle)
+        {
+            BridgeRequest interruptedRequest = _pendingRequest;
+            if (interruptedRequest == null)
+            {
+                interruptedRequest =
+                    _inFlightSam3dCameraRequest;
+            }
+            bool requestInterrupted =
+                _requestInProgress ||
+                interruptedRequest != null ||
+                _inFlightSam3dCameraResult != null;
+            StopAllCoroutines();
+            _requestInProgress = false;
+            _pendingRequest = null;
+            _skipPendingProcessing = false;
+            _mailboxRejectedRequestId = "";
+            _mailboxRejectedMessage = "";
+            string cameraCleanupError =
+                RemoveInFlightCreatedSam3dCamera();
+            ReleaseSam3dPoseLockWithoutRestoringPose(
+                _sam3dUndoSnapshot,
+                "plugin " + lifecycle);
+            if (!requestInterrupted)
+            {
+                return;
+            }
+
+            string message =
+                "Bridge request was cancelled because the VAM-PIP " +
+                "session plugin was " +
+                lifecycle +
+                ".";
+            if (cameraCleanupError.Length != 0)
+            {
+                message += cameraCleanupError;
+            }
+            try
+            {
+                if (interruptedRequest != null)
+                {
+                    if (interruptedRequest.Command ==
+                            CommandApplySam3dResult ||
+                        interruptedRequest.Command ==
+                            CommandUndoSam3dResult ||
+                        interruptedRequest.Command ==
+                            CommandCaptureSam3dResult)
+                    {
+                        RecordSam3dAction(
+                            interruptedRequest,
+                            StateError,
+                            message);
+                    }
+                    FailRequest(
+                        interruptedRequest,
+                        "",
+                        message);
+                }
+                else
+                {
+                    PublishStatus(
+                        StateError,
+                        "",
+                        "",
+                        UtcNow(),
+                        "",
+                        message);
+                    SuperController.LogError(
+                        "[VAM-PIP Bridge] " + message);
+                }
+            }
+            catch
+            {
+                // Physics cleanup and request normalization must still
+                // complete while VaM is tearing the plugin down.
+            }
+        }
+
+        private string RemoveInFlightCreatedSam3dCamera()
+        {
+            BridgeRequest request =
+                _inFlightSam3dCameraRequest;
+            Sam3dCameraResult result =
+                _inFlightSam3dCameraResult;
+            _inFlightSam3dCameraRequest = null;
+            _inFlightSam3dCameraResult = null;
+            if (request == null ||
+                result == null ||
+                !result.Created)
+            {
+                return "";
+            }
+            return RemoveCreatedSam3dCamera(request, result);
+        }
+
+        private void ClearInFlightSam3dCamera(
+            BridgeRequest request,
+            Sam3dCameraResult result)
+        {
+            if (object.ReferenceEquals(
+                    _inFlightSam3dCameraRequest,
+                    request) &&
+                object.ReferenceEquals(
+                    _inFlightSam3dCameraResult,
+                    result))
+            {
+                _inFlightSam3dCameraRequest = null;
+                _inFlightSam3dCameraResult = null;
             }
         }
 
@@ -3357,6 +3488,23 @@ namespace VAMPip
                 saved.PositionState = controller.currentPositionState;
                 saved.RotationState = controller.currentRotationState;
                 saved.PhysicsEnabled = controller.physicsEnabled;
+                saved.PhysicalBody = controller.followWhenOffRB;
+                saved.PhysicalBodyWasPresent =
+                    !object.ReferenceEquals(
+                        saved.PhysicalBody,
+                        null);
+                if (saved.PhysicalBodyWasPresent)
+                {
+                    if (saved.PhysicalBody == null)
+                    {
+                        throw new Exception(
+                            "Person controller " +
+                            target.Id +
+                            " has a destroyed physical body.");
+                    }
+                    saved.PhysicalBodyKinematic =
+                        saved.PhysicalBody.isKinematic;
+                }
                 snapshot.Controllers.Add(saved);
             }
 
@@ -3381,6 +3529,22 @@ namespace VAMPip
                 snapshot.CameraController.currentRotationState;
             snapshot.CameraPhysicsEnabled =
                 snapshot.CameraController.physicsEnabled;
+            snapshot.CameraPhysicalBody =
+                snapshot.CameraController.followWhenOffRB;
+            snapshot.CameraPhysicalBodyWasPresent =
+                !object.ReferenceEquals(
+                    snapshot.CameraPhysicalBody,
+                    null);
+            if (snapshot.CameraPhysicalBodyWasPresent)
+            {
+                if (snapshot.CameraPhysicalBody == null)
+                {
+                    throw new Exception(
+                        "The camera Empty has a destroyed physical body.");
+                }
+                snapshot.CameraPhysicalBodyKinematic =
+                    snapshot.CameraPhysicalBody.isKinematic;
+            }
             snapshot.Renderer = renderer;
             JSONStorableFloat fov =
                 renderer.GetFloatJSONParam("Flat Horizontal FOV");
@@ -3418,71 +3582,104 @@ namespace VAMPip
             snapshot.Person.collisionEnabled = false;
             try
             {
-                int index;
-                for (index = 0;
-                     index < snapshot.Controllers.Count;
-                     index++)
-                {
-                    Sam3dControllerUndo saved =
-                        snapshot.Controllers[index];
-                    if (saved.Controller == null)
-                    {
-                        throw new Exception(
-                            "A saved Person controller is no longer available.");
-                    }
-                    saved.Controller.physicsEnabled = false;
-                }
-                if (snapshot.CameraController == null)
-                {
-                    throw new Exception(
-                        "The saved SAM3D camera is no longer available.");
-                }
-                snapshot.CameraController.physicsEnabled = false;
+                LockSam3dSavedPhysics(snapshot);
             }
             catch
             {
                 FinishSam3dPoseTransaction(
                     snapshot,
-                    "Cancel VAM-PIP SAM3D pose");
+                    "Cancel VAM-PIP SAM3D pose",
+                    false);
                 throw;
             }
         }
 
-        private static void FinishSam3dPoseTransaction(
-            Sam3dUndoSnapshot snapshot,
-            string reason)
+        private static void LockSam3dSavedPhysics(
+            Sam3dUndoSnapshot snapshot)
         {
             if (snapshot == null ||
-                snapshot.Person == null)
+                snapshot.Controllers == null ||
+                snapshot.Controllers.Count != Sam3dControllerCount)
             {
                 throw new Exception(
-                    "The saved SAM3D Person is no longer available.");
+                    "The saved SAM3D controller set is incomplete.");
             }
+            int index;
+            for (index = 0;
+                 index < snapshot.Controllers.Count;
+                 index++)
+            {
+                Sam3dControllerUndo saved =
+                    snapshot.Controllers[index];
+                if (saved == null ||
+                    saved.Controller == null ||
+                    !IsSam3dSavedPhysicalBodyAvailable(
+                        saved.PhysicalBodyWasPresent,
+                        saved.PhysicalBody) ||
+                    !object.ReferenceEquals(
+                        saved.Controller.followWhenOffRB,
+                        saved.PhysicalBody))
+                {
+                    throw new Exception(
+                        "A saved Person controller is no longer available.");
+                }
+            }
+            if (snapshot.CameraController == null ||
+                !IsSam3dSavedPhysicalBodyAvailable(
+                    snapshot.CameraPhysicalBodyWasPresent,
+                    snapshot.CameraPhysicalBody) ||
+                !object.ReferenceEquals(
+                    snapshot.CameraController.followWhenOffRB,
+                    snapshot.CameraPhysicalBody))
+            {
+                throw new Exception(
+                    "The saved SAM3D camera is no longer available.");
+            }
+            for (index = 0;
+                 index < snapshot.Controllers.Count;
+                 index++)
+            {
+                Sam3dControllerUndo saved =
+                    snapshot.Controllers[index];
+                saved.Controller.physicsEnabled = false;
+                if (saved.PhysicalBodyWasPresent)
+                {
+                    saved.PhysicalBody.isKinematic = true;
+                }
+            }
+            snapshot.CameraController.physicsEnabled = false;
+            if (snapshot.CameraPhysicalBodyWasPresent)
+            {
+                snapshot.CameraPhysicalBody.isKinematic = true;
+            }
+        }
+
+        private static bool IsSam3dSavedPhysicalBodyAvailable(
+            bool wasPresent,
+            Rigidbody body)
+        {
+            return wasPresent
+                ? body != null
+                : object.ReferenceEquals(body, null);
+        }
+
+        private static void CommitSam3dPoseLock(
+            Sam3dUndoSnapshot snapshot)
+        {
             try
             {
-                int index;
-                for (index = 0;
-                     index < snapshot.Controllers.Count;
-                     index++)
-                {
-                    Sam3dControllerUndo saved =
-                        snapshot.Controllers[index];
-                    if (saved.Controller != null)
-                    {
-                        saved.Controller.physicsEnabled =
-                            saved.PhysicsEnabled;
-                    }
-                }
-                if (snapshot.CameraController != null)
-                {
-                    snapshot.CameraController.physicsEnabled =
-                        snapshot.CameraPhysicsEnabled;
-                }
+                LockSam3dSavedPhysics(snapshot);
             }
             finally
             {
                 try
                 {
+                    if (snapshot == null ||
+                        snapshot.Person == null)
+                    {
+                        throw new Exception(
+                            "The saved SAM3D Person is no longer available.");
+                    }
                     snapshot.Person.collisionEnabled =
                         snapshot.PersonCollisionEnabled;
                 }
@@ -3490,9 +3687,186 @@ namespace VAMPip
                 {
                     SuperController.singleton.ResetSimulation(
                         Sam3dPhysicsResetFrames,
-                        reason,
+                        "Lock VAM-PIP SAM3D pose",
                         true);
                 }
+            }
+        }
+
+        private static void RestoreSam3dSavedPhysicsAndCollision(
+            Sam3dUndoSnapshot snapshot,
+            bool cameraRemovedByUndo)
+        {
+            if (snapshot == null)
+            {
+                throw new Exception(
+                    "No SAM3D undo snapshot is available.");
+            }
+            Exception restoreError = null;
+            int index;
+            if (snapshot.Controllers == null)
+            {
+                restoreError = new Exception(
+                    "The saved SAM3D controller set is unavailable.");
+            }
+            else
+            {
+                for (index = 0;
+                     index < snapshot.Controllers.Count;
+                     index++)
+                {
+                    Sam3dControllerUndo saved =
+                        snapshot.Controllers[index];
+                    if (saved == null)
+                    {
+                        if (restoreError == null)
+                        {
+                            restoreError = new Exception(
+                                "A saved Person controller is no longer available.");
+                        }
+                        continue;
+                    }
+                    try
+                    {
+                        if (saved.Controller == null ||
+                            !IsSam3dSavedPhysicalBodyAvailable(
+                                saved.PhysicalBodyWasPresent,
+                                saved.PhysicalBody) ||
+                            !object.ReferenceEquals(
+                                saved.Controller.followWhenOffRB,
+                                saved.PhysicalBody))
+                        {
+                            throw new Exception(
+                                "A saved Person controller is no longer available.");
+                        }
+                        saved.Controller.physicsEnabled =
+                            saved.PhysicsEnabled;
+                    }
+                    catch (Exception exception)
+                    {
+                        if (restoreError == null)
+                        {
+                            restoreError = exception;
+                        }
+                    }
+                    try
+                    {
+                        if (!IsSam3dSavedPhysicalBodyAvailable(
+                                saved.PhysicalBodyWasPresent,
+                                saved.PhysicalBody))
+                        {
+                            throw new Exception(
+                                "A saved Person physical body is no longer available.");
+                        }
+                        if (saved.PhysicalBodyWasPresent)
+                        {
+                            saved.PhysicalBody.isKinematic =
+                                saved.PhysicalBodyKinematic;
+                        }
+                    }
+                    catch (Exception exception)
+                    {
+                        if (restoreError == null)
+                        {
+                            restoreError = exception;
+                        }
+                    }
+                }
+            }
+            bool cameraControllerAvailable =
+                snapshot.CameraController != null;
+            bool cameraPhysicalBodyAvailable =
+                IsSam3dSavedPhysicalBodyAvailable(
+                    snapshot.CameraPhysicalBodyWasPresent,
+                    snapshot.CameraPhysicalBody);
+            if (cameraControllerAvailable &&
+                cameraPhysicalBodyAvailable &&
+                object.ReferenceEquals(
+                    snapshot.CameraController.followWhenOffRB,
+                    snapshot.CameraPhysicalBody))
+            {
+                try
+                {
+                    snapshot.CameraController.physicsEnabled =
+                        snapshot.CameraPhysicsEnabled;
+                }
+                catch (Exception exception)
+                {
+                    if (restoreError == null)
+                    {
+                        restoreError = exception;
+                    }
+                }
+            }
+            else if (!cameraRemovedByUndo &&
+                     restoreError == null)
+            {
+                restoreError = new Exception(
+                    "The saved SAM3D camera is no longer available.");
+            }
+            try
+            {
+                if (!cameraPhysicalBodyAvailable)
+                {
+                    if (!cameraRemovedByUndo)
+                    {
+                        throw new Exception(
+                            "The saved SAM3D camera physical body is no longer available.");
+                    }
+                }
+                else if (snapshot.CameraPhysicalBodyWasPresent)
+                {
+                    snapshot.CameraPhysicalBody.isKinematic =
+                        snapshot.CameraPhysicalBodyKinematic;
+                }
+            }
+            catch (Exception exception)
+            {
+                if (restoreError == null)
+                {
+                    restoreError = exception;
+                }
+            }
+            try
+            {
+                if (snapshot.Person == null)
+                {
+                    throw new Exception(
+                        "The saved SAM3D Person is no longer available.");
+                }
+                snapshot.Person.collisionEnabled =
+                    snapshot.PersonCollisionEnabled;
+            }
+            catch (Exception exception)
+            {
+                if (restoreError == null)
+                {
+                    restoreError = exception;
+                }
+            }
+            if (restoreError != null)
+            {
+                throw restoreError;
+            }
+        }
+
+        private static void FinishSam3dPoseTransaction(
+            Sam3dUndoSnapshot snapshot,
+            string reason,
+            bool cameraRemovedByUndo)
+        {
+            try
+            {
+                RestoreSam3dSavedPhysicsAndCollision(
+                    snapshot,
+                    cameraRemovedByUndo);
+            }
+            finally
+            {
+                SuperController.singleton.ResetSimulation(
+                    Sam3dPhysicsResetFrames,
+                    reason,
+                    true);
             }
         }
 
@@ -3503,20 +3877,23 @@ namespace VAMPip
             {
                 throw new Exception("No SAM3D undo snapshot is available.");
             }
+            bool cameraRemovedByUndo = false;
             BeginSam3dPoseTransaction(snapshot);
             try
             {
-                RestoreSam3dSnapshotContents(snapshot);
+                cameraRemovedByUndo =
+                    RestoreSam3dSnapshotContents(snapshot);
             }
             finally
             {
                 FinishSam3dPoseTransaction(
                     snapshot,
-                    "Restore VAM-PIP SAM3D pose");
+                    "Restore VAM-PIP SAM3D pose",
+                    cameraRemovedByUndo);
             }
         }
 
-        private static void RestoreSam3dSnapshotContents(
+        private static bool RestoreSam3dSnapshotContents(
             Sam3dUndoSnapshot snapshot)
         {
             int index;
@@ -3576,7 +3953,7 @@ namespace VAMPip
                         "The generated SAM3D camera is no longer available.");
                 }
                 SuperController.singleton.RemoveAtom(createdCamera);
-                return;
+                return true;
             }
             if (snapshot.CameraController == null ||
                 snapshot.CameraController.control == null ||
@@ -3638,6 +4015,7 @@ namespace VAMPip
             snapshot.Renderer.GetBoolJSONParam(
                 "Generate Funscripts").val =
                 snapshot.GenerateFunscripts;
+            return false;
         }
 
         private static void SnapSam3dControllerPhysicalPose(
@@ -3679,10 +4057,15 @@ namespace VAMPip
         private Sam3dUndoSnapshot CurrentSam3dSnapshot()
         {
             Sam3dUndoSnapshot snapshot = _sam3dUndoSnapshot;
-            if (snapshot == null ||
-                SuperController.singleton == null)
+            if (snapshot == null)
             {
-                _sam3dUndoSnapshot = null;
+                return null;
+            }
+            if (SuperController.singleton == null)
+            {
+                ReleaseSam3dPoseLockWithoutRestoringPose(
+                    snapshot,
+                    "controller shutdown");
                 return null;
             }
             Atom person =
@@ -3698,6 +4081,7 @@ namespace VAMPip
                     snapshot.Person) ||
                 camera == null ||
                 camera.type != "Empty" ||
+                snapshot.CameraController == null ||
                 !object.ReferenceEquals(
                     camera.mainController,
                     snapshot.CameraController) ||
@@ -3705,7 +4089,9 @@ namespace VAMPip
                     FindSam3dRenderer(camera),
                     snapshot.Renderer))
             {
-                _sam3dUndoSnapshot = null;
+                ReleaseSam3dPoseLockWithoutRestoringPose(
+                    snapshot,
+                    "invalid applied snapshot");
                 return null;
             }
             Dictionary<string, FreeControllerV3> controllers =
@@ -3719,18 +4105,88 @@ namespace VAMPip
                 Sam3dControllerUndo saved =
                     snapshot.Controllers[index];
                 if (saved.Controller == null ||
+                    !IsSam3dSavedPhysicalBodyAvailable(
+                        saved.PhysicalBodyWasPresent,
+                        saved.PhysicalBody) ||
                     !controllers.TryGetValue(
                         saved.Controller.name,
                         out current) ||
                     !object.ReferenceEquals(
                         current,
-                        saved.Controller))
+                        saved.Controller) ||
+                    !object.ReferenceEquals(
+                        saved.Controller.followWhenOffRB,
+                        saved.PhysicalBody))
                 {
-                    _sam3dUndoSnapshot = null;
+                    ReleaseSam3dPoseLockWithoutRestoringPose(
+                        snapshot,
+                        "changed Person controller");
                     return null;
                 }
             }
+            if (snapshot.CameraController == null ||
+                !IsSam3dSavedPhysicalBodyAvailable(
+                    snapshot.CameraPhysicalBodyWasPresent,
+                    snapshot.CameraPhysicalBody) ||
+                !object.ReferenceEquals(
+                    snapshot.CameraController.followWhenOffRB,
+                    snapshot.CameraPhysicalBody))
+            {
+                ReleaseSam3dPoseLockWithoutRestoringPose(
+                    snapshot,
+                    "changed camera controller");
+                return null;
+            }
+            try
+            {
+                LockSam3dSavedPhysics(snapshot);
+            }
+            catch (Exception exception)
+            {
+                ReleaseSam3dPoseLockWithoutRestoringPose(
+                    snapshot,
+                    "pose lock failure: " +
+                    DescribeException(exception));
+                return null;
+            }
             return snapshot;
+        }
+
+        private void ReleaseSam3dPoseLockWithoutRestoringPose(
+            Sam3dUndoSnapshot snapshot,
+            string reason)
+        {
+            if (snapshot == null)
+            {
+                return;
+            }
+            if (object.ReferenceEquals(
+                    _sam3dUndoSnapshot,
+                    snapshot))
+            {
+                _sam3dUndoSnapshot = null;
+            }
+            try
+            {
+                RestoreSam3dSavedPhysicsAndCollision(
+                    snapshot,
+                    false);
+            }
+            catch (Exception exception)
+            {
+                try
+                {
+                    SuperController.LogError(
+                        "[VAM-PIP Bridge] Could not release the SAM3D " +
+                        "physics lock during " +
+                        reason +
+                        ": " +
+                        DescribeException(exception));
+                }
+                catch
+                {
+                }
+            }
         }
 
         private static Quaternion Sam3dAnchorRotation(Atom person)
@@ -3883,6 +4339,7 @@ namespace VAMPip
             Sam3dApplyDiagnostics diagnostics)
         {
             BeginSam3dPoseTransaction(snapshot);
+            bool applied = false;
             try
             {
                 ApplySam3dTransformContents(
@@ -3892,12 +4349,21 @@ namespace VAMPip
                     renderer,
                     controllers,
                     diagnostics);
+                applied = true;
             }
             finally
             {
-                FinishSam3dPoseTransaction(
-                    snapshot,
-                    "Apply VAM-PIP SAM3D pose");
+                if (applied)
+                {
+                    CommitSam3dPoseLock(snapshot);
+                }
+                else
+                {
+                    FinishSam3dPoseTransaction(
+                        snapshot,
+                        "Cancel VAM-PIP SAM3D pose",
+                        false);
+                }
             }
         }
 
@@ -3999,6 +4465,7 @@ namespace VAMPip
                 cameraController.onPositionChangeHandlers(
                     cameraController);
             }
+            SnapSam3dControllerPhysicalPose(cameraController);
             ConfigureSam3dRenderer(renderer, solution.Camera);
         }
 
@@ -4181,7 +4648,7 @@ namespace VAMPip
                     return "";
                 }
                 if (
-                    result.Atom != null &&
+                    !object.ReferenceEquals(result.Atom, null) &&
                     !object.ReferenceEquals(camera, result.Atom))
                 {
                     throw new Exception(
@@ -4473,6 +4940,8 @@ namespace VAMPip
 
             Sam3dCameraResult cameraResult =
                 new Sam3dCameraResult();
+            _inFlightSam3dCameraRequest = request;
+            _inFlightSam3dCameraResult = cameraResult;
             yield return EnsureSam3dCamera(request, cameraResult);
             if (cameraResult.Error.Length != 0)
             {
@@ -4480,6 +4949,9 @@ namespace VAMPip
                     RemoveCreatedSam3dCamera(
                         request,
                         cameraResult);
+                ClearInFlightSam3dCamera(
+                    request,
+                    cameraResult);
                 FinishSam3dActionError(
                     request,
                     startedAt,
@@ -4521,6 +4993,9 @@ namespace VAMPip
                     snapshot,
                     snapshot.Diagnostics);
                 _sam3dUndoSnapshot = snapshot;
+                ClearInFlightSam3dCamera(
+                    request,
+                    cameraResult);
             }
             catch (Exception exception)
             {
@@ -4544,6 +5019,9 @@ namespace VAMPip
                     RemoveCreatedSam3dCamera(
                         request,
                         cameraResult);
+                ClearInFlightSam3dCamera(
+                    request,
+                    cameraResult);
             }
             if (snapshot != null)
             {
