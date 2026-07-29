@@ -76,6 +76,23 @@ def settlement() -> dict[str, object]:
     }
 
 
+def stringified_bridge_settlement() -> dict[str, object]:
+    def stringify(value: object) -> object:
+        if isinstance(value, bool):
+            return "TrUe" if value else "fAlSe"
+        if isinstance(value, (int, float)):
+            return str(value)
+        if isinstance(value, dict):
+            return {key: stringify(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [stringify(item) for item in value]
+        return value
+
+    result = stringify(settlement())
+    assert isinstance(result, dict)
+    return result
+
+
 class Sam3dSettlementPublicStatusTests(unittest.TestCase):
     def test_settlement_is_fixed_bounded_and_allowlisted(self) -> None:
         status = _public_sam3d_status(
@@ -143,6 +160,31 @@ class Sam3dSettlementPublicStatusTests(unittest.TestCase):
             },
         )
 
+    def test_stringified_simplejson_values_are_strictly_normalized(self) -> None:
+        raw = stringified_bridge_settlement()
+        raw["controllers"][0]["positionErrorMeters"] = "1e-2"
+        raw["controllers"][0]["rotationErrorDegrees"] = "2.5E-1"
+
+        status = _public_sam3d_status(
+            {
+                "applied": True,
+                "undoAvailable": True,
+                "settlement": raw,
+            }
+        )
+
+        public = status["settlement"]
+        self.assertTrue(public["available"])
+        self.assertEqual(public["schema"], 1)
+        self.assertEqual(public["settleFrames"], 5)
+        self.assertEqual(public["controllerLimit"], 2)
+        head = public["controllers"][0]
+        self.assertEqual(head["positionErrorMeters"], 0.01)
+        self.assertEqual(head["rotationErrorDegrees"], 0.25)
+        self.assertEqual(head["requested"]["position"]["x"], 1.0)
+        self.assertIs(head["state"]["physicsEnabled"], True)
+        self.assertIs(head["state"]["possessed"], False)
+
     def test_invalid_or_unbounded_values_are_not_exposed(self) -> None:
         raw = settlement()
         raw.update(
@@ -169,7 +211,7 @@ class Sam3dSettlementPublicStatusTests(unittest.TestCase):
                 "state": {
                     "position": "../../On",
                     "rotation": "Comply",
-                    "physicsEnabled": "true",
+                    "physicsEnabled": " true ",
                     "possessed": False,
                 },
             },

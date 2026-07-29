@@ -1361,6 +1361,27 @@ class BridgeSourceTests(unittest.TestCase):
             apply_start,
         )
         action_source = source[apply_start:undo_end]
+        restore_start = pose_source.index(
+            "private static void RestoreSam3dSnapshotContents("
+        )
+        restore_end = pose_source.index(
+            "private static void SnapSam3dControllerPhysicalPose(",
+            restore_start,
+        )
+        restore_source = pose_source[restore_start:restore_end]
+        snap_start = restore_end
+        snap_end = pose_source.index(
+            "private Sam3dUndoSnapshot CurrentSam3dSnapshot(",
+            snap_start,
+        )
+        snap_source = pose_source[snap_start:snap_end]
+        apply_contents_start = pose_source.index(
+            "private static void ApplySam3dTransformContents("
+        )
+        apply_contents_end = len(pose_source)
+        apply_contents_source = pose_source[
+            apply_contents_start:apply_contents_end
+        ]
 
         self.assertIn("Sam3dPhysicsResetFrames = 5", source)
         self.assertIn("saved.Position = controller.control.position;", pose_source)
@@ -1380,8 +1401,61 @@ class BridgeSourceTests(unittest.TestCase):
         self.assertNotIn("controller.transform.rotation =", pose_source)
         self.assertIn("controller.onPositionChangeHandlers(controller);", pose_source)
         self.assertIn("controller.PauseComply();", pose_source)
-        self.assertIn("saved.Controller.followWhenOff.position", pose_source)
+        self.assertIn(
+            "SnapSam3dControllerPhysicalPose(\n"
+            "                    snapshot.Controllers[index].Controller);",
+            restore_source,
+        )
+        self.assertLess(
+            restore_source.index(
+                "saved.Controller.control.rotation = saved.Rotation;"
+            ),
+            restore_source.index(
+                "SnapSam3dControllerPhysicalPose("
+            ),
+        )
+        self.assertIn(
+            "Rigidbody physicalBody =\n"
+            "                controller.followWhenOffRB;",
+            snap_source,
+        )
+        self.assertIn(
+            "physicalBody.position =\n"
+            "                    controller.control.position;",
+            snap_source,
+        )
+        self.assertIn(
+            "physicalBody.rotation =\n"
+            "                    controller.control.rotation;",
+            snap_source,
+        )
+        self.assertIn("physicalBody.velocity = Vector3.zero;", snap_source)
+        self.assertIn(
+            "physicalBody.angularVelocity = Vector3.zero;",
+            snap_source,
+        )
+        self.assertIn(
+            "Transform physicalTransform =\n"
+            "                controller.followWhenOff;",
+            snap_source,
+        )
         self.assertIn("snapshot.CameraController.followWhenOff.position", pose_source)
+        self.assertLess(
+            apply_contents_source.index(
+                "controller.control.rotation = requestedRotation;"
+            ),
+            apply_contents_source.index(
+                "SnapSam3dControllerPhysicalPose(controller);"
+            ),
+        )
+        self.assertLess(
+            apply_contents_source.index(
+                "SnapSam3dControllerPhysicalPose(controller);"
+            ),
+            apply_contents_source.index(
+                "FreeControllerV3 cameraController = camera.mainController;"
+            ),
+        )
         self.assertIn(
             "SuperController.singleton.ResetSimulation(",
             pose_source,
@@ -1436,11 +1510,23 @@ class BridgeSourceTests(unittest.TestCase):
         )
         self.assertIn('sam3d["settlement"] = settlement;', source)
         self.assertIn(
-            "item.ActualPosition = controller.control.position;",
+            "Rigidbody physicalBody =\n"
+            "                    controller.followWhenOffRB;",
             source,
         )
         self.assertIn(
-            "item.ActualRotation = controller.control.rotation;",
+            "item.ActualPosition =\n"
+            "                        physicalBody.position;",
+            source,
+        )
+        self.assertIn(
+            "item.ActualRotation =\n"
+            "                        physicalBody.rotation;",
+            source,
+        )
+        self.assertIn(
+            "Transform physicalTransform =\n"
+            "                    controller.followWhenOff;",
             source,
         )
         for direct_flag in (

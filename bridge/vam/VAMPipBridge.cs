@@ -3543,13 +3543,6 @@ namespace VAMPip
                     saved.Controller.onPositionChangeHandlers(
                         saved.Controller);
                 }
-                if (saved.Controller.followWhenOff != null)
-                {
-                    saved.Controller.followWhenOff.position =
-                        saved.Position;
-                    saved.Controller.followWhenOff.rotation =
-                        saved.Rotation;
-                }
                 if (saved.PositionState ==
                         FreeControllerV3.PositionState.Comply ||
                     saved.RotationState ==
@@ -3557,6 +3550,13 @@ namespace VAMPip
                 {
                     saved.Controller.PauseComply();
                 }
+            }
+            for (index = 0;
+                 index < snapshot.Controllers.Count;
+                 index++)
+            {
+                SnapSam3dControllerPhysicalPose(
+                    snapshot.Controllers[index].Controller);
             }
             if (snapshot.CameraCreated)
             {
@@ -3638,6 +3638,42 @@ namespace VAMPip
             snapshot.Renderer.GetBoolJSONParam(
                 "Generate Funscripts").val =
                 snapshot.GenerateFunscripts;
+        }
+
+        private static void SnapSam3dControllerPhysicalPose(
+            FreeControllerV3 controller)
+        {
+            if (controller == null ||
+                controller.control == null)
+            {
+                throw new Exception(
+                    "A SAM3D controller has no target transform.");
+            }
+            Rigidbody physicalBody =
+                controller.followWhenOffRB;
+            if (physicalBody != null)
+            {
+                physicalBody.position =
+                    controller.control.position;
+                physicalBody.rotation =
+                    controller.control.rotation;
+                physicalBody.velocity = Vector3.zero;
+                physicalBody.angularVelocity = Vector3.zero;
+                return;
+            }
+            Transform physicalTransform =
+                controller.followWhenOff;
+            if (physicalTransform == null)
+            {
+                throw new Exception(
+                    "Person controller " +
+                    controller.name +
+                    " has no physical transform.");
+            }
+            physicalTransform.position =
+                controller.control.position;
+            physicalTransform.rotation =
+                controller.control.rotation;
         }
 
         private Sam3dUndoSnapshot CurrentSam3dSnapshot()
@@ -3801,8 +3837,31 @@ namespace VAMPip
                         (item == null ? "SAM3D controller" : item.Id) +
                         ".");
                 }
-                item.ActualPosition = controller.control.position;
-                item.ActualRotation = controller.control.rotation;
+                Rigidbody physicalBody =
+                    controller.followWhenOffRB;
+                Transform physicalTransform =
+                    controller.followWhenOff;
+                if (physicalBody != null)
+                {
+                    item.ActualPosition =
+                        physicalBody.position;
+                    item.ActualRotation =
+                        physicalBody.rotation;
+                }
+                else if (physicalTransform != null)
+                {
+                    item.ActualPosition =
+                        physicalTransform.position;
+                    item.ActualRotation =
+                        physicalTransform.rotation;
+                }
+                else
+                {
+                    throw new Exception(
+                        "Could not inspect the physical pose of " +
+                        item.Id +
+                        ".");
+                }
                 item.PositionState = controller.currentPositionState;
                 item.RotationState = controller.currentRotationState;
                 item.PhysicsEnabled = controller.physicsEnabled;
@@ -3907,6 +3966,16 @@ namespace VAMPip
                 {
                     controller.onPositionChangeHandlers(controller);
                 }
+            }
+            for (index = 0;
+                 index < solution.Controllers.Count;
+                 index++)
+            {
+                Sam3dControllerSolution target =
+                    solution.Controllers[index];
+                FreeControllerV3 controller =
+                    controllers[target.Id];
+                SnapSam3dControllerPhysicalPose(controller);
             }
 
             FreeControllerV3 cameraController = camera.mainController;

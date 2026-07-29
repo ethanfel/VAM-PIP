@@ -904,7 +904,8 @@ class Sam3dBackendTests(unittest.TestCase):
     def test_vam_solution_maps_head_to_vam_pivot_and_full_face_frame(self) -> None:
         job_id = "c" * 32
         manifest = sample_manifest(job_id)
-        points = manifest["people"][0]["keypoints3d"]
+        person = manifest["people"][0]
+        points = person["keypoints3d"]
         face = {
             "nose": [0.0, -0.715, 0.08],
             "left-eye": [-0.04, -0.735, 0.05],
@@ -914,6 +915,20 @@ class Sam3dBackendTests(unittest.TestCase):
         }
         for name, point in face.items():
             points[MHR70_NAMES.index(name)] = point
+        # A frontal face has broad bilateral spans, so it must retain the
+        # established eye-to-ear frame even when nose pitch differs slightly.
+        points2d = person["keypoints2d"]
+        frontal = {
+            "nose": [32.0, 20.0],
+            "left-eye": [27.0, 18.0],
+            "right-eye": [37.0, 18.0],
+            "left-ear": [23.0, 22.0],
+            "right-ear": [41.0, 22.0],
+            "left-shoulder": [10.0, 38.0],
+            "right-shoulder": [54.0, 38.0],
+        }
+        for name, point in frontal.items():
+            points2d[MHR70_NAMES.index(name)] = point
         solution = build_vam_solution(
             manifest,
             job_id=job_id,
@@ -938,6 +953,99 @@ class Sam3dBackendTests(unittest.TestCase):
             [0.0, 0.0, 0.0, 1.0],
         ):
             self.assertAlmostEqual(actual, expected, places=6)
+
+    def test_vam_solution_profile_uses_nose_forward_when_eyes_bias_pitch(
+        self,
+    ) -> None:
+        job_id = "7" * 32
+        manifest = sample_manifest(job_id)
+        person = manifest["people"][0]
+        points3d = person["keypoints3d"]
+        points2d = person["keypoints2d"]
+        # Real DINO rear-profile landmarks from cfefe.../50e...: the hidden
+        # eye biases the legacy frame upward, while nose and neck agree.
+        landmarks = {
+            "nose": (
+                [0.1858126819, -1.4645458460, 0.2914017737],
+                [649.3406982, 181.5389557],
+            ),
+            "left-eye": (
+                [0.1559330523, -1.5081348419, 0.3152230382],
+                [624.3892212, 151.9182129],
+            ),
+            "right-eye": (
+                [0.1573862135, -1.4971610308, 0.2529760599],
+                [629.4364014, 148.3008728],
+            ),
+            "left-ear": (
+                [0.0594783053, -1.4980165958, 0.3589602411],
+                [548.6457520, 167.8433685],
+            ),
+            "right-ear": (
+                [0.0626854971, -1.4706892967, 0.2128210217],
+                [554.3181763, 161.7621155],
+            ),
+            "neck": (
+                [0.0231966171, -1.3516864777, 0.2664923072],
+                [521.5877075, 266.9781799],
+            ),
+            "left-shoulder": (
+                [-0.1459932178, -1.3289077282, 0.2944751382],
+                [388.6115723, 288.5788574],
+            ),
+            "right-shoulder": (
+                [0.1632560641, -1.3152276278, 0.1947005540],
+                [638.2306519, 287.1569824],
+            ),
+        }
+        for name, (point3d, point2d) in landmarks.items():
+            index = MHR70_NAMES.index(name)
+            points3d[index] = point3d
+            points2d[index] = point2d
+
+        legacy_manifest = json.loads(json.dumps(manifest))
+        legacy_manifest["people"][0]["keypoints2d"] = [
+            [32.0, 32.0] for _ in MHR70_NAMES
+        ]
+        profile = build_vam_solution(manifest, job_id=job_id)
+        legacy = build_vam_solution(legacy_manifest, job_id=job_id)
+        profile_head = {
+            item["id"]: item for item in profile["controllers"]
+        }["headControl"]
+        legacy_head = {
+            item["id"]: item for item in legacy["controllers"]
+        }["headControl"]
+
+        rotation_dot = abs(
+            sum(
+                left * right
+                for left, right in zip(
+                    profile_head["rotation"],
+                    legacy_head["rotation"],
+                )
+            )
+        )
+        correction = math.degrees(
+            2.0 * math.acos(min(1.0, rotation_dot))
+        )
+        self.assertAlmostEqual(correction, 20.1698, places=3)
+        for actual, expected in zip(
+            profile_head["rotation"],
+            [-0.00790073, 0.68890222, -0.12095509, 0.71464759],
+        ):
+            self.assertAlmostEqual(actual, expected, places=6)
+
+    def test_vam_solution_validates_named_2d_keypoints(self) -> None:
+        job_id = "6" * 32
+        manifest = sample_manifest(job_id)
+        manifest["people"][0]["keypoints2d"][0][0] = math.nan
+        with self.assertRaisesRegex(ValueError, "finite"):
+            build_vam_solution(manifest, job_id=job_id)
+
+        manifest = sample_manifest(job_id)
+        manifest["people"][0]["keypointNames"] = list(reversed(MHR70_NAMES))
+        with self.assertRaisesRegex(ValueError, "names"):
+            build_vam_solution(manifest, job_id=job_id)
 
     def test_vam_solution_head_matches_front_camera_body_yaw(self) -> None:
         job_id = "f" * 32

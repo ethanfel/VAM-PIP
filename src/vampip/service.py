@@ -877,7 +877,15 @@ def _sam3d_settlement_number(
     minimum: float,
     maximum: float,
 ) -> float | None:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, str):
+        if re.fullmatch(
+            r"-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?",
+            value,
+        ) is None:
+            return None
+    elif not isinstance(value, (int, float)):
         return None
     try:
         number = float(value)
@@ -886,6 +894,18 @@ def _sam3d_settlement_number(
     if not math.isfinite(number) or not minimum <= number <= maximum:
         return None
     return number
+
+
+def _sam3d_settlement_bool(value: object) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.casefold()
+        if normalized == "true":
+            return True
+        if normalized == "false":
+            return False
+    return None
 
 
 def _public_sam3d_settlement_vector(
@@ -1013,14 +1033,16 @@ def _public_sam3d_settlement(value: object) -> dict[str, object] | None:
                     "isGrabbing",
                 ):
                     flag = raw_state.get(key)
-                    if isinstance(flag, bool):
-                        state[key] = flag
+                    parsed_flag = _sam3d_settlement_bool(flag)
+                    if parsed_flag is not None:
+                        state[key] = parsed_flag
                 if state:
                     controller["state"] = state
             controllers.append(controller)
     result["controllers"] = controllers
+    available = _sam3d_settlement_bool(value.get("available"))
     result["available"] = bool(
-        value.get("available") is True
+        available is True
         and raw_error == ""
         and {item["id"] for item in controllers}
         == {"headControl", "neckControl"}

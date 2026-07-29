@@ -159,6 +159,7 @@ VR_RENDERER_RESOLUTIONS: dict[str, dict[str, tuple[int, int]]] = {
     },
 }
 
+Vector2 = tuple[float, float]
 Vector = tuple[float, float, float]
 Quaternion = tuple[float, float, float, float]
 
@@ -176,6 +177,12 @@ _VAM_EAR_SPAN_MIN_PER_HEIGHT = 0.045
 _VAM_EAR_SPAN_MAX_PER_HEIGHT = 0.14
 _VAM_NECK_TO_SKULL_MIN_PER_HEIGHT = 0.05
 _VAM_NECK_TO_SKULL_MAX_PER_HEIGHT = 0.14
+# A near-profile view collapses both bilateral facial spans in image space.
+# In that case the hidden eye can bias eye-midpoint pitch, so prefer the
+# visible nose only when it also agrees with the neck-to-skull direction.
+_VAM_PROFILE_MAX_BILATERAL_SPAN = 0.08
+_VAM_PROFILE_MIN_NOSE_DISPLACEMENT = 0.08
+_VAM_PROFILE_MAX_FORWARD_DISAGREEMENT = math.radians(15.0)
 # VaM controllers use absolute world rotations. Giving the neck part of the
 # torso-to-face arc leaves the head at the exact inferred orientation while
 # avoiding an extreme relative bend at the head/neck joint.
@@ -257,6 +264,10 @@ def _mean(*values: Vector) -> Vector:
         sum(value[1] for value in values) / divisor,
         sum(value[2] for value in values) / divisor,
     )
+
+
+def _distance2d(a: Vector2, b: Vector2) -> float:
+    return math.hypot(a[0] - b[0], a[1] - b[1])
 
 
 def _lerp(a: Vector, b: Vector, amount: float) -> Vector:
@@ -384,9 +395,68 @@ def _body_axes(points: dict[str, Vector]) -> tuple[Vector, Vector, Vector]:
     return right, up, forward
 
 
+def _profile_nose_forward(
+    points: dict[str, Vector],
+    points2d: dict[str, Vector2] | None,
+    right: Vector,
+    nose_direction: Vector,
+) -> Vector | None:
+    """Return a coherent profile forward axis, otherwise preserve legacy pitch."""
+
+    if points2d is None:
+        return None
+    shoulder_span = _distance2d(
+        points2d["left-shoulder"],
+        points2d["right-shoulder"],
+    )
+    if shoulder_span < 1e-6:
+        return None
+    maximum_bilateral = shoulder_span * _VAM_PROFILE_MAX_BILATERAL_SPAN
+    if (
+        _distance2d(points2d["left-eye"], points2d["right-eye"])
+        > maximum_bilateral
+        or _distance2d(points2d["left-ear"], points2d["right-ear"])
+        > maximum_bilateral
+    ):
+        return None
+
+    ear_mid_2d = (
+        (points2d["left-ear"][0] + points2d["right-ear"][0]) * 0.5,
+        (points2d["left-ear"][1] + points2d["right-ear"][1]) * 0.5,
+    )
+    if (
+        _distance2d(points2d["nose"], ear_mid_2d)
+        < shoulder_span * _VAM_PROFILE_MIN_NOSE_DISPLACEMENT
+        or _length(nose_direction) < 1e-6
+    ):
+        return None
+
+    neck_up = _sub(
+        _mean(points["left-ear"], points["right-ear"]),
+        points["neck"],
+    )
+    neck_up = _sub(neck_up, _mul(right, _dot(neck_up, right)))
+    if _length(neck_up) < 1e-6:
+        return None
+    neck_forward = _unit(
+        _cross(right, _unit(neck_up, (0.0, 1.0, 0.0))),
+        (0.0, 0.0, 1.0),
+    )
+    nose_forward = _unit(nose_direction, neck_forward)
+    if _dot(neck_forward, nose_forward) < 0.0:
+        neck_forward = _mul(neck_forward, -1.0)
+    agreement = math.acos(
+        max(-1.0, min(1.0, _dot(neck_forward, nose_forward)))
+    )
+    if agreement > _VAM_PROFILE_MAX_FORWARD_DISAGREEMENT:
+        return None
+    return nose_forward
+
+
 def _head_axes(
     points: dict[str, Vector],
     fallback: tuple[Vector, Vector, Vector],
+    points2d: dict[str, Vector2] | None = None,
 ) -> tuple[Vector, Vector, Vector]:
     """Build a complete anatomical frame from stable facial landmarks."""
 
@@ -410,6 +480,14 @@ def _head_axes(
         nose_direction,
         _mul(right, _dot(nose_direction, right)),
     )
+    profile_forward = _profile_nose_forward(
+        points,
+        points2d,
+        right,
+        nose_direction,
+    )
+    if profile_forward is not None:
+        forward_raw = profile_forward
     if _length(forward_raw) < 1e-6:
         forward_raw = nose_direction
     if _length(forward_raw) < 1e-6:
@@ -541,6 +619,20 @@ def _points_from_person(person: dict[str, object]) -> tuple[dict[str, Vector], V
     return points, pelvis_cv
 
 
+def _points2d_from_person(person: dict[str, object]) -> dict[str, Vector2]:
+    names = person.get("keypointNames")
+    if names != list(MHR70_NAMES):
+        raise ValueError("SAM 3D Body keypoint names are invalid")
+    raw = person.get("keypoints2d")
+    if not isinstance(raw, list) or len(raw) != len(MHR70_NAMES):
+        raise ValueError("SAM 3D Body result must contain 70 two-dimensional keypoints")
+    points: dict[str, Vector2] = {}
+    for index, (name, value) in enumerate(zip(MHR70_NAMES, raw)):
+        point = _finite_vector(value, size=2, label=f"keypoints2d[{index}]")
+        points[name] = (point[0], point[1])
+    return points
+
+
 def build_vam_solution(
     manifest: dict[str, object],
     *,
@@ -627,6 +719,7 @@ def build_vam_solution(
         )
 
     raw_points, pelvis_cv = _points_from_person(person)
+    points2d = _points2d_from_person(person)
     scale = _stature_scale(raw_points, height_m)
     pelvis = _mean(raw_points["left-hip"], raw_points["right-hip"])
     points = {
@@ -636,7 +729,7 @@ def build_vam_solution(
     shoulder_mid = _mean(points["left-shoulder"], points["right-shoulder"])
     torso_axes = _body_axes(points)
     torso_rotation = _quat_from_basis(*torso_axes)
-    head_axes = _head_axes(points, torso_axes)
+    head_axes = _head_axes(points, torso_axes, points2d)
     head_rotation = _quat_from_basis(*head_axes)
     torso_to_head_angle = _quat_arc_angle(torso_rotation, head_rotation)
     neck_share = _VAM_NECK_FACE_ROTATION_SHARE
