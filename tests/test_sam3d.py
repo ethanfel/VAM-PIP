@@ -1012,6 +1012,159 @@ class Sam3dBackendTests(unittest.TestCase):
         after_failure = manager.get(job["id"])
         self.assertEqual(after_failure["last_capture"], captured)
         self.assertEqual(after_failure["last_vam_action"]["state"], "failed")
+        self.assertEqual(after_failure["captures"], [captured])
+
+    def test_successful_captures_keep_newest_fifty_per_job(self) -> None:
+        manager, job = self.completed_job()
+        revision = str(job["revision"])
+        for index in range(55):
+            request_id = f"{index + 1:032x}"
+            manager.record_vam_action(
+                job["id"],
+                action="capture",
+                revision=revision,
+                request_id=request_id,
+                target_uid="Person",
+                camera_uid="SAM Camera",
+                capture_extension="jpg",
+                capture_content_type="image/jpeg",
+            )
+            manager.reconcile_vam_action(
+                job["id"],
+                request_id=request_id,
+                state="succeeded",
+                message="capture complete",
+            )
+
+        document = manager.get(job["id"])
+        captures = document["captures"]
+        self.assertEqual(len(captures), 50)
+        self.assertEqual(captures[0]["request_id"], f"{55:032x}")
+        self.assertEqual(captures[-1]["request_id"], f"{6:032x}")
+        self.assertEqual(
+            document["last_capture"]["request_id"],
+            f"{55:032x}",
+        )
+        manager.close()
+        restarted = self.manager()
+        persisted = restarted.get(job["id"])
+        self.assertEqual(
+            [capture["request_id"] for capture in persisted["captures"]],
+            [capture["request_id"] for capture in captures],
+        )
+        restarted.close()
+
+    def test_capture_backfill_scans_new_and_legacy_roots(self) -> None:
+        manager, job = self.completed_job()
+        service = ManagerService(
+            self.addons,
+            self.state,
+            process_probe=lambda: [],
+            sam3d_manager=manager,
+        )
+        service._scene_snapshot = mock.Mock(return_value={"available": False})
+        legacy_request = "a" * 32
+        current_request = "b" * 32
+        invalid_request = "c" * 32
+        manager.record_vam_action(
+            job["id"],
+            action="capture",
+            revision=str(job["revision"]),
+            request_id=current_request,
+            target_uid="Person",
+            camera_uid="SAM Camera",
+            capture_extension="png",
+            capture_content_type="image/png",
+        )
+        manager.reconcile_vam_action(
+            job["id"],
+            request_id=current_request,
+            state="succeeded",
+            message="capture complete",
+        )
+        legacy_root = self.vam_root / "Saves" / "VR_Videos_And_Funscripts"
+        current_root = self.vam_root / "Saves" / "screenshots" / "VAMPip"
+        legacy_root.mkdir(parents=True)
+        current_root.mkdir(parents=True)
+        legacy = legacy_root / f"vampip_{legacy_request}_{job['id']}.jpg"
+        current = current_root / f"vampip_{current_request}_{job['id']}.png"
+        ignored = current_root / f"not-vampip_{invalid_request}_{job['id']}.png"
+        legacy.write_bytes(b"legacy-jpeg")
+        current.write_bytes(b"current-png")
+        ignored.write_bytes(b"ignored")
+        os.utime(legacy, (1000, 1000))
+        os.utime(current, (2000, 2000))
+
+        document = service.sam3d_job(job["id"])
+        self.assertEqual(
+            [capture["request_id"] for capture in document["captures"]],
+            [current_request, legacy_request],
+        )
+        self.assertEqual(document["captures"][0]["size_bytes"], 11)
+        self.assertEqual(document["captures"][0]["revision"], job["revision"])
+        self.assertEqual(document["captures"][0]["target_uid"], "Person")
+        self.assertEqual(document["captures"][0]["camera_uid"], "SAM Camera")
+        self.assertEqual(
+            document["captures"][0]["captured_at_utc"],
+            "1970-01-01T00:33:20+00:00",
+        )
+        self.assertEqual(document["last_capture"]["request_id"], current_request)
+        current_path, current_type = service.sam3d_capture_artifact(
+            job["id"],
+            current_request,
+        )
+        legacy_path, legacy_type = service.sam3d_capture_artifact(
+            job["id"],
+            legacy_request,
+        )
+        latest_path, latest_type = service.sam3d_artifact(
+            job["id"],
+            "capture",
+        )
+        self.assertEqual((current_path, current_type), (current, "image/png"))
+        self.assertEqual((legacy_path, legacy_type), (legacy, "image/jpeg"))
+        self.assertEqual((latest_path, latest_type), (current, "image/png"))
+        with self.assertRaisesRegex(FileNotFoundError, "history"):
+            service.sam3d_capture_artifact(job["id"], invalid_request)
+        pending = current_root / f"vampip_{invalid_request}_{job['id']}.jpg"
+        pending.write_bytes(b"incomplete")
+        manager.record_vam_action(
+            job["id"],
+            action="capture",
+            revision=str(job["revision"]),
+            request_id=invalid_request,
+            target_uid="Person",
+            camera_uid="SAM Camera",
+            capture_extension="jpg",
+            capture_content_type="image/jpeg",
+        )
+        refreshed = service.sam3d_job(job["id"])
+        self.assertNotIn(
+            invalid_request,
+            [capture["request_id"] for capture in refreshed["captures"]],
+        )
+        later_request = "d" * 32
+        manager.record_vam_action(
+            job["id"],
+            action="capture",
+            revision=str(job["revision"]),
+            request_id=later_request,
+            target_uid="Person",
+            camera_uid="SAM Camera",
+            capture_extension="jpg",
+            capture_content_type="image/jpeg",
+        )
+        after_later_request = service.sam3d_job(job["id"])
+        self.assertNotIn(
+            invalid_request,
+            [
+                capture["request_id"]
+                for capture in after_later_request["captures"]
+            ],
+        )
+        listed = service.sam3d_jobs()["items"]
+        listed_job = next(item for item in listed if item["id"] == job["id"])
+        self.assertNotIn("captures", listed_job)
 
     def test_capture_artifact_survives_undo_and_manager_restart(self) -> None:
         manager, job = self.completed_job()

@@ -1326,6 +1326,8 @@ class BridgeSourceTests(unittest.TestCase):
         self.assertIn("CurrentSam3dSnapshot()", source)
         self.assertIn('scene["sam3d"] = sam3d', source)
         self.assertIn('Sam3dCaptureAction = "VAMPipCapture"', source)
+        self.assertIn('"Saves/screenshots/VAMPip/"', source)
+        self.assertIn('"Saves/VR_Videos_And_Funscripts/"', source)
         self.assertIn('SetSam3dChoice(renderer, "Camera Target", "None")', source)
         self.assertIn('SetSam3dChoice(renderer, "Render Mode", "Flat")', source)
         self.assertIn(
@@ -1335,6 +1337,70 @@ class BridgeSourceTests(unittest.TestCase):
         self.assertNotIn('request["controllerId"]', source)
         self.assertNotIn('request["actionName"]', source)
         self.assertNotIn('request["solutionPath"]', source)
+
+    def test_bridge_sam3d_pose_changes_are_physics_safe_and_reversible(
+        self,
+    ) -> None:
+        repository = Path(__file__).resolve().parents[1]
+        source = (
+            repository / "src" / "vampip" / "bridge_assets" / "VAMPipBridge.cs"
+        ).read_text(encoding="utf-8")
+        pose_start = source.index(
+            "private static Sam3dUndoSnapshot SnapshotSam3dState("
+        )
+        pose_end = source.index(
+            "private void FinishSam3dActionOk(",
+            pose_start,
+        )
+        pose_source = source[pose_start:pose_end]
+        apply_start = source.index(
+            "private IEnumerator ExecuteApplySam3dResult("
+        )
+        undo_end = source.index(
+            "private static bool IsSafeSam3dOutput(",
+            apply_start,
+        )
+        action_source = source[apply_start:undo_end]
+
+        self.assertIn("Sam3dPhysicsResetFrames = 5", source)
+        self.assertIn("saved.Position = controller.control.position;", pose_source)
+        self.assertIn("saved.Rotation = controller.control.rotation;", pose_source)
+        self.assertIn("saved.PhysicsEnabled = controller.physicsEnabled;", pose_source)
+        self.assertIn("snapshot.PersonCollisionEnabled", pose_source)
+        self.assertIn("snapshot.Person.collisionEnabled = false;", pose_source)
+        self.assertIn("saved.Controller.physicsEnabled = false;", pose_source)
+        self.assertIn(
+            "saved.Controller.physicsEnabled =\n"
+            "                            saved.PhysicsEnabled;",
+            pose_source,
+        )
+        self.assertIn("controller.control.position =", pose_source)
+        self.assertIn("controller.control.rotation =", pose_source)
+        self.assertNotIn("controller.transform.position =", pose_source)
+        self.assertNotIn("controller.transform.rotation =", pose_source)
+        self.assertIn("controller.onPositionChangeHandlers(controller);", pose_source)
+        self.assertIn("controller.PauseComply();", pose_source)
+        self.assertIn("saved.Controller.followWhenOff.position", pose_source)
+        self.assertIn("snapshot.CameraController.followWhenOff.position", pose_source)
+        self.assertIn(
+            "SuperController.singleton.ResetSimulation(",
+            pose_source,
+        )
+        self.assertIn(
+            "finally\n"
+            "            {\n"
+            "                FinishSam3dPoseTransaction(",
+            pose_source,
+        )
+        self.assertIn("RestoreSam3dSnapshot(snapshot);", action_source)
+        self.assertIn(
+            "yield return WaitForSam3dPhysicsSettlement();",
+            action_source,
+        )
+        self.assertIn(
+            "private IEnumerator ExecuteUndoSam3dResult(",
+            action_source,
+        )
 
     def test_sam3d_camera_presets_match_and_use_vendored_renderer(self) -> None:
         repository = Path(__file__).resolve().parents[1]

@@ -6,8 +6,8 @@
     <meta name="color-scheme" content="dark">
     <meta name="theme-color" content="#111316">
     <title>VAM-PIP Manager</title>
-    <link rel="stylesheet" href="/styles.css?v=0.14.0">
-    <script src="/app.js?v=0.14.0" defer></script>
+    <link rel="stylesheet" href="/styles.css?v=0.14.1">
+    <script src="/app.js?v=0.14.1" defer></script>
   </head>
   <body>
     <a class="skip-link" href="#main-content">Skip to library</a>
@@ -834,6 +834,21 @@
                   <p class="sam3d-preview-caption" id="sam3d-preview-caption">
                     Original source image
                   </p>
+                  <div class="sam3d-capture-history" id="sam3d-capture-history" hidden>
+                    <button
+                      class="secondary-button small"
+                      id="sam3d-capture-previous"
+                      type="button"
+                      aria-label="Show newer VaM capture"
+                    >&#x2190;</button>
+                    <span id="sam3d-capture-history-label">Capture history</span>
+                    <button
+                      class="secondary-button small"
+                      id="sam3d-capture-next"
+                      type="button"
+                      aria-label="Show older VaM capture"
+                    >&#x2192;</button>
+                  </div>
                 </div>
               </section>
 

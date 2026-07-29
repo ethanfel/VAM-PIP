@@ -71,6 +71,55 @@ class VAMPipRendererCaptureLifecycleTests(unittest.TestCase):
             self.source,
         )
 
+    def test_capture_write_does_not_request_a_secure_file_move(self) -> None:
+        writer = self.source[
+            self.source.index(
+                "private void SaveVAMPipCaptureAsFileInternal("
+            ) : self.source.index(
+                "private void BeginVAMPipCaptureEncoding("
+            )
+        ]
+
+        self.assertIn(
+            "FileManagerSecure.WriteAllBytes(outputPath, bytes);",
+            writer,
+        )
+        self.assertNotIn("_partial", writer)
+        self.assertNotIn("MoveFile(", writer)
+        self.assertNotIn("DeleteFile(", writer)
+
+    def test_capture_uses_and_prepares_the_dedicated_screenshot_directory(
+        self,
+    ) -> None:
+        self.assertIn(
+            'VAMPIP_SCREENSHOT_DIRECTORY = "Saves/screenshots/VAMPip/"',
+            self.source,
+        )
+        output_path = self.source[
+            self.source.index("private string GetVAMPipOutputPath(") :
+            self.source.index("private void PublishVAMPipEncodeResult(")
+        ]
+        self.assertIn("return VAMPIP_SCREENSHOT_DIRECTORY + filename", output_path)
+
+        capture = self.source[
+            self.source.index("private void TakeVAMPipSingleScreenshot(") :
+            self.source.index("private string GetVAMPipOutputPath(")
+        ]
+        directory_check = capture.index(
+            "FileManagerSecure.DirectoryExists(VAMPIP_SCREENSHOT_DIRECTORY)"
+        )
+        directory_create = capture.index(
+            "FileManagerSecure.CreateDirectory(VAMPIP_SCREENSHOT_DIRECTORY)"
+        )
+        begin_render = capture.index("BeginRender();")
+        self.assertLess(directory_check, directory_create)
+        self.assertLess(directory_create, begin_render)
+
+        self.assertIn(
+            'SCREENSHOT_DIRECTORY = "Saves/VR_Videos_And_Funscripts/"',
+            self.source,
+        )
+
     def test_cslist_entries_are_existing_csharp_sources(self) -> None:
         entries = [
             line.strip()

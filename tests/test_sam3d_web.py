@@ -201,6 +201,10 @@ class Sam3dWebTests(unittest.TestCase):
             document["last_capture"]["request_id"],
             capture_request,
         )
+        self.assertEqual(len(document["captures"]), 1)
+        capture_entry = document["captures"][0]
+        self.assertEqual(capture_entry["request_id"], capture_request)
+        self.assertIn("artifact_url", capture_entry)
         capture_url = document["artifact_urls"]["capture"]
 
         self.connection.request("GET", capture_url)
@@ -209,3 +213,25 @@ class Sam3dWebTests(unittest.TestCase):
         self.assertEqual(response.getheader("Content-Type"), "image/jpeg")
         self.assertEqual(response.getheader("Cache-Control"), "no-store")
         self.assertEqual(response.read(), b"durable-jpeg")
+
+        self.connection.request("GET", capture_entry["artifact_url"])
+        response = self.connection.getresponse()
+        self.assertEqual(response.status, 200)
+        self.assertEqual(response.getheader("Content-Type"), "image/jpeg")
+        self.assertEqual(response.getheader("Cache-Control"), "no-store")
+        self.assertEqual(response.read(), b"durable-jpeg")
+
+        capture_path = capture_entry["artifact_url"].split("?", 1)[0]
+        self.connection.request("GET", capture_path)
+        response = self.connection.getresponse()
+        self.assertEqual(response.status, 401)
+        response.read()
+
+        unknown_url = capture_entry["artifact_url"].replace(
+            capture_request,
+            "a" * 32,
+        )
+        self.connection.request("GET", unknown_url)
+        response = self.connection.getresponse()
+        self.assertEqual(response.status, 404)
+        response.read()

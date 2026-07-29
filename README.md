@@ -23,7 +23,7 @@ leaving managed mode restores that baseline.
 
 ## Current status
 
-Version 0.14.0 is functional but should still be treated as an early release.
+Version 0.14.1 is functional but should still be treated as an early release.
 Package switching is deliberately conservative:
 
 - entering managed mode requires explicit confirmation;
@@ -255,6 +255,12 @@ The **SAM 3D** tab accepts one image and an explicit person bounding box, then
 runs Meta's native SAM 3D Body code in a dedicated Python 3.11 worker. The
 result can be retargeted onto an existing VaM Person, applied with one-step
 undo, and captured through a compatible VRRenderer camera atom.
+
+Pose application and undo run as reversible VaM physics transactions: Person
+collision and controller physics are paused only while authoritative control
+transforms are written, then restored before VaM's simulation-reset settle
+window completes. Captures are kept as a bounded per-job history; existing
+VAM-PIP images in the legacy renderer directory are backfilled automatically.
 
 The recommended model is the official DINOv3-H+ checkpoint, loaded through a
 pinned local DINOv3 source checkout. Native ViT-H and compatible custom native

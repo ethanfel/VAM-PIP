@@ -2887,6 +2887,10 @@ process.stdout.write(JSON.stringify({{
             "sam3d-preview-source",
             "sam3d-preview-overlay",
             "sam3d-preview-result",
+            "sam3d-capture-history",
+            "sam3d-capture-previous",
+            "sam3d-capture-history-label",
+            "sam3d-capture-next",
             "sam3d-person-target",
             "sam3d-camera-target",
             "sam3d-camera-fov",
@@ -2961,6 +2965,114 @@ process.stdout.write(JSON.stringify({{
             self.javascript,
         )
         self.assertIn("SAM3D_MAX_HISTORY", self.javascript)
+
+    def test_sam3d_capture_history_is_bounded_and_navigable(self) -> None:
+        self.assertIn("const SAM3D_MAX_CAPTURES = 50;", self.javascript)
+        self.assertIn("function normalizeSam3dCapture(", self.javascript)
+        self.assertIn(
+            "const captures = asArray(raw.captures || result.captures)",
+            self.javascript,
+        )
+        self.assertIn(".slice(0, SAM3D_MAX_CAPTURES)", self.javascript)
+        self.assertIn("function sam3dSelectedCapture(", self.javascript)
+        self.assertIn(
+            "selectedCapture?.artifactUrl",
+            self.javascript,
+        )
+        self.assertIn(
+            "function renderSam3dCaptureHistory(",
+            self.javascript,
+        )
+        self.assertIn("function moveSam3dCapture(delta)", self.javascript)
+        self.assertIn(
+            "Capture ${index + 1} of ${captures.length}",
+            self.javascript,
+        )
+        self.assertIn(".sam3d-capture-history", self.styles)
+        self.assertIn(".sam3d-capture-history[hidden]", self.styles)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is not installed")
+    def test_sam3d_pending_capture_does_not_alias_an_older_image(self) -> None:
+        selection_start = self.javascript.index(
+            "function sam3dSelectedCapture("
+        )
+        selection_end = self.javascript.index(
+            "function sam3dArtifactCandidate(", selection_start
+        )
+        move_start = self.javascript.index("function moveSam3dCapture(")
+        move_end = self.javascript.index(
+            "function sam3dCaptureBridgeError(", move_start
+        )
+        script = (
+            '"use strict";\n'
+            "const SAM3D_JOB_ID_PATTERN = /^[0-9a-f]{32}$/;\n"
+            "const asArray = (value) => Array.isArray(value) ? value : [];\n"
+            "let renders = 0;\n"
+            "const renderSam3dPreview = () => { renders += 1; };\n"
+            "const app = {\n"
+            '  sam3dSelectedCaptureRequestId: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",\n'
+            '  sam3dPreviewKind: "result",\n'
+            "  sam3dCapturePollAttempts: 7,\n"
+            "};\n"
+            f"{self.javascript[selection_start:selection_end]}\n"
+            f"{self.javascript[move_start:move_end]}\n"
+            """
+const job = {
+  captureRequestId: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  captureRequested: true,
+  captures: [
+    { requestId: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", artifactUrl: "/oldest" },
+    { requestId: "cccccccccccccccccccccccccccccccc", artifactUrl: "/older" },
+  ],
+};
+app.sam3dSelectedJob = job;
+const pendingSelection = sam3dSelectedCapture(job);
+const navigation = sam3dCaptureNavigation(job);
+moveSam3dCapture(1);
+const output = {
+  pendingSelection,
+  navigation: navigation.map((capture) => ({
+    requestId: capture.requestId,
+    pending: capture.pending === true,
+  })),
+  selectedAfterOlder: app.sam3dSelectedCaptureRequestId,
+  pollAttempts: app.sam3dCapturePollAttempts,
+  renders,
+};
+process.stdout.write(JSON.stringify(output));
+"""
+        )
+        completed = subprocess.run(
+            ["node", "-"],
+            input=script,
+            text=True,
+            capture_output=True,
+            check=True,
+            timeout=10,
+        )
+        result = json.loads(completed.stdout)
+
+        self.assertIsNone(result["pendingSelection"])
+        self.assertEqual(
+            result["navigation"],
+            [
+                {
+                    "requestId": "a" * 32,
+                    "pending": True,
+                },
+                {
+                    "requestId": "b" * 32,
+                    "pending": False,
+                },
+                {
+                    "requestId": "c" * 32,
+                    "pending": False,
+                },
+            ],
+        )
+        self.assertEqual(result["selectedAfterOlder"], "b" * 32)
+        self.assertEqual(result["pollAttempts"], 0)
+        self.assertEqual(result["renders"], 1)
 
     def test_sam3d_apply_is_capability_and_revision_guarded(self) -> None:
         apply_start = self.javascript.index(
@@ -3051,8 +3163,8 @@ process.stdout.write(JSON.stringify({{
         self.assertIn("@media (max-width: 500px)", self.styles)
 
     def test_static_assets_use_the_current_cache_version(self) -> None:
-        self.assertIn("/styles.css?v=0.14.0", self.html)
-        self.assertIn("/app.js?v=0.14.0", self.html)
+        self.assertIn("/styles.css?v=0.14.1", self.html)
+        self.assertIn("/app.js?v=0.14.1", self.html)
 
 
 if __name__ == "__main__":

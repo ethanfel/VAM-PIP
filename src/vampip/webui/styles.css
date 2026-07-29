@@ -4420,6 +4420,42 @@ body.resource-detail-open {
   font-size: 10px;
 }
 
+.sam3d-capture-history {
+  display: grid;
+  grid-template-columns: 32px minmax(0, auto) 32px;
+  width: fit-content;
+  max-width: 100%;
+  align-items: center;
+  justify-content: center;
+  gap: 9px;
+  margin: 10px auto 0;
+  padding: 5px;
+  color: var(--text-soft);
+  background: var(--surface-soft);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-size: 11px;
+}
+
+.sam3d-capture-history[hidden] {
+  display: none;
+}
+
+.sam3d-capture-history .secondary-button {
+  width: 32px;
+  min-height: 30px;
+  padding: 0;
+  border-radius: 999px;
+}
+
+.sam3d-capture-history span {
+  min-width: 0;
+  overflow: hidden;
+  text-align: center;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .sam3d-revision {
   max-width: 220px;
   overflow: hidden;
@@ -4697,6 +4733,12 @@ body.resource-detail-open {
 
   .sam3d-preview-stage {
     min-height: 260px;
+  }
+
+  .sam3d-capture-history {
+    grid-template-columns: 32px minmax(0, 1fr) 32px;
+    width: 100%;
+    border-radius: 10px;
   }
 
   .sam3d-action-row > button {

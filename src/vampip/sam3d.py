@@ -29,6 +29,8 @@ SAM3D_MAX_PIXELS = 50_000_000
 SAM3D_MAX_DIMENSION = 32_768
 SAM3D_MANIFEST_LIMIT = 4 * 1024 * 1024
 SAM3D_MODEL_CONFIG_LIMIT = 64 * 1024
+SAM3D_CAPTURE_HISTORY_LIMIT = 50
+SAM3D_CAPTURE_FILE_LIMIT = 256 * 1024 * 1024
 SAM3D_JOB_ID = re.compile(r"^[0-9a-f]{32}$")
 SAM3D_ARTIFACTS = frozenset({"source", "manifest", "overlay"})
 _TERMINAL_STATES = frozenset(
@@ -69,6 +71,95 @@ def validate_job_id(value: object) -> str:
     if not isinstance(value, str) or SAM3D_JOB_ID.fullmatch(value) is None:
         raise ValueError("SAM3D job ID must be a lowercase 32-character token")
     return value
+
+
+def _normalize_capture_record(value: object) -> dict[str, object] | None:
+    if not isinstance(value, dict):
+        return None
+    request_id = value.get("request_id")
+    extension = value.get("extension")
+    content_type = value.get("content_type")
+    captured_at = value.get("captured_at_utc")
+    if (
+        not isinstance(request_id, str)
+        or SAM3D_JOB_ID.fullmatch(request_id) is None
+        or not isinstance(extension, str)
+        or _CAPTURE_CONTENT_TYPES.get(extension) != content_type
+        or not isinstance(captured_at, str)
+        or len(captured_at) > 64
+    ):
+        return None
+    try:
+        timestamp = datetime.fromisoformat(captured_at.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if timestamp.tzinfo is None:
+        return None
+
+    revision = value.get("revision")
+    if revision is not None and (
+        not isinstance(revision, str) or SAM3D_JOB_ID.fullmatch(revision) is None
+    ):
+        return None
+    record: dict[str, object] = {
+        "request_id": request_id,
+        "revision": revision,
+        "target_uid": None,
+        "camera_uid": None,
+        "extension": extension,
+        "content_type": content_type,
+        "captured_at_utc": timestamp.astimezone(timezone.utc).isoformat(),
+    }
+    for key in ("target_uid", "camera_uid"):
+        item = value.get(key)
+        if item is not None:
+            if not isinstance(item, str) or len(item) > 256:
+                return None
+            record[key] = item
+    size_bytes = value.get("size_bytes")
+    if size_bytes is not None:
+        if (
+            isinstance(size_bytes, bool)
+            or not isinstance(size_bytes, int)
+            or size_bytes < 0
+            or size_bytes > SAM3D_CAPTURE_FILE_LIMIT
+        ):
+            return None
+        record["size_bytes"] = size_bytes
+    return record
+
+
+def _capture_record_timestamp(record: dict[str, object]) -> float:
+    return datetime.fromisoformat(
+        str(record["captured_at_utc"]).replace("Z", "+00:00")
+    ).timestamp()
+
+
+def _capture_history_from_result(
+    result: dict[str, object],
+) -> list[dict[str, object]]:
+    by_request: dict[str, dict[str, object]] = {}
+    raw_history = result.get("capture_history")
+    if isinstance(raw_history, list):
+        for value in raw_history:
+            record = _normalize_capture_record(value)
+            if record is not None:
+                by_request[str(record["request_id"])] = record
+    latest = _normalize_capture_record(result.get("last_capture"))
+    if latest is not None:
+        request_id = str(latest["request_id"])
+        by_request[request_id] = {
+            **by_request.get(request_id, {}),
+            **latest,
+        }
+    return sorted(
+        by_request.values(),
+        key=lambda record: (
+            _capture_record_timestamp(record),
+            str(record["request_id"]),
+        ),
+        reverse=True,
+    )[:SAM3D_CAPTURE_HISTORY_LIMIT]
 
 
 def _png_dimensions(data: bytes) -> tuple[int, int] | None:
@@ -815,6 +906,7 @@ class Sam3dJobManager:
             request = {}
         if not isinstance(result, dict):
             result = {}
+        capture_history = _capture_history_from_result(result)
         return {
             "id": str(row["id"]),
             "state": str(row["state"]),
@@ -833,10 +925,76 @@ class Sam3dJobManager:
             "selected_person_index": result.get("selected_person_index", 0),
             "last_vam_action": result.get("last_vam_action"),
             "last_capture": result.get("last_capture"),
+            "captures": capture_history,
             "error": str(row["error"]) if row["error"] is not None else None,
             "revision": str(row["revision"]) if row["revision"] else None,
             "terminal": str(row["state"]) in _TERMINAL_STATES,
         }
+
+    def merge_capture_history(
+        self,
+        job_id: str,
+        captures: list[dict[str, object]],
+    ) -> dict[str, object]:
+        """Merge bounded, validated capture discoveries into one persisted job."""
+
+        job_id = validate_job_id(job_id)
+        normalized: list[dict[str, object]] = []
+        for value in captures:
+            record = _normalize_capture_record(value)
+            if record is None:
+                raise ValueError("SAM3D capture metadata is invalid")
+            normalized.append(record)
+        with connect(self.state_dir) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT result_json FROM sam3d_jobs WHERE id = ?",
+                (job_id,),
+            ).fetchone()
+            if row is None:
+                raise FileNotFoundError(f"SAM3D job not found: {job_id}")
+            try:
+                result = json.loads(row["result_json"])
+            except (TypeError, json.JSONDecodeError):
+                result = {}
+            if not isinstance(result, dict):
+                result = {}
+
+            by_request = {
+                str(record["request_id"]): record
+                for record in _capture_history_from_result(result)
+            }
+            for record in normalized:
+                request_id = str(record["request_id"])
+                existing = by_request.get(request_id, {})
+                merged = {**existing, **record}
+                for key in ("revision", "target_uid", "camera_uid"):
+                    if existing.get(key) is not None:
+                        merged[key] = existing[key]
+                by_request[request_id] = merged
+            history = sorted(
+                by_request.values(),
+                key=lambda record: (
+                    _capture_record_timestamp(record),
+                    str(record["request_id"]),
+                ),
+                reverse=True,
+            )[:SAM3D_CAPTURE_HISTORY_LIMIT]
+            result["capture_history"] = history
+            if history:
+                result["last_capture"] = history[0]
+
+            encoded = json.dumps(
+                result,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+            if encoded != row["result_json"]:
+                connection.execute(
+                    "UPDATE sam3d_jobs SET result_json = ? WHERE id = ?",
+                    (encoded, job_id),
+                )
+        return self.get(job_id)
 
     def get(self, job_id: str) -> dict[str, object]:
         job_id = validate_job_id(job_id)
@@ -1512,7 +1670,7 @@ class Sam3dJobManager:
                     and isinstance(revision, str)
                     and SAM3D_JOB_ID.fullmatch(revision) is not None
                 ):
-                    result["last_capture"] = {
+                    capture = {
                         "request_id": request_id,
                         "revision": revision,
                         "target_uid": action.get("target_uid"),
@@ -1521,6 +1679,20 @@ class Sam3dJobManager:
                         "content_type": content_type,
                         "captured_at_utc": finished_at_utc,
                     }
+                    history = {
+                        str(record["request_id"]): record
+                        for record in _capture_history_from_result(result)
+                    }
+                    history[request_id] = capture
+                    result["capture_history"] = sorted(
+                        history.values(),
+                        key=lambda record: (
+                            _capture_record_timestamp(record),
+                            str(record["request_id"]),
+                        ),
+                        reverse=True,
+                    )[:SAM3D_CAPTURE_HISTORY_LIMIT]
+                    result["last_capture"] = capture
             connection.execute(
                 """
                 UPDATE sam3d_jobs SET result_json = ?, updated_utc = ?

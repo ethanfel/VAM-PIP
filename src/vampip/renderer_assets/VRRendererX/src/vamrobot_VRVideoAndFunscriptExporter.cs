@@ -363,12 +363,14 @@ namespace Eosin
         private int funscriptFormat = 0;
 
         // Narrow machine-facing still capture API used by VAM-PIP. Input values are
-        // sanitized before use and output is always written below SCREENSHOT_DIRECTORY.
+        // sanitized before use and output is always written below the dedicated,
+        // VaM-approved screenshot directory.
         private const string VAMPIP_CAPTURE_STATUS_IDLE = "idle";
         private const string VAMPIP_CAPTURE_STATUS_RENDERING = "rendering";
         private const string VAMPIP_CAPTURE_STATUS_ENCODING = "encoding";
         private const string VAMPIP_CAPTURE_STATUS_COMPLETE = "succeeded";
         private const string VAMPIP_CAPTURE_STATUS_ERROR = "failed";
+        private const string VAMPIP_SCREENSHOT_DIRECTORY = "Saves/screenshots/VAMPip/";
         private const int VAMPIP_REQUEST_ID_MAX_LENGTH = 64;
         private const int VAMPIP_BASENAME_MAX_LENGTH = 96;
         private const int VAMPIP_ERROR_MAX_LENGTH = 512;
@@ -681,6 +683,16 @@ namespace Eosin
                 RejectVAMPipCapture(requestId, "The renderer rejected the capture. Check the VaM message log for details.");
                 return;
             }
+            try
+            {
+                if (!FileManagerSecure.DirectoryExists(VAMPIP_SCREENSHOT_DIRECTORY))
+                    FileManagerSecure.CreateDirectory(VAMPIP_SCREENSHOT_DIRECTORY);
+            }
+            catch (Exception e)
+            {
+                RejectVAMPipCapture(requestId, "Could not prepare the VAM-PIP screenshot directory: " + e.Message);
+                return;
+            }
 
             vampipSavedBaseFilename = baseFilename;
             vampipSavedLastFilename = lastFilename;
@@ -723,7 +735,7 @@ namespace Eosin
 
         private string GetVAMPipOutputPath(int fileFormat, string filename)
         {
-            return SCREENSHOT_DIRECTORY + filename + (fileFormat == FORMAT_JPG ? ".jpg" : ".png");
+            return VAMPIP_SCREENSHOT_DIRECTORY + filename + (fileFormat == FORMAT_JPG ? ".jpg" : ".png");
         }
 
         private void PublishVAMPipEncodeResult(int generation, bool succeeded, string output, string error)
@@ -761,25 +773,8 @@ namespace Eosin
         private void SaveVAMPipCaptureAsFileInternal(int fileFormat, string filename, Texture2D tex, int quality)
         {
             string outputPath = GetVAMPipOutputPath(fileFormat, filename);
-            string temporaryPath = GetVAMPipOutputPath(fileFormat, filename + "_partial");
             byte[] bytes = fileFormat == FORMAT_JPG ? tex.EncodeToJPG(quality) : tex.EncodeToPNG();
-            try
-            {
-                if (FileManagerSecure.FileExists(temporaryPath))
-                {
-                    FileManagerSecure.DeleteFile(temporaryPath);
-                }
-                FileManagerSecure.WriteAllBytes(temporaryPath, bytes);
-                FileManagerSecure.MoveFile(temporaryPath, outputPath, true);
-            }
-            catch
-            {
-                if (FileManagerSecure.FileExists(temporaryPath))
-                {
-                    FileManagerSecure.DeleteFile(temporaryPath);
-                }
-                throw;
-            }
+            FileManagerSecure.WriteAllBytes(outputPath, bytes);
         }
 
         private void BeginVAMPipCaptureEncoding(int fileFormat, string filename, Texture2D tex, int threadIdx)

@@ -91,6 +91,8 @@ from vampip.profiles import (
 from vampip.references import package_dependency_graph, resource_package_roots
 from vampip.runtime import atomic_write_text, derive_vam_root, find_vam_processes
 from vampip.sam3d import (
+    SAM3D_CAPTURE_FILE_LIMIT,
+    SAM3D_CAPTURE_HISTORY_LIMIT,
     Sam3dJobManager,
     Sam3dJobError,
     validate_job_id as validate_sam3d_job_id,
@@ -114,6 +116,15 @@ from vampip.switching import (
     manager_lock,
     rollback_switch,
 )
+
+
+_SAM3D_CAPTURE_FILENAME = re.compile(
+    r"^vampip_([0-9a-f]{32})_([0-9a-f]{32})\.(jpg|png)$"
+)
+_SAM3D_CAPTURE_CONTENT_TYPES = {
+    "jpg": "image/jpeg",
+    "png": "image/png",
+}
 
 
 class LiveActionBusyError(RuntimeError):
@@ -1764,6 +1775,117 @@ class ManagerService:
         )
         return result
 
+    def _sam3d_capture_roots(self) -> tuple[Path, Path]:
+        saves = self.vam_root / "Saves"
+        return (
+            (saves / "screenshots" / "VAMPip").resolve(),
+            (saves / "VR_Videos_And_Funscripts").resolve(),
+        )
+
+    def _sync_sam3d_capture_history(
+        self,
+        job_id: str,
+    ) -> dict[str, object]:
+        job_id = validate_sam3d_job_id(job_id)
+        job = self._sam3d().get(job_id)
+        action = job.get("last_vam_action")
+        incomplete_request = ""
+        raw_captures = job.get("captures")
+        raw_captures = raw_captures if isinstance(raw_captures, list) else []
+        successful_requests = {
+            str(capture["request_id"])
+            for capture in raw_captures
+            if isinstance(capture, dict)
+            and isinstance(capture.get("request_id"), str)
+        }
+        if (
+            isinstance(action, dict)
+            and action.get("action") == "capture"
+            and isinstance(action.get("request_id"), str)
+        ):
+            action_request = str(action["request_id"])
+            if action.get("state") == "succeeded":
+                successful_requests.add(action_request)
+            else:
+                incomplete_request = action_request
+
+        discovered: dict[str, dict[str, object]] = {}
+        pattern = f"vampip_*_{job_id}.*"
+        capture_roots = self._sam3d_capture_roots()
+        current_root = capture_roots[0]
+        for root in capture_roots:
+            try:
+                candidates = root.glob(pattern)
+                for candidate in candidates:
+                    match = _SAM3D_CAPTURE_FILENAME.fullmatch(candidate.name)
+                    if match is None or match.group(2) != job_id:
+                        continue
+                    request_id, _matched_job, extension = match.groups()
+                    if request_id == incomplete_request:
+                        # The prompt-free renderer writes directly to its final
+                        # unique name. Do not index an incomplete or failed
+                        # current request.
+                        continue
+                    if (
+                        root == current_root
+                        and request_id not in successful_requests
+                    ):
+                        # Unlike the legacy renderer, the prompt-free writer
+                        # has no temporary suffix. Only bridge-confirmed writes
+                        # from this directory are safe to expose as captures.
+                        continue
+                    try:
+                        if candidate.is_symlink():
+                            continue
+                        resolved = candidate.resolve(strict=True)
+                        info = resolved.stat()
+                    except (FileNotFoundError, OSError):
+                        continue
+                    if (
+                        resolved.parent != root
+                        or resolved.name != candidate.name
+                        or not resolved.is_file()
+                        or info.st_size < 1
+                        or info.st_size > SAM3D_CAPTURE_FILE_LIMIT
+                    ):
+                        continue
+                    try:
+                        captured_at_utc = datetime.fromtimestamp(
+                            info.st_mtime,
+                            timezone.utc,
+                        ).isoformat()
+                    except (OSError, OverflowError, ValueError):
+                        continue
+                    discovered.setdefault(
+                        request_id,
+                        {
+                            "request_id": request_id,
+                            "revision": None,
+                            "target_uid": None,
+                            "camera_uid": None,
+                            "extension": extension,
+                            "content_type": _SAM3D_CAPTURE_CONTENT_TYPES[extension],
+                            "captured_at_utc": captured_at_utc,
+                            "size_bytes": info.st_size,
+                        },
+                    )
+            except OSError:
+                continue
+        if not discovered:
+            return job
+        recent = sorted(
+            discovered.values(),
+            key=lambda capture: (
+                str(capture["captured_at_utc"]),
+                str(capture["request_id"]),
+            ),
+            reverse=True,
+        )[:SAM3D_CAPTURE_HISTORY_LIMIT]
+        return self._sam3d().merge_capture_history(
+            job_id,
+            recent,
+        )
+
     def sam3d_status(self) -> dict[str, object]:
         return self._sam3d().status()
 
@@ -1777,16 +1899,26 @@ class ManagerService:
         scene = self._scene_snapshot(include_clothing_refs=False)
         items = result.get("items")
         if isinstance(items, list):
-            result["items"] = [
-                self._decorate_sam3d_job(item, scene)
-                for item in items
-                if isinstance(item, dict)
-            ]
+            decorated: list[dict[str, object]] = []
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                document = self._decorate_sam3d_job(item, scene)
+                # Capture history is intentionally a job-detail surface. This
+                # keeps the recent-jobs response bounded independently.
+                document.pop("captures", None)
+                decorated.append(document)
+            result["items"] = decorated
         return result
 
     def sam3d_job(self, job_id: str) -> dict[str, object]:
+        job_id = validate_sam3d_job_id(job_id)
         document = self._sam3d().get(job_id)
         scene = self._scene_snapshot(include_clothing_refs=False)
+        # Reconcile a just-finished bridge request before scanning. Direct final
+        # writes from a still-running capture are deliberately not backfilled.
+        self._decorate_sam3d_job(document, scene)
+        document = self._sync_sam3d_capture_history(job_id)
         return self._decorate_sam3d_job(document, scene)
 
     def create_sam3d_job(
@@ -1820,6 +1952,68 @@ class ManagerService:
             person_index=person_index,
         )
 
+    def _sam3d_capture_path(
+        self,
+        job_id: str,
+        request_id: str,
+        extension: str,
+    ) -> Path:
+        job_id = validate_sam3d_job_id(job_id)
+        request_id = validate_sam3d_job_id(request_id)
+        if extension not in _SAM3D_CAPTURE_CONTENT_TYPES:
+            raise ValueError("SAM3D capture metadata is invalid")
+        filename = f"vampip_{request_id}_{job_id}.{extension}"
+        for root in self._sam3d_capture_roots():
+            path = root / filename
+            try:
+                if path.is_symlink():
+                    continue
+                resolved = path.resolve(strict=True)
+                info = resolved.stat()
+            except (FileNotFoundError, OSError):
+                continue
+            if (
+                resolved.parent == root
+                and resolved.name == filename
+                and resolved.is_file()
+                and 0 < info.st_size <= SAM3D_CAPTURE_FILE_LIMIT
+            ):
+                return resolved
+        raise FileNotFoundError("SAM3D capture is not available yet")
+
+    def sam3d_capture_artifact(
+        self,
+        job_id: str,
+        request_id: str,
+    ) -> tuple[Path, str]:
+        job_id = validate_sam3d_job_id(job_id)
+        request_id = validate_sam3d_job_id(request_id)
+        job = self._sync_sam3d_capture_history(job_id)
+        captures = job.get("captures")
+        if not isinstance(captures, list):
+            raise FileNotFoundError("SAM3D capture is not in this job history")
+        capture = next(
+            (
+                item
+                for item in captures
+                if isinstance(item, dict) and item.get("request_id") == request_id
+            ),
+            None,
+        )
+        if capture is None:
+            raise FileNotFoundError("SAM3D capture is not in this job history")
+        extension = capture.get("extension")
+        content_type = capture.get("content_type")
+        if (
+            not isinstance(extension, str)
+            or _SAM3D_CAPTURE_CONTENT_TYPES.get(extension) != content_type
+        ):
+            raise ValueError("SAM3D capture metadata is invalid")
+        return (
+            self._sam3d_capture_path(job_id, request_id, extension),
+            str(content_type),
+        )
+
     def sam3d_artifact(
         self,
         job_id: str,
@@ -1827,7 +2021,7 @@ class ManagerService:
     ) -> tuple[Path, str]:
         if name == "capture":
             job_id = validate_sam3d_job_id(job_id)
-            job = self._sam3d().get(job_id)
+            job = self._sync_sam3d_capture_history(job_id)
             capture = job.get("last_capture")
             if capture is not None and not isinstance(capture, dict):
                 raise ValueError("SAM3D capture metadata is invalid")
@@ -1839,8 +2033,13 @@ class ManagerService:
                 if (
                     not isinstance(request_id, str)
                     or re.fullmatch(r"[0-9a-f]{32}", request_id) is None
-                    or not isinstance(revision, str)
-                    or re.fullmatch(r"[0-9a-f]{32}", revision) is None
+                    or (
+                        revision is not None
+                        and (
+                            not isinstance(revision, str)
+                            or re.fullmatch(r"[0-9a-f]{32}", revision) is None
+                        )
+                    )
                     or (extension, content_type)
                     not in {
                         ("jpg", "image/jpeg"),
@@ -1887,18 +2086,14 @@ class ManagerService:
                 revision = action["revision"]
                 solution = self._load_sam3d_solution(job_id, revision)
                 extension, content_type = self._sam3d_capture_media(solution)
-            capture_root = (
-                self.vam_root / "Saves" / "VR_Videos_And_Funscripts"
-            ).resolve()
-            filename = f"vampip_{request_id}_{job_id}.{extension}"
-            path = capture_root / filename
-            if (
-                path.resolve().parent != capture_root
-                or not path.is_file()
-                or path.stat().st_size > 256 * 1024 * 1024
-            ):
-                raise FileNotFoundError("SAM3D capture is not available yet")
-            return path, content_type
+            return (
+                self._sam3d_capture_path(
+                    job_id,
+                    str(request_id),
+                    str(extension),
+                ),
+                str(content_type),
+            )
         return self._sam3d().artifact(job_id, name)
 
     @staticmethod

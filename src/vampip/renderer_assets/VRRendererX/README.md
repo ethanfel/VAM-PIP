@@ -10,7 +10,9 @@ This **isn't an official repository for the plugin**, but my (yunidatsu) private
 
 The renderer exposes a narrow registered-storable API for deterministic still
 captures. It does not accept an output directory; every result is written below
-`Saves/VR_Videos_And_Funscripts/`.
+VaM's prompt-free screenshot tree at `Saves/screenshots/VAMPip/`. This dedicated
+location does not change the renderer's ordinary video and screenshot output
+directory.
 
 Inputs:
 

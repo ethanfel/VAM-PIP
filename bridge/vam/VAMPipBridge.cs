@@ -51,6 +51,7 @@ namespace VAMPip
         private const int MaximumTimelineLabelLength = 256;
         private const int MaximumTimelineQualifiedLength = 512;
         private const int Sam3dControllerCount = 19;
+        private const int Sam3dPhysicsResetFrames = 5;
         private const float MaximumSam3dCoordinate = 10.0f;
         private const float Sam3dCaptureWaitSeconds = 300.0f;
         private const float PollIntervalSeconds = 0.5f;
@@ -231,6 +232,7 @@ namespace VAMPip
             public Quaternion Rotation;
             public FreeControllerV3.PositionState PositionState;
             public FreeControllerV3.RotationState RotationState;
+            public bool PhysicsEnabled;
         }
 
         private sealed class Sam3dUndoSnapshot
@@ -240,12 +242,15 @@ namespace VAMPip
             public string TargetUid;
             public string CameraUid;
             public bool CameraCreated;
+            public Atom Person;
+            public bool PersonCollisionEnabled;
             public List<Sam3dControllerUndo> Controllers;
             public FreeControllerV3 CameraController;
             public Vector3 CameraPosition;
             public Quaternion CameraRotation;
             public FreeControllerV3.PositionState CameraPositionState;
             public FreeControllerV3.RotationState CameraRotationState;
+            public bool CameraPhysicsEnabled;
             public MVRScript Renderer;
             public float FlatHorizontalFov;
             public string CameraTarget;
@@ -1843,6 +1848,7 @@ namespace VAMPip
                 return;
             }
             if (request.Command == CommandApplySam3dResult ||
+                request.Command == CommandUndoSam3dResult ||
                 request.Command == CommandCaptureSam3dResult)
             {
                 _requestInProgress = true;
@@ -1851,6 +1857,8 @@ namespace VAMPip
                     StartCoroutine(
                         request.Command == CommandApplySam3dResult
                         ? ExecuteApplySam3dResult(request)
+                        : request.Command == CommandUndoSam3dResult
+                        ? ExecuteUndoSam3dResult(request)
                         : ExecuteCaptureSam3dResult(request));
                 }
                 catch (Exception exception)
@@ -1886,10 +1894,6 @@ namespace VAMPip
             else if (request.Command == CommandControlTimeline)
             {
                 ExecuteTimelineControl(request);
-            }
-            else if (request.Command == CommandUndoSam3dResult)
-            {
-                ExecuteUndoSam3dResult(request);
             }
             else
             {
@@ -3291,6 +3295,8 @@ namespace VAMPip
             snapshot.Revision = solution.Revision;
             snapshot.TargetUid = request.TargetUid;
             snapshot.CameraUid = request.Sam3dCameraUid;
+            snapshot.Person = person;
+            snapshot.PersonCollisionEnabled = person.collisionEnabled;
             snapshot.Controllers = new List<Sam3dControllerUndo>();
             int index;
             for (index = 0;
@@ -3311,10 +3317,18 @@ namespace VAMPip
                 Sam3dControllerUndo saved =
                     new Sam3dControllerUndo();
                 saved.Controller = controller;
-                saved.Position = controller.transform.position;
-                saved.Rotation = controller.transform.rotation;
+                if (controller.control == null)
+                {
+                    throw new Exception(
+                        "Person controller " +
+                        target.Id +
+                        " has no authoritative control transform.");
+                }
+                saved.Position = controller.control.position;
+                saved.Rotation = controller.control.rotation;
                 saved.PositionState = controller.currentPositionState;
                 saved.RotationState = controller.currentRotationState;
+                saved.PhysicsEnabled = controller.physicsEnabled;
                 snapshot.Controllers.Add(saved);
             }
 
@@ -3324,14 +3338,21 @@ namespace VAMPip
                 throw new Exception(
                     "The camera Empty has no main controller.");
             }
+            if (snapshot.CameraController.control == null)
+            {
+                throw new Exception(
+                    "The camera Empty has no main control transform.");
+            }
             snapshot.CameraPosition =
-                snapshot.CameraController.transform.position;
+                snapshot.CameraController.control.position;
             snapshot.CameraRotation =
-                snapshot.CameraController.transform.rotation;
+                snapshot.CameraController.control.rotation;
             snapshot.CameraPositionState =
                 snapshot.CameraController.currentPositionState;
             snapshot.CameraRotationState =
                 snapshot.CameraController.currentRotationState;
+            snapshot.CameraPhysicsEnabled =
+                snapshot.CameraController.physicsEnabled;
             snapshot.Renderer = renderer;
             JSONStorableFloat fov =
                 renderer.GetFloatJSONParam("Flat Horizontal FOV");
@@ -3357,6 +3378,96 @@ namespace VAMPip
             return snapshot;
         }
 
+        private static void BeginSam3dPoseTransaction(
+            Sam3dUndoSnapshot snapshot)
+        {
+            if (snapshot == null ||
+                snapshot.Person == null)
+            {
+                throw new Exception(
+                    "The saved SAM3D Person is no longer available.");
+            }
+            snapshot.Person.collisionEnabled = false;
+            try
+            {
+                int index;
+                for (index = 0;
+                     index < snapshot.Controllers.Count;
+                     index++)
+                {
+                    Sam3dControllerUndo saved =
+                        snapshot.Controllers[index];
+                    if (saved.Controller == null)
+                    {
+                        throw new Exception(
+                            "A saved Person controller is no longer available.");
+                    }
+                    saved.Controller.physicsEnabled = false;
+                }
+                if (snapshot.CameraController == null)
+                {
+                    throw new Exception(
+                        "The saved SAM3D camera is no longer available.");
+                }
+                snapshot.CameraController.physicsEnabled = false;
+            }
+            catch
+            {
+                FinishSam3dPoseTransaction(
+                    snapshot,
+                    "Cancel VAM-PIP SAM3D pose");
+                throw;
+            }
+        }
+
+        private static void FinishSam3dPoseTransaction(
+            Sam3dUndoSnapshot snapshot,
+            string reason)
+        {
+            if (snapshot == null ||
+                snapshot.Person == null)
+            {
+                throw new Exception(
+                    "The saved SAM3D Person is no longer available.");
+            }
+            try
+            {
+                int index;
+                for (index = 0;
+                     index < snapshot.Controllers.Count;
+                     index++)
+                {
+                    Sam3dControllerUndo saved =
+                        snapshot.Controllers[index];
+                    if (saved.Controller != null)
+                    {
+                        saved.Controller.physicsEnabled =
+                            saved.PhysicsEnabled;
+                    }
+                }
+                if (snapshot.CameraController != null)
+                {
+                    snapshot.CameraController.physicsEnabled =
+                        snapshot.CameraPhysicsEnabled;
+                }
+            }
+            finally
+            {
+                try
+                {
+                    snapshot.Person.collisionEnabled =
+                        snapshot.PersonCollisionEnabled;
+                }
+                finally
+                {
+                    SuperController.singleton.ResetSimulation(
+                        Sam3dPhysicsResetFrames,
+                        reason,
+                        true);
+                }
+            }
+        }
+
         private static void RestoreSam3dSnapshot(
             Sam3dUndoSnapshot snapshot)
         {
@@ -3364,6 +3475,22 @@ namespace VAMPip
             {
                 throw new Exception("No SAM3D undo snapshot is available.");
             }
+            BeginSam3dPoseTransaction(snapshot);
+            try
+            {
+                RestoreSam3dSnapshotContents(snapshot);
+            }
+            finally
+            {
+                FinishSam3dPoseTransaction(
+                    snapshot,
+                    "Restore VAM-PIP SAM3D pose");
+            }
+        }
+
+        private static void RestoreSam3dSnapshotContents(
+            Sam3dUndoSnapshot snapshot)
+        {
             int index;
             for (index = 0;
                  index < snapshot.Controllers.Count;
@@ -3371,21 +3498,37 @@ namespace VAMPip
             {
                 Sam3dControllerUndo saved =
                     snapshot.Controllers[index];
-                if (saved.Controller == null)
+                if (saved.Controller == null ||
+                    saved.Controller.control == null)
                 {
                     throw new Exception(
                         "A saved Person controller is no longer available.");
                 }
                 saved.Controller.currentPositionState =
-                    FreeControllerV3.PositionState.On;
-                saved.Controller.currentRotationState =
-                    FreeControllerV3.RotationState.On;
-                saved.Controller.transform.position = saved.Position;
-                saved.Controller.transform.rotation = saved.Rotation;
-                saved.Controller.currentPositionState =
                     saved.PositionState;
                 saved.Controller.currentRotationState =
                     saved.RotationState;
+                saved.Controller.control.position = saved.Position;
+                saved.Controller.control.rotation = saved.Rotation;
+                if (saved.Controller.onPositionChangeHandlers != null)
+                {
+                    saved.Controller.onPositionChangeHandlers(
+                        saved.Controller);
+                }
+                if (saved.Controller.followWhenOff != null)
+                {
+                    saved.Controller.followWhenOff.position =
+                        saved.Position;
+                    saved.Controller.followWhenOff.rotation =
+                        saved.Rotation;
+                }
+                if (saved.PositionState ==
+                        FreeControllerV3.PositionState.Comply ||
+                    saved.RotationState ==
+                        FreeControllerV3.RotationState.Comply)
+                {
+                    saved.Controller.PauseComply();
+                }
             }
             if (snapshot.CameraCreated)
             {
@@ -3408,23 +3551,39 @@ namespace VAMPip
                 return;
             }
             if (snapshot.CameraController == null ||
+                snapshot.CameraController.control == null ||
                 snapshot.Renderer == null)
             {
                 throw new Exception(
                     "The saved SAM3D camera is no longer available.");
             }
             snapshot.CameraController.currentPositionState =
-                FreeControllerV3.PositionState.On;
-            snapshot.CameraController.currentRotationState =
-                FreeControllerV3.RotationState.On;
-            snapshot.CameraController.transform.position =
-                snapshot.CameraPosition;
-            snapshot.CameraController.transform.rotation =
-                snapshot.CameraRotation;
-            snapshot.CameraController.currentPositionState =
                 snapshot.CameraPositionState;
             snapshot.CameraController.currentRotationState =
                 snapshot.CameraRotationState;
+            snapshot.CameraController.control.position =
+                snapshot.CameraPosition;
+            snapshot.CameraController.control.rotation =
+                snapshot.CameraRotation;
+            if (snapshot.CameraController.onPositionChangeHandlers != null)
+            {
+                snapshot.CameraController.onPositionChangeHandlers(
+                    snapshot.CameraController);
+            }
+            if (snapshot.CameraController.followWhenOff != null)
+            {
+                snapshot.CameraController.followWhenOff.position =
+                    snapshot.CameraPosition;
+                snapshot.CameraController.followWhenOff.rotation =
+                    snapshot.CameraRotation;
+            }
+            if (snapshot.CameraPositionState ==
+                    FreeControllerV3.PositionState.Comply ||
+                snapshot.CameraRotationState ==
+                    FreeControllerV3.RotationState.Comply)
+            {
+                snapshot.CameraController.PauseComply();
+            }
             snapshot.Renderer.GetFloatJSONParam(
                 "Flat Horizontal FOV").val =
                 snapshot.FlatHorizontalFov;
@@ -3470,6 +3629,9 @@ namespace VAMPip
                     snapshot.CameraUid);
             if (person == null ||
                 person.type != "Person" ||
+                !object.ReferenceEquals(
+                    person,
+                    snapshot.Person) ||
                 camera == null ||
                 camera.type != "Empty" ||
                 !object.ReferenceEquals(
@@ -3512,7 +3674,7 @@ namespace VAMPip
             Transform anchor =
                 person.mainController == null
                 ? null
-                : person.mainController.transform;
+                : person.mainController.control;
             if (anchor == null)
             {
                 throw new Exception(
@@ -3534,6 +3696,32 @@ namespace VAMPip
             Atom person,
             Atom camera,
             MVRScript renderer,
+            Dictionary<string, FreeControllerV3> controllers,
+            Sam3dUndoSnapshot snapshot)
+        {
+            BeginSam3dPoseTransaction(snapshot);
+            try
+            {
+                ApplySam3dTransformContents(
+                    solution,
+                    person,
+                    camera,
+                    renderer,
+                    controllers);
+            }
+            finally
+            {
+                FinishSam3dPoseTransaction(
+                    snapshot,
+                    "Apply VAM-PIP SAM3D pose");
+            }
+        }
+
+        private static void ApplySam3dTransformContents(
+            Sam3dSolution solution,
+            Atom person,
+            Atom camera,
+            MVRScript renderer,
             Dictionary<string, FreeControllerV3> controllers)
         {
             FreeControllerV3 hip;
@@ -3543,7 +3731,12 @@ namespace VAMPip
                 throw new Exception(
                     "The target Person has no hipControl.");
             }
-            Vector3 anchorPosition = hip.transform.position;
+            if (hip.control == null)
+            {
+                throw new Exception(
+                    "The target Person hipControl has no authoritative control transform.");
+            }
+            Vector3 anchorPosition = hip.control.position;
             Quaternion anchorRotation = Sam3dAnchorRotation(person);
             int index;
             for (index = 0;
@@ -3554,32 +3747,56 @@ namespace VAMPip
                     solution.Controllers[index];
                 FreeControllerV3 controller =
                     controllers[target.Id];
+                if (controller.control == null)
+                {
+                    throw new Exception(
+                        "Person controller " +
+                        target.Id +
+                        " has no authoritative control transform.");
+                }
+                if (controller.currentPositionState ==
+                        FreeControllerV3.PositionState.Comply ||
+                    controller.currentRotationState ==
+                        FreeControllerV3.RotationState.Comply)
+                {
+                    controller.PauseComply();
+                }
                 controller.currentPositionState =
                     FreeControllerV3.PositionState.On;
                 controller.currentRotationState =
                     FreeControllerV3.RotationState.On;
-                controller.transform.position =
+                controller.control.position =
                     anchorPosition +
                     anchorRotation * target.Position;
-                controller.transform.rotation =
+                controller.control.rotation =
                     anchorRotation * target.Rotation;
+                if (controller.onPositionChangeHandlers != null)
+                {
+                    controller.onPositionChangeHandlers(controller);
+                }
             }
 
             FreeControllerV3 cameraController = camera.mainController;
-            if (cameraController == null)
+            if (cameraController == null ||
+                cameraController.control == null)
             {
                 throw new Exception(
-                    "The camera Empty has no main controller.");
+                    "The camera Empty has no main control transform.");
             }
             cameraController.currentPositionState =
                 FreeControllerV3.PositionState.On;
             cameraController.currentRotationState =
                 FreeControllerV3.RotationState.On;
-            cameraController.transform.position =
+            cameraController.control.position =
                 anchorPosition +
                 anchorRotation * solution.Camera.Position;
-            cameraController.transform.rotation =
+            cameraController.control.rotation =
                 anchorRotation * solution.Camera.Rotation;
+            if (cameraController.onPositionChangeHandlers != null)
+            {
+                cameraController.onPositionChangeHandlers(
+                    cameraController);
+            }
             ConfigureSam3dRenderer(renderer, solution.Camera);
         }
 
@@ -3613,6 +3830,18 @@ namespace VAMPip
             _pendingRequest = null;
             _requestInProgress = false;
             FailRequest(request, startedAt, message);
+        }
+
+        private static IEnumerator WaitForSam3dPhysicsSettlement()
+        {
+            int frame;
+            for (frame = 0;
+                 frame < Sam3dPhysicsResetFrames;
+                 frame++)
+            {
+                yield return new WaitForFixedUpdate();
+            }
+            yield return new WaitForEndOfFrame();
         }
 
         private static string RemoveCreatedSam3dCamera(
@@ -3971,7 +4200,8 @@ namespace VAMPip
                     person,
                     cameraResult.Atom,
                     renderer,
-                    controllers);
+                    controllers,
+                    snapshot);
                 _sam3dUndoSnapshot = snapshot;
             }
             catch (Exception exception)
@@ -3997,6 +4227,10 @@ namespace VAMPip
                         request,
                         cameraResult);
             }
+            if (snapshot != null)
+            {
+                yield return WaitForSam3dPhysicsSettlement();
+            }
             if (applyError.Length != 0)
             {
                 FinishSam3dActionError(
@@ -4006,14 +4240,13 @@ namespace VAMPip
                 yield break;
             }
 
-            yield return new WaitForEndOfFrame();
             FinishSam3dActionOk(
                 request,
                 startedAt,
                 "SAM3D pose and VR-and-Funscript camera applied. Undo is available.");
         }
 
-        private void ExecuteUndoSam3dResult(
+        private IEnumerator ExecuteUndoSam3dResult(
             BridgeRequest request)
         {
             string startedAt = UtcNow();
@@ -4024,6 +4257,8 @@ namespace VAMPip
                 "",
                 "vam-sam3d",
                 "Restoring the previous Person and camera state.");
+            bool restoreAttempted = false;
+            string restoreError = "";
             try
             {
                 Sam3dUndoSnapshot snapshot =
@@ -4041,38 +4276,32 @@ namespace VAMPip
                     throw new Exception(
                         "No matching in-memory SAM3D undo snapshot is available.");
                 }
+                restoreAttempted = true;
                 RestoreSam3dSnapshot(snapshot);
                 _sam3dUndoSnapshot = null;
-                RecordSam3dAction(
-                    request,
-                    StateOk,
-                    "Previous Person and camera state restored.");
-                CompleteRequest(request.RequestId);
-                PublishSceneStatus();
-                PublishStatus(
-                    StateOk,
-                    request.RequestId,
-                    startedAt,
-                    UtcNow(),
-                    "vam-sam3d",
-                    "Previous Person and camera state restored.");
-                SuperController.LogMessage(
-                    "[VAM-PIP Bridge] Previous SAM3D state restored.");
             }
             catch (Exception exception)
             {
-                string message =
+                restoreError =
                     "Could not undo the SAM3D result: " +
                     DescribeException(exception);
-                RecordSam3dAction(
-                    request,
-                    StateError,
-                    message);
-                FailRequest(
+            }
+            if (restoreAttempted)
+            {
+                yield return WaitForSam3dPhysicsSettlement();
+            }
+            if (restoreError.Length != 0)
+            {
+                FinishSam3dActionError(
                     request,
                     startedAt,
-                    message);
+                    restoreError);
+                yield break;
             }
+            FinishSam3dActionOk(
+                request,
+                startedAt,
+                "Previous Person and camera state restored.");
         }
 
         private static bool IsSafeSam3dOutput(
@@ -4085,11 +4314,24 @@ namespace VAMPip
                 return false;
             }
             string normalized = path.Replace('\\', '/');
-            const string prefix =
+            const string screenshotPrefix =
+                "Saves/screenshots/VAMPip/";
+            const string legacyPrefix =
                 "Saves/VR_Videos_And_Funscripts/";
-            if (!normalized.StartsWith(
-                    prefix,
-                    StringComparison.Ordinal) ||
+            string prefix = "";
+            if (normalized.StartsWith(
+                    screenshotPrefix,
+                    StringComparison.Ordinal))
+            {
+                prefix = screenshotPrefix;
+            }
+            else if (normalized.StartsWith(
+                         legacyPrefix,
+                         StringComparison.Ordinal))
+            {
+                prefix = legacyPrefix;
+            }
+            if (prefix.Length == 0 ||
                 normalized.IndexOf("..", StringComparison.Ordinal) >= 0)
             {
                 return false;

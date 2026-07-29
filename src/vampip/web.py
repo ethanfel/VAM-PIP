@@ -42,6 +42,9 @@ _SAM3D_ARTIFACT = re.compile(
     r"^/api/sam3d/jobs/([0-9a-f]{32})/artifacts/"
     r"(source|manifest|overlay|capture)$"
 )
+_SAM3D_CAPTURE_ARTIFACT = re.compile(
+    r"^/api/sam3d/jobs/([0-9a-f]{32})/captures/([0-9a-f]{32})$"
+)
 _SAM3D_RUN = re.compile(r"^/api/sam3d/jobs/([0-9a-f]{32})/run$")
 _SAM3D_SELECT = re.compile(r"^/api/sam3d/jobs/([0-9a-f]{32})/select$")
 _SAM3D_APPLY = re.compile(r"^/api/sam3d/jobs/([0-9a-f]{32})/apply$")
@@ -257,6 +260,19 @@ class ManagerRequestHandler(BaseHTTPRequestHandler):
         ):
             artifacts["capture"] = f"{base}/capture?token={token}"
         document["artifact_urls"] = artifacts
+        captures = document.get("captures")
+        if isinstance(captures, list):
+            capture_base = f"/api/sam3d/jobs/{job_id}/captures"
+            for capture in captures:
+                if not isinstance(capture, dict):
+                    continue
+                request_id = capture.get("request_id")
+                if (
+                    not isinstance(request_id, str)
+                    or re.fullmatch(r"[0-9a-f]{32}", request_id) is None
+                ):
+                    continue
+                capture["artifact_url"] = f"{capture_base}/{request_id}?token={token}"
 
     @staticmethod
     def _roots(document: dict[str, Any]) -> list[str]:
@@ -400,6 +416,29 @@ class ManagerRequestHandler(BaseHTTPRequestHandler):
                         if sam3d_artifact.group(2) == "capture"
                         else "private, max-age=86400"
                     ),
+                )
+                return
+            sam3d_capture_artifact = _SAM3D_CAPTURE_ARTIFACT.fullmatch(
+                parsed.path
+            )
+            if sam3d_capture_artifact:
+                unexpected_fields = sorted(set(query) - {"token"})
+                if unexpected_fields:
+                    raise ValueError(
+                        "unsupported SAM3D capture artifact query field(s): "
+                        + ", ".join(unexpected_fields)
+                    )
+                artifact_path, content_type = (
+                    self.server.service.sam3d_capture_artifact(
+                        sam3d_capture_artifact.group(1),
+                        sam3d_capture_artifact.group(2),
+                    )
+                )
+                self._send_path(
+                    HTTPStatus.OK,
+                    artifact_path,
+                    content_type,
+                    cache="no-store",
                 )
                 return
             if parsed.path == "/api/session-plugins":

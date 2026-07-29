@@ -18,6 +18,7 @@ const SAM3D_POLL_MS = 1_000;
 const SAM3D_CAPTURE_POLL_ATTEMPTS = 310;
 const SAM3D_MAX_UPLOAD_BYTES = 32 * 1024 * 1024;
 const SAM3D_MAX_HISTORY = 50;
+const SAM3D_MAX_CAPTURES = 50;
 const SAM3D_DEFAULT_CAMERA_UID = "VAMPip SAM3D Camera";
 const SAM3D_RENDERER_RESOLUTIONS = Object.freeze({
   "36:9": Object.freeze(["1600x400", "3200x800", "6400x1600"]),
@@ -865,6 +866,7 @@ const app = {
   sam3dAppliedJobId: "",
   sam3dCapturePollAttempts: 0,
   sam3dCaptureReadyJobs: new Set(),
+  sam3dSelectedCaptureRequestId: "",
 };
 
 const elements = {};
@@ -980,6 +982,10 @@ function cacheElements() {
     "sam3d-preview-empty-title",
     "sam3d-preview-empty-detail",
     "sam3d-preview-caption",
+    "sam3d-capture-history",
+    "sam3d-capture-previous",
+    "sam3d-capture-history-label",
+    "sam3d-capture-next",
     "sam3d-apply-panel",
     "sam3d-revision",
     "sam3d-person-target",
@@ -1326,6 +1332,12 @@ function bindEvents() {
       setSam3dPreview(previewButton.dataset.sam3dPreview),
     );
   }
+  elements.sam3dCapturePrevious.addEventListener("click", () =>
+    moveSam3dCapture(-1),
+  );
+  elements.sam3dCaptureNext.addEventListener("click", () =>
+    moveSam3dCapture(1),
+  );
   for (const target of [
     elements.sam3dPersonTarget,
     elements.sam3dCameraTarget,
@@ -7303,6 +7315,38 @@ function sam3dJobProgress(raw) {
   return Math.max(0, Math.min(100, progress));
 }
 
+function normalizeSam3dCapture(raw) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const requestId = String(raw.request_id || raw.requestId || "")
+    .trim()
+    .toLowerCase();
+  if (!SAM3D_JOB_ID_PATTERN.test(requestId)) return null;
+  const extension = String(raw.extension || "").trim().toLowerCase();
+  const contentType = String(
+    raw.content_type || raw.contentType || "",
+  ).trim().toLowerCase();
+  if (
+    !(
+      (extension === "jpg" && contentType === "image/jpeg") ||
+      (extension === "png" && contentType === "image/png")
+    )
+  ) {
+    return null;
+  }
+  return {
+    ...raw,
+    requestId,
+    extension,
+    contentType,
+    capturedAt: String(
+      raw.captured_at_utc || raw.capturedAt || "",
+    ).trim(),
+    artifactUrl: String(
+      raw.artifact_url || raw.artifactUrl || raw.url || "",
+    ).trim(),
+  };
+}
+
 function normalizeSam3dJob(raw) {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
   let id;
@@ -7393,6 +7437,15 @@ function normalizeSam3dJob(raw) {
     !Array.isArray(raw.artifact_urls)
       ? raw.artifact_urls
       : {};
+  const captureIds = new Set();
+  const captures = asArray(raw.captures || result.captures)
+    .map(normalizeSam3dCapture)
+    .filter((capture) => {
+      if (!capture || captureIds.has(capture.requestId)) return false;
+      captureIds.add(capture.requestId);
+      return true;
+    })
+    .slice(0, SAM3D_MAX_CAPTURES);
   return {
     ...raw,
     id,
@@ -7466,7 +7519,9 @@ function normalizeSam3dJob(raw) {
     captured:
       raw.captured === true ||
       result.captured === true ||
+      captures.length > 0 ||
       app.sam3dCaptureReadyJobs.has(id),
+    captures,
     artifactUrls,
     rawResult: result,
   };
@@ -7499,6 +7554,17 @@ function mergeSam3dJob(job) {
   }
   if (app.sam3dSelectedJobId === job.id) {
     app.sam3dSelectedJob = job;
+    const selectedCaptureStillExists = job.captures.some(
+      (capture) =>
+        capture.requestId === app.sam3dSelectedCaptureRequestId,
+    );
+    const selectedCaptureIsPending =
+      job.captureRequestId &&
+      job.captureRequestId === app.sam3dSelectedCaptureRequestId;
+    if (!selectedCaptureStillExists && !selectedCaptureIsPending) {
+      app.sam3dSelectedCaptureRequestId =
+        job.captures[0]?.requestId || "";
+    }
     app.sam3dSelectedBodyIndex = Math.min(
       job.selectedBodyIndex,
       Math.max(0, job.bodies.length - 1),
@@ -7555,6 +7621,7 @@ async function loadSam3dWorkspace({ force = false, quiet = false } = {}) {
   ) {
     app.sam3dSelectedJobId = "";
     app.sam3dSelectedJob = null;
+    app.sam3dSelectedCaptureRequestId = "";
   }
   if (!app.sam3dSelectedJobId && app.sam3dJobs.length) {
     app.sam3dSelectedJobId = app.sam3dJobs[0].id;
@@ -7835,6 +7902,8 @@ async function selectSam3dJob(jobId) {
   app.sam3dSelectedJobId = normalizedId;
   app.sam3dSelectedJob =
     app.sam3dJobs.find((job) => job.id === normalizedId) || null;
+  app.sam3dSelectedCaptureRequestId =
+    app.sam3dSelectedJob?.captures[0]?.requestId || "";
   app.sam3dSelectedBodyIndex =
     app.sam3dSelectedJob?.selectedBodyIndex || 0;
   app.sam3dAppliedJobId = app.sam3dSelectedJob?.applied
@@ -8180,6 +8249,7 @@ async function createSam3dJob() {
     app.sam3dSelectedJobId = uploadedJob.id;
     app.sam3dSelectedJob = uploadedJob;
     app.sam3dSelectedBodyIndex = uploadedJob.selectedBodyIndex;
+    app.sam3dSelectedCaptureRequestId = "";
     app.sam3dSourceJobId = uploadedJob.id;
     app.sam3dPreviewKind = "source";
     mergeSam3dJob(uploadedJob);
@@ -8246,8 +8316,47 @@ async function retrySam3dJob() {
   }
 }
 
+function sam3dSelectedCapture(job) {
+  const captures = asArray(job?.captures);
+  if (app.sam3dSelectedCaptureRequestId) {
+    return (
+      captures.find(
+        (capture) =>
+          capture.requestId === app.sam3dSelectedCaptureRequestId,
+      ) || null
+    );
+  }
+  return captures[0] || null;
+}
+
+function sam3dCaptureNavigation(job) {
+  const captures = asArray(job?.captures);
+  const pendingRequestId = String(job?.captureRequestId || "")
+    .trim()
+    .toLowerCase();
+  const hasPendingEntry =
+    SAM3D_JOB_ID_PATTERN.test(pendingRequestId) &&
+    job?.captureRequested === true &&
+    !captures.some(
+      (capture) => capture.requestId === pendingRequestId,
+    );
+  return (
+    hasPendingEntry
+      ? [
+          {
+            requestId: pendingRequestId,
+            capturedAt: "",
+            pending: true,
+          },
+          ...captures,
+        ]
+      : captures
+  );
+}
+
 function sam3dArtifactCandidate(job, kind) {
   const result = job?.rawResult || {};
+  const selectedCapture = sam3dSelectedCapture(job);
   const artifacts =
     job?.artifacts && typeof job.artifacts === "object"
       ? job.artifacts
@@ -8278,6 +8387,7 @@ function sam3dArtifactCandidate(job, kind) {
       result.overlay_url,
     ],
     result: [
+      selectedCapture?.artifactUrl,
       artifactUrls.capture,
       artifacts.result,
       resultArtifacts.result,
@@ -8285,6 +8395,7 @@ function sam3dArtifactCandidate(job, kind) {
       result.result_url,
     ],
     capture: [
+      selectedCapture?.artifactUrl,
       artifactUrls.capture,
       artifacts.capture,
       resultArtifacts.capture,
@@ -8326,6 +8437,13 @@ function sam3dArtifactUrl(job, kind) {
     app.sam3dSourceUrl
   ) {
     return app.sam3dSourceUrl;
+  }
+  if (
+    ["capture", "result"].includes(kind) &&
+    app.sam3dSelectedCaptureRequestId &&
+    !sam3dSelectedCapture(job)
+  ) {
+    return "";
   }
   const supplied = sam3dSafeArtifactUrl(
     sam3dArtifactCandidate(job, kind),
@@ -8425,12 +8543,86 @@ function renderSam3dJob() {
 function setSam3dPreview(kind) {
   if (!["source", "overlay", "result"].includes(kind)) return;
   app.sam3dPreviewKind = kind;
+  if (
+    kind === "result" &&
+    !app.sam3dSelectedCaptureRequestId
+  ) {
+    app.sam3dSelectedCaptureRequestId =
+      app.sam3dSelectedJob?.captures[0]?.requestId || "";
+  }
   if (kind === "result") app.sam3dCapturePollAttempts = 0;
+  renderSam3dPreview();
+}
+
+function sam3dCaptureDisplayDate(capture) {
+  if (!capture?.capturedAt) return "Saved capture";
+  const date = new Date(capture.capturedAt);
+  return Number.isNaN(date.getTime())
+    ? "Saved capture"
+    : date.toLocaleString();
+}
+
+function renderSam3dCaptureHistory(job, kind) {
+  const captures = sam3dCaptureNavigation(job);
+  const visible = kind === "result" && captures.length > 0;
+  elements.sam3dCaptureHistory.hidden = !visible;
+  if (!visible) return;
+
+  let index = captures.findIndex(
+    (capture) =>
+      capture.requestId === app.sam3dSelectedCaptureRequestId,
+  );
+  if (index < 0) {
+    index = 0;
+    app.sam3dSelectedCaptureRequestId = captures[0].requestId;
+  }
+  const capture = captures[index];
+  const actionState = sam3dVamActionState(job);
+  const pendingLabel = ["failed", "stale"].includes(actionState)
+    ? "New capture failed"
+    : actionState === "succeeded"
+      ? "New capture finishing"
+      : "New capture rendering";
+  elements.sam3dCaptureHistoryLabel.textContent =
+    capture.pending === true
+      ? `${pendingLabel} · ${captures.length - 1} saved`
+      : `Capture ${index + 1} of ${captures.length} · ` +
+        sam3dCaptureDisplayDate(capture);
+  elements.sam3dCapturePrevious.disabled =
+    index <= 0 || app.sam3dMutationInFlight;
+  elements.sam3dCaptureNext.disabled =
+    index >= captures.length - 1 || app.sam3dMutationInFlight;
+}
+
+function moveSam3dCapture(delta) {
+  const job = app.sam3dSelectedJob;
+  const captures = sam3dCaptureNavigation(job);
+  if (!captures.length || app.sam3dPreviewKind !== "result") return;
+  const current = Math.max(
+    0,
+    captures.findIndex(
+      (capture) =>
+        capture.requestId === app.sam3dSelectedCaptureRequestId,
+    ),
+  );
+  const next = Math.max(
+    0,
+    Math.min(captures.length - 1, current + delta),
+  );
+  if (next === current) return;
+  app.sam3dSelectedCaptureRequestId = captures[next].requestId;
+  app.sam3dCapturePollAttempts = 0;
   renderSam3dPreview();
 }
 
 function sam3dCaptureBridgeError(job) {
   if (!job?.captureRequestId) return "";
+  if (
+    app.sam3dSelectedCaptureRequestId &&
+    app.sam3dSelectedCaptureRequestId !== job.captureRequestId
+  ) {
+    return "";
+  }
   if (["failed", "stale"].includes(sam3dVamActionState(job))) {
     return (
       job.vamActionMessage ||
@@ -8461,6 +8653,7 @@ function setSam3dPreviewEmpty(title, detail, visible) {
 function renderSam3dPreview() {
   const job = app.sam3dSelectedJob;
   const kind = app.sam3dPreviewKind;
+  renderSam3dCaptureHistory(job, kind);
   for (const buttonElement of [
     elements.sam3dPreviewSource,
     elements.sam3dPreviewOverlay,
@@ -8480,9 +8673,20 @@ function renderSam3dPreview() {
     return;
   }
   const artifactKind = kind === "result" ? "capture" : kind;
+  const selectedCapture =
+    kind === "result" ? sam3dSelectedCapture(job) : null;
+  const hasExplicitCaptureSelection = Boolean(
+    app.sam3dSelectedCaptureRequestId,
+  );
   const captureReady =
-    job.captured || app.sam3dCaptureReadyJobs.has(job.id);
-  const captureRequested = job.captureRequested || captureReady;
+    Boolean(selectedCapture) ||
+    (!hasExplicitCaptureSelection &&
+      (job.captured || app.sam3dCaptureReadyJobs.has(job.id)));
+  const captureRequested =
+    Boolean(selectedCapture) ||
+    (hasExplicitCaptureSelection
+      ? app.sam3dSelectedCaptureRequestId === job.captureRequestId
+      : job.captureRequested || captureReady);
   const captureError =
     kind === "result" ? sam3dCaptureBridgeError(job) : "";
   const captureTimedOut =
@@ -8541,7 +8745,8 @@ function renderSam3dPreview() {
   elements.sam3dPreviewImage.onload = () => {
     app.sam3dCapturePollAttempts = 0;
     if (kind === "result") {
-      const firstReady = !app.sam3dCaptureReadyJobs.has(job.id);
+      const firstReady =
+        !job.captured && !app.sam3dCaptureReadyJobs.has(job.id);
       app.sam3dCaptureReadyJobs.add(job.id);
       job.captured = true;
       elements.sam3dPreviewCaption.textContent =
@@ -9148,6 +9353,7 @@ async function captureSam3dResult() {
     const captureRequestId = String(
       payload.bridge_request || "",
     ).trim();
+    app.sam3dSelectedCaptureRequestId = captureRequestId;
     app.sam3dCaptureReadyJobs.delete(job.id);
     mergeSam3dJob({
       ...job,
