@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 import shutil
 import subprocess
@@ -195,6 +196,164 @@ class Sam3dBodyProportionsWebUITests(unittest.TestCase):
         self.assertIn("No VaM changes were made", self.javascript)
         self.assertIn(".sam3d-proportions-state.is-error", self.styles)
         self.assertIn(".sam3d-proportions-state.is-unavailable", self.styles)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is not installed")
+    def test_confirmed_apply_enables_undo_after_poll(self) -> None:
+        poll_start = self.javascript.index(
+            "async function pollSam3dBodyProportions("
+        )
+        poll_end = self.javascript.index(
+            "function markSam3dBodyProportionsDirty(", poll_start
+        )
+        render_start = self.javascript.index(
+            "function renderSam3dBodyProportions("
+        )
+        render_end = self.javascript.index(
+            "async function analyzeSam3dBodyProportions(", render_start
+        )
+        script = (
+            '"use strict";\n'
+            "const SAM3D_JOB_ID_PATTERN = /^[0-9a-f]{32}$/i;\n"
+            'const SAM3D_BODY_PROPORTION_REGIONS = ["arms", "legs", "torso", "widths"];\n'
+            "const SAM3D_BODY_PROPORTION_ACTIONS = Object.freeze({\n"
+            '  analyze: "analyze", apply: "apply", undo: "undo",\n'
+            "});\n"
+            "const SAM3D_BODY_PROPORTION_POLL_ATTEMPTS = 300;\n"
+            "const jobId = \"a\".repeat(32);\n"
+            "const applyRevision = \"b\".repeat(32);\n"
+            """
+function makeElement() {
+  const classes = new Set(["secondary-button"]);
+  return {
+    hidden: false,
+    disabled: false,
+    value: "",
+    textContent: "",
+    className: "",
+    classList: {
+      add(...values) { for (const value of values) classes.add(value); },
+      remove(...values) { for (const value of values) classes.delete(value); },
+      contains(value) { return classes.has(value); },
+    },
+    replaceChildren() {},
+  };
+}
+const elements = new Proxy({}, {
+  get(target, key) {
+    if (!(key in target)) target[key] = makeElement();
+    return target[key];
+  },
+});
+const app = {
+  view: "sam3d",
+  sam3dHandoffTab: "morph",
+  sam3dSelectedJobId: jobId,
+  sam3dSelectedJob: { id: jobId, revision: jobId },
+  sam3dSelectedBodyIndex: 0,
+  sam3dBodyProportionsJobId: jobId,
+  sam3dBodyProportions: {
+    available: true,
+    ready: true,
+    state: "queued",
+    message: "Waiting for VaM confirmation.",
+    targetUid: "Person",
+    personIndex: 0,
+    analysisRevision: jobId,
+    applyRevision: "",
+    confidence: 90,
+    disagreement: 2,
+    measurements: [],
+    morphs: [],
+    canApply: true,
+    canUndo: false,
+    applied: false,
+    poseApplied: false,
+  },
+  sam3dBodyProportionsError: null,
+  sam3dBodyProportionsInFlight: false,
+  sam3dBodyProportionsDirty: false,
+  sam3dBodyProportionsPendingAction:
+    SAM3D_BODY_PROPORTION_ACTIONS.apply,
+  sam3dBodyProportionPollTimer: null,
+  sam3dBodyProportionPollAttempts: 0,
+  sam3dMutationInFlight: false,
+};
+const toasts = [];
+let rescheduled = 0;
+const sam3dJobSucceeded = () => true;
+const resetSam3dBodyProportions = () => {};
+const sam3dBodyProportionSettings = () => ({
+  targetUid: "Person",
+  personIndex: 0,
+  regions: [...SAM3D_BODY_PROPORTION_REGIONS],
+  strength: 75,
+});
+const sam3dBodyProportionRegionControl = () => makeElement();
+const snapshotBridgeBusy = () => false;
+const sam3dJobIsApplied = () => false;
+const sam3dBodyConfidenceLabel = () => "90% · high";
+const renderSam3dBodyMeasurements = () => {};
+const renderSam3dMorphChanges = () => {};
+const errorMessage = (error) => String(error?.message || error || "");
+const toast = (title) => { toasts.push(title); };
+const startSam3dBodyProportionPolling = () => { rescheduled += 1; };
+async function loadSam3dBodyProportions() {
+  app.sam3dBodyProportions = {
+    ...app.sam3dBodyProportions,
+    state: "applied",
+    message: "VaM confirmed the body morphs.",
+    applyRevision,
+    canUndo: true,
+    applied: true,
+  };
+  return app.sam3dBodyProportions;
+}
+"""
+            f"{self.javascript[poll_start:poll_end]}\n"
+            f"{self.javascript[render_start:render_end]}\n"
+            """
+(async () => {
+  renderSam3dBodyProportions();
+  const queuedUndoDisabled = elements.sam3dProportionsUndo.disabled;
+  await pollSam3dBodyProportions();
+  process.stdout.write(JSON.stringify({
+    queuedUndoDisabled,
+    confirmedUndoDisabled: elements.sam3dProportionsUndo.disabled,
+    confirmedUndoPrimary:
+      elements.sam3dProportionsUndo.classList.contains("primary-button"),
+    confirmedUndoSecondary:
+      elements.sam3dProportionsUndo.classList.contains("secondary-button"),
+    pendingAction: app.sam3dBodyProportionsPendingAction,
+    pollAttempts: app.sam3dBodyProportionPollAttempts,
+    stateTitle: elements.sam3dProportionsStateTitle.textContent,
+    toasts,
+    rescheduled,
+  }));
+})().catch((error) => {
+  process.stderr.write(String(error?.stack || error));
+  process.exitCode = 1;
+});
+"""
+        )
+        completed = subprocess.run(
+            ["node", "-"],
+            input=script,
+            text=True,
+            capture_output=True,
+            check=True,
+            timeout=10,
+        )
+        result = json.loads(completed.stdout)
+
+        self.assertTrue(result["queuedUndoDisabled"])
+        self.assertFalse(result["confirmedUndoDisabled"])
+        self.assertTrue(result["confirmedUndoPrimary"])
+        self.assertFalse(result["confirmedUndoSecondary"])
+        self.assertEqual(result["pendingAction"], "")
+        self.assertEqual(result["pollAttempts"], 0)
+        self.assertEqual(result["stateTitle"], "Body fit applied")
+        self.assertEqual(result["toasts"], ["Body proportions applied"])
+        self.assertEqual(result["rescheduled"], 0)
 
     def test_panel_is_responsive(self) -> None:
         for selector in (

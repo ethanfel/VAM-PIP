@@ -10555,13 +10555,21 @@ function renderSam3dBodyProportions() {
     !analysis.analysisRevision ||
     !targetReady ||
     !regionsReady;
-  elements.sam3dProportionsUndo.disabled =
-    busy ||
-    !analyzed ||
-    !analysis.canUndo ||
-    !analysis.applyRevision ||
-    poseApplied ||
-    !targetReady;
+  const undoReady =
+    !busy &&
+    analyzed &&
+    analysis.canUndo &&
+    analysis.applyRevision &&
+    !poseApplied &&
+    targetReady;
+  elements.sam3dProportionsUndo.disabled = !undoReady;
+  if (undoReady) {
+    elements.sam3dProportionsUndo.classList.remove("secondary-button");
+    elements.sam3dProportionsUndo.classList.add("primary-button");
+  } else {
+    elements.sam3dProportionsUndo.classList.remove("primary-button");
+    elements.sam3dProportionsUndo.classList.add("secondary-button");
+  }
 
   elements.sam3dProportionsNote.classList.remove("is-error");
   let note =
