@@ -1468,10 +1468,6 @@ function bindEvents() {
       markSam3dBodyProportionsDirty,
     );
   }
-  elements.sam3dPreserveHeight.addEventListener(
-    "change",
-    markSam3dBodyProportionsDirty,
-  );
   elements.sam3dFitStrength.addEventListener("input", () => {
     elements.sam3dFitStrengthValue.value =
       `${Math.round(Number(elements.sam3dFitStrength.value) || 0)}%`;

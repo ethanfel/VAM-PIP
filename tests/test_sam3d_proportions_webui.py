@@ -131,6 +131,7 @@ class Sam3dBodyProportionsWebUITests(unittest.TestCase):
         )
         self.assertIn("settings.strength / 100", self.javascript)
         self.assertNotIn("apply_pose", self.javascript)
+        self.assertNotIn("sam3dPreserveHeight", self.javascript)
 
     def test_endpoint_contract_is_centralized_and_revision_bound(self) -> None:
         client_start = self.javascript.index("const Sam3dClient = Object.freeze({")
