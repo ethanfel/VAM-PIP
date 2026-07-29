@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import signal
@@ -926,8 +927,12 @@ class Sam3dBackendTests(unittest.TestCase):
             for axis in range(3)
         ]
         self.assertAlmostEqual(offset[0], 0.0, places=6)
-        self.assertAlmostEqual(offset[1], 1.65 * 0.0655, places=6)
-        self.assertAlmostEqual(offset[2], 1.65 * 0.0045, places=6)
+        # The stable ear midpoint corrects the generic VaM bind pivot toward
+        # this person's inferred skull center.
+        self.assertLess(offset[1], 1.65 * 0.0655)
+        self.assertGreater(offset[1], 0.09)
+        self.assertLess(offset[2], 1.65 * 0.0045)
+        self.assertGreater(offset[2], 0.0)
         for actual, expected in zip(
             head["rotation"],
             [0.0, 0.0, 0.0, 1.0],
@@ -1015,15 +1020,110 @@ class Sam3dBackendTests(unittest.TestCase):
             points[MHR70_NAMES.index(name)] = point
 
         solution = build_vam_solution(manifest, job_id=job_id)
-        head = next(
-            item
-            for item in solution["controllers"]
-            if item["id"] == "headControl"
-        )
+        controllers = {item["id"]: item for item in solution["controllers"]}
+        head = controllers["headControl"]
         self.assertAlmostEqual(head["rotation"][0], 0.0, places=6)
         self.assertAlmostEqual(head["rotation"][1], 0.0, places=6)
         self.assertAlmostEqual(abs(head["rotation"][2]), 1.0, places=6)
         self.assertAlmostEqual(head["rotation"][3], 0.0, places=6)
+        hip_rotation = controllers["hipControl"]["rotation"]
+        neck_rotation = controllers["neckControl"]["rotation"]
+        neck_arc = 2.0 * math.acos(
+            min(
+                1.0,
+                abs(
+                    sum(
+                        a * b
+                        for a, b in zip(hip_rotation, neck_rotation)
+                    )
+                ),
+            )
+        )
+        self.assertAlmostEqual(math.degrees(neck_arc), 40.0, places=5)
+
+    def test_vam_solution_rejects_outlier_ears_for_head_pivot(self) -> None:
+        job_id = "8" * 32
+        manifest = sample_manifest(job_id)
+        points = manifest["people"][0]["keypoints3d"]
+        face = {
+            "nose": [0.0, -0.715, 0.08],
+            "left-eye": [-0.04, -0.735, 0.05],
+            "right-eye": [0.04, -0.735, 0.05],
+            # A 32 cm raw ear span is outside the bounded anatomical window,
+            # even though it still produces a mathematically valid face frame.
+            "left-ear": [-0.16, -0.735, 0.0],
+            "right-ear": [0.16, -0.735, 0.0],
+        }
+        for name, point in face.items():
+            points[MHR70_NAMES.index(name)] = point
+
+        solution = build_vam_solution(manifest, job_id=job_id)
+        controllers = {item["id"]: item for item in solution["controllers"]}
+        neck = controllers["neckControl"]["position"]
+        head = controllers["headControl"]["position"]
+        self.assertAlmostEqual(head[0] - neck[0], 0.0, places=7)
+        self.assertAlmostEqual(
+            head[1] - neck[1],
+            1.65 * 0.0655,
+            places=7,
+        )
+        self.assertAlmostEqual(
+            head[2] - neck[2],
+            1.65 * 0.0045,
+            places=7,
+        )
+
+    def test_vam_solution_uses_observed_skull_and_splits_extreme_head_yaw(
+        self,
+    ) -> None:
+        job_id = "9" * 32
+        manifest = sample_manifest(job_id)
+        points = manifest["people"][0]["keypoints3d"]
+        # Synthetic equivalent of the rear-view capture: the torso remains
+        # camera-aligned while the skull is laterally displaced and the face
+        # turns 90 degrees. Canonical face axes are right=-Z, up=+Y,
+        # forward=+X after conversion to Unity coordinates.
+        face = {
+            "nose": [0.12, -0.78, 0.02],
+            "left-eye": [0.09, -0.76, 0.08],
+            "right-eye": [0.09, -0.76, -0.04],
+            "left-ear": [0.04, -0.76, 0.11],
+            "right-ear": [0.04, -0.76, -0.07],
+        }
+        for name, point in face.items():
+            points[MHR70_NAMES.index(name)] = point
+
+        solution = build_vam_solution(manifest, job_id=job_id)
+        controllers = {item["id"]: item for item in solution["controllers"]}
+        hip_rotation = controllers["hipControl"]["rotation"]
+        neck_rotation = controllers["neckControl"]["rotation"]
+        head_rotation = controllers["headControl"]["rotation"]
+        neck = controllers["neckControl"]["position"]
+        head = controllers["headControl"]["position"]
+
+        # The old fixed bind offset produced only ~7 mm of lateral movement
+        # for this yaw. The observed ear midpoint now moves the skull pivot
+        # materially toward SAM's ~34 mm lateral estimate.
+        self.assertGreater(head[0] - neck[0], 0.025)
+        self.assertGreater(head[1] - neck[1], 0.11)
+        self.assertGreater(head[2] - neck[2], 0.005)
+
+        torso_neck_dot = abs(
+            sum(a * b for a, b in zip(hip_rotation, neck_rotation))
+        )
+        neck_head_dot = abs(
+            sum(a * b for a, b in zip(neck_rotation, head_rotation))
+        )
+        torso_head_dot = abs(
+            sum(a * b for a, b in zip(hip_rotation, head_rotation))
+        )
+        self.assertLess(torso_neck_dot, 0.99)
+        self.assertLess(neck_head_dot, 0.99)
+        self.assertGreater(torso_neck_dot, torso_head_dot)
+        self.assertGreater(neck_head_dot, torso_head_dot)
+        self.assertAlmostEqual(abs(head_rotation[1]), 2**-0.5, places=6)
+        neck_arc = 2.0 * math.acos(min(1.0, torso_neck_dot))
+        self.assertAlmostEqual(math.degrees(neck_arc), 40.0, places=5)
 
     def test_vam_solution_rejects_camera_outside_bridge_bounds(self) -> None:
         job_id = "b" * 32

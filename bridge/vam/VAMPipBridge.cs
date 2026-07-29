@@ -51,6 +51,8 @@ namespace VAMPip
         private const int MaximumTimelineLabelLength = 256;
         private const int MaximumTimelineQualifiedLength = 512;
         private const int Sam3dControllerCount = 19;
+        private const int Sam3dDiagnosticControllerCount = 2;
+        private const int Sam3dDiagnosticSchema = 1;
         private const int Sam3dPhysicsResetFrames = 5;
         private const float MaximumSam3dCoordinate = 10.0f;
         private const float Sam3dCaptureWaitSeconds = 300.0f;
@@ -225,6 +227,31 @@ namespace VAMPip
             public Sam3dCameraSolution Camera;
         }
 
+        private sealed class Sam3dControllerDiagnostic
+        {
+            public string Id;
+            public bool RequestedCaptured;
+            public Vector3 RequestedPosition;
+            public Quaternion RequestedRotation;
+            public bool ActualCaptured;
+            public Vector3 ActualPosition;
+            public Quaternion ActualRotation;
+            public FreeControllerV3.PositionState PositionState;
+            public FreeControllerV3.RotationState RotationState;
+            public bool PhysicsEnabled;
+            public bool Possessed;
+            public bool StartedPossess;
+            public bool IsGrabbing;
+        }
+
+        private sealed class Sam3dApplyDiagnostics
+        {
+            public string RequestId;
+            public string CapturedAtUtc;
+            public string Error;
+            public List<Sam3dControllerDiagnostic> Controllers;
+        }
+
         private sealed class Sam3dControllerUndo
         {
             public FreeControllerV3 Controller;
@@ -259,6 +286,7 @@ namespace VAMPip
             public string RenderMode;
             public string ImageFormat;
             public bool GenerateFunscripts;
+            public Sam3dApplyDiagnostics Diagnostics;
         }
 
         private sealed class Sam3dCameraResult
@@ -3691,13 +3719,109 @@ namespace VAMPip
                 Vector3.up);
         }
 
+        private static Sam3dApplyDiagnostics NewSam3dApplyDiagnostics(
+            BridgeRequest request)
+        {
+            Sam3dApplyDiagnostics diagnostics =
+                new Sam3dApplyDiagnostics();
+            diagnostics.RequestId = request.RequestId ?? "";
+            diagnostics.CapturedAtUtc = "";
+            diagnostics.Error = "";
+            diagnostics.Controllers =
+                new List<Sam3dControllerDiagnostic>();
+            Sam3dControllerDiagnostic head =
+                new Sam3dControllerDiagnostic();
+            head.Id = "headControl";
+            diagnostics.Controllers.Add(head);
+            Sam3dControllerDiagnostic neck =
+                new Sam3dControllerDiagnostic();
+            neck.Id = "neckControl";
+            diagnostics.Controllers.Add(neck);
+            return diagnostics;
+        }
+
+        private static void RecordSam3dRequestedTransform(
+            Sam3dApplyDiagnostics diagnostics,
+            string id,
+            Vector3 position,
+            Quaternion rotation)
+        {
+            if (diagnostics == null ||
+                diagnostics.Controllers == null)
+            {
+                return;
+            }
+            int index;
+            for (index = 0;
+                 index < diagnostics.Controllers.Count &&
+                 index < Sam3dDiagnosticControllerCount;
+                 index++)
+            {
+                Sam3dControllerDiagnostic item =
+                    diagnostics.Controllers[index];
+                if (item != null && item.Id == id)
+                {
+                    item.RequestedPosition = position;
+                    item.RequestedRotation = rotation;
+                    item.RequestedCaptured = true;
+                    return;
+                }
+            }
+        }
+
+        private static void CaptureSam3dSettledDiagnostics(
+            Sam3dApplyDiagnostics diagnostics,
+            Dictionary<string, FreeControllerV3> controllers)
+        {
+            if (diagnostics == null ||
+                diagnostics.Controllers == null ||
+                diagnostics.Controllers.Count !=
+                    Sam3dDiagnosticControllerCount)
+            {
+                throw new Exception(
+                    "The fixed SAM3D controller diagnostic set is incomplete.");
+            }
+            int index;
+            for (index = 0;
+                 index < Sam3dDiagnosticControllerCount;
+                 index++)
+            {
+                Sam3dControllerDiagnostic item =
+                    diagnostics.Controllers[index];
+                FreeControllerV3 controller;
+                if (item == null ||
+                    !item.RequestedCaptured ||
+                    controllers == null ||
+                    !controllers.TryGetValue(item.Id, out controller) ||
+                    controller == null ||
+                    controller.control == null)
+                {
+                    throw new Exception(
+                        "Could not inspect settled " +
+                        (item == null ? "SAM3D controller" : item.Id) +
+                        ".");
+                }
+                item.ActualPosition = controller.control.position;
+                item.ActualRotation = controller.control.rotation;
+                item.PositionState = controller.currentPositionState;
+                item.RotationState = controller.currentRotationState;
+                item.PhysicsEnabled = controller.physicsEnabled;
+                item.Possessed = controller.possessed;
+                item.StartedPossess = controller.startedPossess;
+                item.IsGrabbing = controller.isGrabbing;
+                item.ActualCaptured = true;
+            }
+            diagnostics.CapturedAtUtc = UtcNow();
+        }
+
         private static void ApplySam3dTransforms(
             Sam3dSolution solution,
             Atom person,
             Atom camera,
             MVRScript renderer,
             Dictionary<string, FreeControllerV3> controllers,
-            Sam3dUndoSnapshot snapshot)
+            Sam3dUndoSnapshot snapshot,
+            Sam3dApplyDiagnostics diagnostics)
         {
             BeginSam3dPoseTransaction(snapshot);
             try
@@ -3707,7 +3831,8 @@ namespace VAMPip
                     person,
                     camera,
                     renderer,
-                    controllers);
+                    controllers,
+                    diagnostics);
             }
             finally
             {
@@ -3722,7 +3847,8 @@ namespace VAMPip
             Atom person,
             Atom camera,
             MVRScript renderer,
-            Dictionary<string, FreeControllerV3> controllers)
+            Dictionary<string, FreeControllerV3> controllers,
+            Sam3dApplyDiagnostics diagnostics)
         {
             FreeControllerV3 hip;
             if (!controllers.TryGetValue("hipControl", out hip) ||
@@ -3765,11 +3891,18 @@ namespace VAMPip
                     FreeControllerV3.PositionState.On;
                 controller.currentRotationState =
                     FreeControllerV3.RotationState.On;
-                controller.control.position =
+                Vector3 requestedPosition =
                     anchorPosition +
                     anchorRotation * target.Position;
-                controller.control.rotation =
+                Quaternion requestedRotation =
                     anchorRotation * target.Rotation;
+                RecordSam3dRequestedTransform(
+                    diagnostics,
+                    target.Id,
+                    requestedPosition,
+                    requestedRotation);
+                controller.control.position = requestedPosition;
+                controller.control.rotation = requestedRotation;
                 if (controller.onPositionChangeHandlers != null)
                 {
                     controller.onPositionChangeHandlers(controller);
@@ -3842,6 +3975,119 @@ namespace VAMPip
                 yield return new WaitForFixedUpdate();
             }
             yield return new WaitForEndOfFrame();
+        }
+
+        private static JSONClass Sam3dDiagnosticVector(Vector3 value)
+        {
+            JSONClass result = new JSONClass();
+            result["x"].AsFloat = value.x;
+            result["y"].AsFloat = value.y;
+            result["z"].AsFloat = value.z;
+            return result;
+        }
+
+        private static JSONClass Sam3dDiagnosticQuaternion(
+            Quaternion value)
+        {
+            JSONClass result = new JSONClass();
+            result["x"].AsFloat = value.x;
+            result["y"].AsFloat = value.y;
+            result["z"].AsFloat = value.z;
+            result["w"].AsFloat = value.w;
+            return result;
+        }
+
+        private static JSONClass BuildSam3dSettlementStatus(
+            Sam3dApplyDiagnostics diagnostics)
+        {
+            if (diagnostics == null ||
+                diagnostics.Controllers == null)
+            {
+                return null;
+            }
+            JSONClass result = new JSONClass();
+            result["schema"].AsInt = Sam3dDiagnosticSchema;
+            result["requestId"] = diagnostics.RequestId ?? "";
+            result["capturedAtUtc"] =
+                diagnostics.CapturedAtUtc ?? "";
+            result["settleFrames"].AsInt =
+                Sam3dPhysicsResetFrames;
+            result["controllerLimit"].AsInt =
+                Sam3dDiagnosticControllerCount;
+            result["error"] = diagnostics.Error ?? "";
+            bool available =
+                (diagnostics.Error ?? "").Length == 0 &&
+                diagnostics.Controllers.Count ==
+                    Sam3dDiagnosticControllerCount;
+            JSONArray controllerResults = new JSONArray();
+            int index;
+            for (index = 0;
+                 index < diagnostics.Controllers.Count &&
+                 index < Sam3dDiagnosticControllerCount;
+                 index++)
+            {
+                Sam3dControllerDiagnostic item =
+                    diagnostics.Controllers[index];
+                if (item == null)
+                {
+                    available = false;
+                    continue;
+                }
+                JSONClass controller = new JSONClass();
+                controller["id"] = item.Id ?? "";
+                if (item.RequestedCaptured)
+                {
+                    JSONClass requested = new JSONClass();
+                    requested["position"] =
+                        Sam3dDiagnosticVector(
+                            item.RequestedPosition);
+                    requested["rotation"] =
+                        Sam3dDiagnosticQuaternion(
+                            item.RequestedRotation);
+                    controller["requested"] = requested;
+                }
+                if (item.ActualCaptured)
+                {
+                    JSONClass actual = new JSONClass();
+                    actual["position"] =
+                        Sam3dDiagnosticVector(
+                            item.ActualPosition);
+                    actual["rotation"] =
+                        Sam3dDiagnosticQuaternion(
+                            item.ActualRotation);
+                    controller["actual"] = actual;
+                    controller["positionErrorMeters"].AsFloat =
+                        Vector3.Distance(
+                            item.RequestedPosition,
+                            item.ActualPosition);
+                    controller["rotationErrorDegrees"].AsFloat =
+                        Quaternion.Angle(
+                            item.RequestedRotation,
+                            item.ActualRotation);
+                    JSONClass state = new JSONClass();
+                    state["position"] =
+                        item.PositionState.ToString();
+                    state["rotation"] =
+                        item.RotationState.ToString();
+                    state["physicsEnabled"].AsBool =
+                        item.PhysicsEnabled;
+                    state["possessed"].AsBool =
+                        item.Possessed;
+                    state["startedPossess"].AsBool =
+                        item.StartedPossess;
+                    state["isGrabbing"].AsBool =
+                        item.IsGrabbing;
+                    controller["state"] = state;
+                }
+                else
+                {
+                    available = false;
+                }
+                controllerResults.Add(controller);
+            }
+            result["available"].AsBool = available;
+            result["controllers"] = controllerResults;
+            return result;
         }
 
         private static string RemoveCreatedSam3dCamera(
@@ -4193,6 +4439,8 @@ namespace VAMPip
                         cameraResult.Atom,
                         renderer,
                         controllers);
+                snapshot.Diagnostics =
+                    NewSam3dApplyDiagnostics(request);
                 snapshot.CameraCreated =
                     cameraResult.Created;
                 ApplySam3dTransforms(
@@ -4201,7 +4449,8 @@ namespace VAMPip
                     cameraResult.Atom,
                     renderer,
                     controllers,
-                    snapshot);
+                    snapshot,
+                    snapshot.Diagnostics);
                 _sam3dUndoSnapshot = snapshot;
             }
             catch (Exception exception)
@@ -4238,6 +4487,18 @@ namespace VAMPip
                     startedAt,
                     applyError);
                 yield break;
+            }
+            try
+            {
+                CaptureSam3dSettledDiagnostics(
+                    snapshot.Diagnostics,
+                    Sam3dPersonControllers(person));
+            }
+            catch (Exception exception)
+            {
+                snapshot.Diagnostics.Error =
+                    DescribeException(exception);
+                snapshot.Diagnostics.CapturedAtUtc = UtcNow();
             }
 
             FinishSam3dActionOk(
@@ -8595,6 +8856,13 @@ namespace VAMPip
                         liveSam3dSnapshot.TargetUid ?? "";
                     sam3d["cameraUid"] =
                         liveSam3dSnapshot.CameraUid ?? "";
+                    JSONClass settlement =
+                        BuildSam3dSettlementStatus(
+                            liveSam3dSnapshot.Diagnostics);
+                    if (settlement != null)
+                    {
+                        sam3d["settlement"] = settlement;
+                    }
                 }
                 if (_lastSam3dRequestId.Length != 0)
                 {

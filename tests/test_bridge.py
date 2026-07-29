@@ -1401,6 +1401,64 @@ class BridgeSourceTests(unittest.TestCase):
             "private IEnumerator ExecuteUndoSam3dResult(",
             action_source,
         )
+        self.assertIn(
+            "CaptureSam3dSettledDiagnostics(",
+            action_source,
+        )
+        self.assertLess(
+            action_source.index(
+                "yield return WaitForSam3dPhysicsSettlement();"
+            ),
+            action_source.index(
+                "CaptureSam3dSettledDiagnostics("
+            ),
+        )
+
+    def test_bridge_sam3d_settlement_diagnostics_are_fixed_and_bounded(
+        self,
+    ) -> None:
+        repository = Path(__file__).resolve().parents[1]
+        source = (
+            repository / "src" / "vampip" / "bridge_assets" / "VAMPipBridge.cs"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("Sam3dDiagnosticControllerCount = 2", source)
+        self.assertIn('head.Id = "headControl";', source)
+        self.assertIn('neck.Id = "neckControl";', source)
+        self.assertIn(
+            "snapshot.Diagnostics =\n"
+            "                    NewSam3dApplyDiagnostics(request);",
+            source,
+        )
+        self.assertIn(
+            "liveSam3dSnapshot.Diagnostics",
+            source,
+        )
+        self.assertIn('sam3d["settlement"] = settlement;', source)
+        self.assertIn(
+            "item.ActualPosition = controller.control.position;",
+            source,
+        )
+        self.assertIn(
+            "item.ActualRotation = controller.control.rotation;",
+            source,
+        )
+        for direct_flag in (
+            "controller.physicsEnabled",
+            "controller.possessed",
+            "controller.startedPossess",
+            "controller.isGrabbing",
+        ):
+            self.assertIn(direct_flag, source)
+        self.assertIn(
+            'controller["positionErrorMeters"].AsFloat',
+            source,
+        )
+        self.assertIn(
+            'controller["rotationErrorDegrees"].AsFloat',
+            source,
+        )
+        self.assertNotIn("System.Reflection", source)
 
     def test_sam3d_camera_presets_match_and_use_vendored_renderer(self) -> None:
         repository = Path(__file__).resolve().parents[1]

@@ -871,6 +871,172 @@ def _public_bridge_status(value: object) -> dict[str, object] | None:
     return result
 
 
+def _sam3d_settlement_number(
+    value: object,
+    *,
+    minimum: float,
+    maximum: float,
+) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        number = float(value)
+    except (OverflowError, ValueError):
+        return None
+    if not math.isfinite(number) or not minimum <= number <= maximum:
+        return None
+    return number
+
+
+def _public_sam3d_settlement_vector(
+    value: object,
+    *,
+    quaternion: bool,
+) -> dict[str, float] | None:
+    if not isinstance(value, dict):
+        return None
+    keys = ("x", "y", "z", "w") if quaternion else ("x", "y", "z")
+    limit = 1.0001 if quaternion else 1_000.0
+    result: dict[str, float] = {}
+    for key in keys:
+        number = _sam3d_settlement_number(
+            value.get(key),
+            minimum=-limit,
+            maximum=limit,
+        )
+        if number is None:
+            return None
+        result[key] = number
+    return result
+
+
+def _public_sam3d_settlement_transform(
+    value: object,
+) -> dict[str, object] | None:
+    if not isinstance(value, dict):
+        return None
+    position = _public_sam3d_settlement_vector(
+        value.get("position"),
+        quaternion=False,
+    )
+    rotation = _public_sam3d_settlement_vector(
+        value.get("rotation"),
+        quaternion=True,
+    )
+    if position is None or rotation is None:
+        return None
+    return {"position": position, "rotation": rotation}
+
+
+def _public_sam3d_settlement(value: object) -> dict[str, object] | None:
+    if not isinstance(value, dict):
+        return None
+    schema = _bounded_int(value.get("schema"), minimum=1, maximum=1)
+    if schema is None:
+        return None
+
+    raw_error = value.get("error")
+    result: dict[str, object] = {
+        "schema": schema,
+        "available": False,
+        "error": _equipment_text(raw_error, maximum=1000),
+        "settleFrames": (
+            _bounded_int(value.get("settleFrames"), maximum=120) or 0
+        ),
+        "controllerLimit": (
+            _bounded_int(value.get("controllerLimit"), maximum=2) or 0
+        ),
+        "controllers": [],
+    }
+    request_id = _equipment_text(value.get("requestId"), maximum=32).casefold()
+    if re.fullmatch(r"[0-9a-f]{32}", request_id) is not None:
+        result["requestId"] = request_id
+
+    captured_at = _equipment_text(value.get("capturedAtUtc"), maximum=64)
+    if captured_at:
+        try:
+            timestamp = datetime.fromisoformat(
+                captured_at.replace("Z", "+00:00")
+            )
+        except ValueError:
+            timestamp = None
+        if timestamp is not None and timestamp.tzinfo is not None:
+            result["capturedAtUtc"] = captured_at
+
+    controllers: list[dict[str, object]] = []
+    raw_controllers = value.get("controllers")
+    seen: set[str] = set()
+    if isinstance(raw_controllers, list):
+        for raw_controller in raw_controllers[:2]:
+            if not isinstance(raw_controller, dict):
+                continue
+            controller_id = raw_controller.get("id")
+            if (
+                controller_id not in {"headControl", "neckControl"}
+                or controller_id in seen
+            ):
+                continue
+            seen.add(controller_id)
+            controller: dict[str, object] = {"id": controller_id}
+            for key in ("requested", "actual"):
+                transform = _public_sam3d_settlement_transform(
+                    raw_controller.get(key)
+                )
+                if transform is not None:
+                    controller[key] = transform
+            position_error = _sam3d_settlement_number(
+                raw_controller.get("positionErrorMeters"),
+                minimum=0.0,
+                maximum=1_000.0,
+            )
+            if position_error is not None:
+                controller["positionErrorMeters"] = position_error
+            rotation_error = _sam3d_settlement_number(
+                raw_controller.get("rotationErrorDegrees"),
+                minimum=0.0,
+                maximum=180.0,
+            )
+            if rotation_error is not None:
+                controller["rotationErrorDegrees"] = rotation_error
+
+            raw_state = raw_controller.get("state")
+            if isinstance(raw_state, dict):
+                state: dict[str, object] = {}
+                for key in ("position", "rotation"):
+                    token = _equipment_text(raw_state.get(key), maximum=32)
+                    if re.fullmatch(r"[A-Za-z][A-Za-z0-9]*", token):
+                        state[key] = token
+                for key in (
+                    "physicsEnabled",
+                    "possessed",
+                    "startedPossess",
+                    "isGrabbing",
+                ):
+                    flag = raw_state.get(key)
+                    if isinstance(flag, bool):
+                        state[key] = flag
+                if state:
+                    controller["state"] = state
+            controllers.append(controller)
+    result["controllers"] = controllers
+    result["available"] = bool(
+        value.get("available") is True
+        and raw_error == ""
+        and {item["id"] for item in controllers}
+        == {"headControl", "neckControl"}
+        and all(
+            {
+                "requested",
+                "actual",
+                "positionErrorMeters",
+                "rotationErrorDegrees",
+            }.issubset(item)
+            for item in controllers
+        )
+    )
+    return result
+
+
 def _public_sam3d_status(value: object) -> dict[str, object] | None:
     if not isinstance(value, dict):
         return None
@@ -930,6 +1096,9 @@ def _public_sam3d_status(value: object) -> dict[str, object] | None:
             action["message"] = message
         if action:
             result["lastAction"] = action
+    settlement = _public_sam3d_settlement(value.get("settlement"))
+    if settlement is not None:
+        result["settlement"] = settlement
     return result
 
 
@@ -1632,6 +1801,7 @@ class ManagerService:
         scene: dict[str, object],
     ) -> dict[str, object]:
         result = dict(document)
+        result.pop("settlement", None)
         job_id = str(result.get("id") or "")
         raw_action = result.get("last_vam_action")
         action = dict(raw_action) if isinstance(raw_action, dict) else {}
@@ -1773,6 +1943,10 @@ class ManagerService:
                 "captured": captured,
             }
         )
+        if current_applied:
+            settlement = _public_sam3d_settlement(live.get("settlement"))
+            if settlement is not None:
+                result["settlement"] = settlement
         return result
 
     def _sam3d_capture_roots(self) -> tuple[Path, Path]:

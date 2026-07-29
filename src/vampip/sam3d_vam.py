@@ -167,6 +167,20 @@ Quaternion = tuple[float, float, float, float]
 # the inferred face frame rotates them into the source pose.
 _VAM_HEAD_UP_PER_HEIGHT = 0.0655
 _VAM_HEAD_FORWARD_PER_HEIGHT = 0.0045
+# The midpoint between SAM's ears is a useful observed skull center, but a
+# hidden/far ear can occasionally be inferred poorly. Blend it with the VaM
+# bind estimate and cap its influence rather than trusting or discarding it.
+_VAM_HEAD_LANDMARK_BLEND = 0.8
+_VAM_HEAD_MAX_CORRECTION_PER_HEIGHT = 0.055
+_VAM_EAR_SPAN_MIN_PER_HEIGHT = 0.045
+_VAM_EAR_SPAN_MAX_PER_HEIGHT = 0.14
+_VAM_NECK_TO_SKULL_MIN_PER_HEIGHT = 0.05
+_VAM_NECK_TO_SKULL_MAX_PER_HEIGHT = 0.14
+# VaM controllers use absolute world rotations. Giving the neck part of the
+# torso-to-face arc leaves the head at the exact inferred orientation while
+# avoiding an extreme relative bend at the head/neck joint.
+_VAM_NECK_FACE_ROTATION_SHARE = 0.45
+_VAM_NECK_FACE_ROTATION_LIMIT = math.radians(40.0)
 
 
 def sam3d_solution_revision(document: dict[str, object]) -> str:
@@ -270,6 +284,47 @@ def _quat_multiply(a: Quaternion, b: Quaternion) -> Quaternion:
     )
 
 
+def _quat_slerp(a: Quaternion, b: Quaternion, amount: float) -> Quaternion:
+    """Interpolate normalized quaternions along the shortest finite arc."""
+
+    a = _quat_normalize(a)
+    b = _quat_normalize(b)
+    dot = sum(left * right for left, right in zip(a, b))
+    if dot < 0.0:
+        b = (-b[0], -b[1], -b[2], -b[3])
+        dot = -dot
+    dot = max(-1.0, min(1.0, dot))
+    if dot > 1.0 - 1e-6:
+        return _quat_normalize(
+            tuple(
+                left + amount * (right - left)
+                for left, right in zip(a, b)
+            )
+        )
+
+    angle = math.acos(dot)
+    denominator = math.sin(angle)
+    if abs(denominator) < 1e-8:
+        return a
+    left_weight = math.sin((1.0 - amount) * angle) / denominator
+    right_weight = math.sin(amount * angle) / denominator
+    return _quat_normalize(
+        tuple(
+            left_weight * left + right_weight * right
+            for left, right in zip(a, b)
+        )
+    )
+
+
+def _quat_arc_angle(a: Quaternion, b: Quaternion) -> float:
+    """Return the shortest orientation arc between two quaternions."""
+
+    a = _quat_normalize(a)
+    b = _quat_normalize(b)
+    dot = abs(sum(left * right for left, right in zip(a, b)))
+    return 2.0 * math.acos(max(-1.0, min(1.0, dot)))
+
+
 def _quat_from_to(source: Vector, target: Vector) -> Quaternion:
     source = _unit(source, (0.0, 1.0, 0.0))
     target = _unit(target, source)
@@ -371,6 +426,43 @@ def _head_axes(
     right = _unit(_cross(up, forward), right)
     forward = _unit(_cross(right, up), forward)
     return right, up, forward
+
+
+def _head_pivot(
+    points: dict[str, Vector],
+    head_axes: tuple[Vector, Vector, Vector],
+    height_m: float,
+) -> Vector:
+    """Return a bounded VaM skull pivot informed by SAM's ear landmarks."""
+
+    neck = points["neck"]
+    bind_pivot = _add(
+        neck,
+        _add(
+            _mul(head_axes[1], height_m * _VAM_HEAD_UP_PER_HEIGHT),
+            _mul(head_axes[2], height_m * _VAM_HEAD_FORWARD_PER_HEIGHT),
+        ),
+    )
+    ear_span = _length(_sub(points["right-ear"], points["left-ear"]))
+    observed_skull = _mean(points["left-ear"], points["right-ear"])
+    neck_to_skull = _length(_sub(observed_skull, neck))
+    if (
+        ear_span < height_m * _VAM_EAR_SPAN_MIN_PER_HEIGHT
+        or ear_span > height_m * _VAM_EAR_SPAN_MAX_PER_HEIGHT
+        or neck_to_skull < height_m * _VAM_NECK_TO_SKULL_MIN_PER_HEIGHT
+        or neck_to_skull > height_m * _VAM_NECK_TO_SKULL_MAX_PER_HEIGHT
+    ):
+        return bind_pivot
+
+    correction = _sub(observed_skull, bind_pivot)
+    correction_length = _length(correction)
+    maximum = height_m * _VAM_HEAD_MAX_CORRECTION_PER_HEIGHT
+    if correction_length > maximum:
+        correction = _mul(correction, maximum / correction_length)
+    return _add(
+        bind_pivot,
+        _mul(correction, _VAM_HEAD_LANDMARK_BLEND),
+    )
 
 
 def _cv_to_unity(value: Vector) -> Vector:
@@ -546,13 +638,19 @@ def build_vam_solution(
     torso_rotation = _quat_from_basis(*torso_axes)
     head_axes = _head_axes(points, torso_axes)
     head_rotation = _quat_from_basis(*head_axes)
-    head = _add(
-        points["neck"],
-        _add(
-            _mul(head_axes[1], height_m * _VAM_HEAD_UP_PER_HEIGHT),
-            _mul(head_axes[2], height_m * _VAM_HEAD_FORWARD_PER_HEIGHT),
-        ),
+    torso_to_head_angle = _quat_arc_angle(torso_rotation, head_rotation)
+    neck_share = _VAM_NECK_FACE_ROTATION_SHARE
+    if torso_to_head_angle > 1e-8:
+        neck_share = min(
+            neck_share,
+            _VAM_NECK_FACE_ROTATION_LIMIT / torso_to_head_angle,
+        )
+    neck_rotation = _quat_slerp(
+        torso_rotation,
+        head_rotation,
+        neck_share,
     )
+    head = _head_pivot(points, head_axes, height_m)
 
     controller_values: list[dict[str, object]] = [
         _controller("hipControl", (0.0, 0.0, 0.0), torso_rotation),
@@ -566,7 +664,7 @@ def build_vam_solution(
             _lerp((0.0, 0.0, 0.0), shoulder_mid, 0.72),
             torso_rotation,
         ),
-        _controller("neckControl", points["neck"], torso_rotation),
+        _controller("neckControl", points["neck"], neck_rotation),
         _controller(
             "headControl",
             head,
