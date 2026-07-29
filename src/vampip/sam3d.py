@@ -21,6 +21,7 @@ import uuid
 
 from vampip.database import connect
 from vampip.runtime import atomic_write_text
+from vampip.sam3d_body_signature import validate_body_proportions
 from vampip.sam3d_vam import MHR70_NAMES
 
 
@@ -31,6 +32,7 @@ SAM3D_MANIFEST_LIMIT = 4 * 1024 * 1024
 SAM3D_MODEL_CONFIG_LIMIT = 64 * 1024
 SAM3D_CAPTURE_HISTORY_LIMIT = 50
 SAM3D_CAPTURE_FILE_LIMIT = 256 * 1024 * 1024
+SAM3D_ARRAYS_FILE_LIMIT = 512 * 1024 * 1024
 SAM3D_JOB_ID = re.compile(r"^[0-9a-f]{32}$")
 SAM3D_MODEL_ID = re.compile(r"^[a-z0-9][a-z0-9_.+-]{0,63}$")
 SAM3D_COMPARISON_MODEL_IDS = frozenset(
@@ -53,6 +55,55 @@ _OFFICIAL_MODEL_NAMES = {
     "dinov3_vith16plus": "SAM 3D Body DINOv3-H+",
     "vit_hmr_512_384": "SAM 3D Body ViT-H",
 }
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        while chunk := stream.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _arrays_artifact_metadata(
+    path: Path,
+    *,
+    person_count: int,
+) -> dict[str, object]:
+    if (
+        path.is_symlink()
+        or not path.is_file()
+        or path.stat().st_size < 1
+        or path.stat().st_size > SAM3D_ARRAYS_FILE_LIMIT
+    ):
+        raise RuntimeError("SAM 3D Body arrays are missing or too large")
+    return {
+        "schema": 1,
+        "format": "numpy-npz",
+        "sha256": _file_sha256(path),
+        "bytes": path.stat().st_size,
+        "people": person_count,
+    }
+
+
+def _valid_arrays_artifact_metadata(
+    value: object,
+    *,
+    person_count: int,
+) -> bool:
+    return bool(
+        isinstance(value, dict)
+        and set(value) == {"schema", "format", "sha256", "bytes", "people"}
+        and value.get("schema") == 1
+        and value.get("format") == "numpy-npz"
+        and isinstance(value.get("sha256"), str)
+        and re.fullmatch(r"[0-9a-f]{64}", str(value["sha256"])) is not None
+        and not isinstance(value.get("bytes"), bool)
+        and isinstance(value.get("bytes"), int)
+        and 1 <= int(value["bytes"]) <= SAM3D_ARRAYS_FILE_LIMIT
+        and not isinstance(value.get("people"), bool)
+        and value.get("people") == person_count
+    )
 
 
 class Sam3dConfigurationError(RuntimeError):
@@ -1734,6 +1785,27 @@ class Sam3dJobManager:
             ) from error
         engine = manifest.get("engine")
         artifacts = manifest.get("artifacts")
+        base_artifacts = {
+            "arrays": "arrays.npz",
+            "overlay": "overlay.png",
+        }
+        artifacts_valid = artifacts == base_artifacts
+        arrays_metadata: object = None
+        if (
+            isinstance(artifacts, dict)
+            and set(artifacts) == {
+                "arrays",
+                "arraysMetadata",
+                "overlay",
+            }
+            and artifacts.get("arrays") == "arrays.npz"
+            and artifacts.get("overlay") == "overlay.png"
+        ):
+            arrays_metadata = artifacts.get("arraysMetadata")
+            artifacts_valid = _valid_arrays_artifact_metadata(
+                arrays_metadata,
+                person_count=len(people) if isinstance(people, list) else 0,
+            )
         if (
             not isinstance(source, dict)
             or set(source) != {
@@ -1749,11 +1821,7 @@ class Sam3dJobManager:
             or source.get("bbox") != request_bbox
             or source.get("verticalFov") != request_vertical_fov
             or engine != expected_engine
-            or artifacts
-            != {
-                "arrays": "arrays.npz",
-                "overlay": "overlay.png",
-            }
+            or not artifacts_valid
             or not isinstance(people, list)
             or not 1 <= len(people) <= 16
         ):
@@ -1807,6 +1875,23 @@ class Sam3dJobManager:
                 or float(focal) <= 0.0
             ):
                 raise RuntimeError("SAM 3D Body focal length is invalid")
+            body_proportions = person.get("bodyProportions")
+            if body_proportions is not None:
+                try:
+                    validate_body_proportions(body_proportions)
+                except ValueError as error:
+                    raise RuntimeError(
+                        "SAM 3D Body body proportions are invalid"
+                    ) from error
+        if arrays_metadata is not None:
+            actual_metadata = _arrays_artifact_metadata(
+                paths.arrays,
+                person_count=len(people),
+            )
+            if arrays_metadata != actual_metadata:
+                raise RuntimeError(
+                    "SAM 3D Body arrays do not match their artifact metadata"
+                )
         unsigned_manifest = dict(manifest)
         unsigned_manifest.pop("revision", None)
         canonical = json.dumps(
@@ -1826,8 +1911,21 @@ class Sam3dJobManager:
         manifest, revision = self._read_validated_manifest(job_id, paths)
         if not paths.overlay.is_file() or paths.overlay.stat().st_size > 32 * 1024 * 1024:
             raise RuntimeError("SAM 3D Body overlay is missing or too large")
-        if not paths.arrays.is_file() or paths.arrays.stat().st_size > 512 * 1024 * 1024:
-            raise RuntimeError("SAM 3D Body arrays are missing or too large")
+        artifacts = manifest["artifacts"]
+        if "arraysMetadata" not in artifacts:
+            artifacts["arraysMetadata"] = _arrays_artifact_metadata(
+                paths.arrays,
+                person_count=len(manifest["people"]),
+            )
+            unsigned_manifest = dict(manifest)
+            unsigned_manifest.pop("revision", None)
+            canonical = json.dumps(
+                unsigned_manifest,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            revision = hashlib.sha256(canonical).hexdigest()[:32]
         manifest["revision"] = revision
         atomic_write_text(
             paths.manifest,

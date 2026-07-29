@@ -274,3 +274,127 @@ class Sam3dWebTests(unittest.TestCase):
         response = self.connection.getresponse()
         self.assertEqual(response.status, 404)
         response.read()
+
+    def test_body_proportion_analysis_route_is_target_scoped(self) -> None:
+        job_id = "a" * 32
+        returned = {
+            "job_id": job_id,
+            "analysis_revision": "b" * 32,
+            "measurements": [],
+        }
+        with mock.patch.object(
+            self.service,
+            "sam3d_body_proportions",
+            return_value=returned,
+        ) as analyze:
+            self.connection.request(
+                "GET",
+                (
+                    f"/api/sam3d/jobs/{job_id}/body-proportions"
+                    "?target_uid=Person&person_index=1&fit_strength=0.6"
+                    "&regions=arms,legs"
+                ),
+                headers={"X-VAMPIP-Token": self.token},
+            )
+            response = self.connection.getresponse()
+            self.assertEqual(response.status, 200)
+            self.assertEqual(self.json(response), returned)
+        analyze.assert_called_once_with(
+            job_id,
+            target_uid="Person",
+            person_index=1,
+            strength=0.6,
+            regions=["arms", "legs"],
+        )
+
+    def test_body_proportion_apply_route_keeps_pose_as_a_second_step(self) -> None:
+        job_id = "c" * 32
+        analysis_revision = "d" * 32
+        job_revision = "e" * 32
+        analysis = {
+            "job_id": job_id,
+            "job_revision": job_revision,
+            "analysis_revision": analysis_revision,
+        }
+        applied = {
+            "job_id": job_id,
+            "bridge_request": "f" * 32,
+            "action_state": "queued",
+        }
+        body = json.dumps(
+            {
+                "action": "apply",
+                "expected_job_revision": job_revision,
+                "expected_analysis_revision": analysis_revision,
+                "target_uid": "Person",
+                "person_index": 0,
+                "regions": ["legs", "torso"],
+                "fit_strength": 0.5,
+            }
+        ).encode("utf-8")
+        with (
+            mock.patch.object(
+                self.service,
+                "sam3d_body_proportions",
+                return_value=analysis,
+            ),
+            mock.patch.object(
+                self.service,
+                "apply_sam3d_body_proportions",
+                return_value=applied,
+            ) as apply,
+        ):
+            self.connection.request(
+                "POST",
+                f"/api/sam3d/jobs/{job_id}/body-proportions",
+                body=body,
+                headers={
+                    "X-VAMPIP-Token": self.token,
+                    "Content-Type": "application/json",
+                    "Content-Length": str(len(body)),
+                },
+            )
+            response = self.connection.getresponse()
+            self.assertEqual(response.status, 202)
+            self.assertEqual(self.json(response), applied)
+        apply.assert_called_once_with(
+            job_id,
+            expected_job_revision=job_revision,
+            expected_analysis_revision=analysis_revision,
+            target_uid="Person",
+            person_index=0,
+            strength=0.5,
+            regions=["legs", "torso"],
+        )
+
+    def test_body_proportion_apply_rejects_combined_pose_or_height_claims(
+        self,
+    ) -> None:
+        job_id = "c" * 32
+        for unsupported in ("apply_pose", "preserve_height"):
+            body = json.dumps(
+                {
+                    "action": "apply",
+                    "expected_job_revision": "d" * 32,
+                    "expected_analysis_revision": "e" * 32,
+                    "target_uid": "Person",
+                    unsupported: True,
+                }
+            ).encode("utf-8")
+            with self.subTest(unsupported=unsupported):
+                self.connection.request(
+                    "POST",
+                    f"/api/sam3d/jobs/{job_id}/body-proportions",
+                    body=body,
+                    headers={
+                        "X-VAMPIP-Token": self.token,
+                        "Content-Type": "application/json",
+                        "Content-Length": str(len(body)),
+                    },
+                )
+                response = self.connection.getresponse()
+                self.assertEqual(response.status, 400)
+                self.assertIn(
+                    unsupported,
+                    json.dumps(self.json(response)),
+                )

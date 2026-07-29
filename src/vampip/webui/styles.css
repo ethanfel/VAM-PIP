@@ -4673,6 +4673,587 @@ body.resource-detail-open {
   white-space: nowrap;
 }
 
+.sam3d-handoff {
+  display: grid;
+  gap: 10px;
+}
+
+.sam3d-handoff[hidden] {
+  display: none;
+}
+
+.sam3d-handoff-heading {
+  display: flex;
+  min-width: 0;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 4px 2px 0;
+}
+
+.sam3d-handoff-heading h3 {
+  margin: 3px 0 0;
+  font-size: 15px;
+}
+
+.sam3d-handoff-tabs {
+  display: inline-grid;
+  grid-template-columns: repeat(2, minmax(130px, 1fr));
+  gap: 3px;
+  padding: 3px;
+  background: var(--surface-soft);
+  border: 1px solid var(--border-soft);
+  border-radius: 11px;
+}
+
+.sam3d-handoff-tabs button {
+  display: inline-flex;
+  min-height: 36px;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  padding: 0 12px;
+  color: var(--text-faint);
+  background: transparent;
+  border: 0;
+  border-radius: 8px;
+  font-size: 10px;
+  font-weight: 750;
+}
+
+.sam3d-handoff-tabs button:hover {
+  color: var(--text-soft);
+  background: var(--surface-hover);
+}
+
+.sam3d-handoff-tabs button.active {
+  color: var(--text);
+  background: var(--surface-raised);
+  box-shadow: 0 2px 9px rgba(0, 0, 0, 0.2);
+}
+
+.sam3d-handoff-tabs button span {
+  display: inline-grid;
+  width: 18px;
+  height: 18px;
+  place-items: center;
+  color: var(--text-faint);
+  background: var(--surface-soft);
+  border-radius: 50%;
+  font-size: 8px;
+}
+
+.sam3d-handoff-tabs button.active span {
+  color: var(--blue);
+  background: var(--blue-wash);
+}
+
+.sam3d-handoff-target {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  padding: 11px 13px;
+  background: var(--surface);
+  border: 1px solid var(--border-soft);
+  border-radius: 11px;
+}
+
+.sam3d-handoff-target .sam3d-proportions-target {
+  grid-template-columns: auto minmax(180px, 300px);
+  align-items: center;
+  width: 100%;
+}
+
+.sam3d-handoff-target .sam3d-proportions-target > small {
+  grid-column: 2;
+}
+
+.sam3d-proportions-layout {
+  display: grid;
+  grid-template-columns: minmax(250px, 0.38fr) minmax(0, 1fr);
+  border-top: 1px solid var(--border-soft);
+}
+
+.sam3d-proportions-controls {
+  display: grid;
+  align-content: start;
+  gap: 16px;
+  padding: 18px;
+  background: var(--surface-soft);
+  border-right: 1px solid var(--border-soft);
+}
+
+.sam3d-profile-panel {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  background:
+    linear-gradient(145deg, rgba(128, 191, 255, 0.07), transparent 58%),
+    var(--surface);
+  border: 1px solid rgba(128, 191, 255, 0.2);
+  border-radius: 11px;
+}
+
+.sam3d-profile-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.sam3d-profile-heading span,
+.sam3d-profile-heading strong {
+  display: block;
+}
+
+.sam3d-profile-heading span {
+  color: var(--blue);
+  font-size: 8px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.sam3d-profile-heading strong {
+  margin-top: 2px;
+  color: var(--text);
+  font-size: 12px;
+}
+
+.sam3d-profile-panel > label {
+  display: grid;
+  gap: 5px;
+  color: var(--text-soft);
+  font-size: 9px;
+  font-weight: 700;
+}
+
+.sam3d-profile-panel select {
+  width: 100%;
+  min-width: 0;
+  min-height: 36px;
+  padding: 0 31px 0 9px;
+  color: var(--text);
+  background: var(--surface-raised);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font: inherit;
+}
+
+.sam3d-profile-panel select:focus {
+  border-color: var(--blue);
+  outline: 2px solid var(--blue-wash);
+}
+
+.sam3d-profile-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.sam3d-profile-panel > p {
+  margin: 0;
+  color: var(--text-faint);
+  font-size: 8px;
+  line-height: 1.5;
+}
+
+.sam3d-proportions-target,
+.sam3d-fit-strength {
+  display: grid;
+  gap: 8px;
+  color: var(--text-soft);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.sam3d-proportions-target select {
+  width: 100%;
+  min-width: 0;
+  min-height: 40px;
+  padding: 0 34px 0 11px;
+  color: var(--text);
+  background: var(--surface-raised);
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  font: inherit;
+}
+
+.sam3d-proportions-target select:focus {
+  border-color: var(--blue);
+  outline: 2px solid var(--blue-wash);
+}
+
+.sam3d-proportions-target small,
+.sam3d-fit-strength small {
+  color: var(--text-faint);
+  font-size: 10px;
+  font-weight: 500;
+  line-height: 1.45;
+}
+
+.sam3d-region-fieldset {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.sam3d-region-fieldset legend {
+  margin-bottom: 8px;
+  color: var(--text-soft);
+  font-size: 11px;
+  font-weight: 750;
+}
+
+.sam3d-region-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 7px;
+}
+
+.sam3d-region-grid > label {
+  display: flex;
+  min-width: 0;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 10px;
+  color: var(--text-soft);
+  background: var(--surface);
+  border: 1px solid var(--border-soft);
+  border-radius: 9px;
+  cursor: pointer;
+}
+
+.sam3d-region-grid > label:has(input:checked) {
+  color: var(--text);
+  background: var(--blue-wash);
+  border-color: rgba(128, 191, 255, 0.28);
+}
+
+.sam3d-region-grid input {
+  flex: 0 0 auto;
+  margin: 2px 0 0;
+  accent-color: var(--blue);
+}
+
+.sam3d-region-grid strong,
+.sam3d-region-grid small {
+  display: block;
+}
+
+.sam3d-region-grid strong {
+  font-size: 10px;
+}
+
+.sam3d-region-grid small {
+  margin-top: 3px;
+  color: var(--text-faint);
+  font-size: 8px;
+  font-weight: 500;
+  line-height: 1.35;
+}
+
+.sam3d-scale-note {
+  margin: 0;
+  padding: 12px;
+  background: var(--surface);
+  border: 1px solid var(--border-soft);
+  border-radius: 9px;
+}
+
+.sam3d-scale-note strong,
+.sam3d-scale-note small {
+  display: block;
+}
+
+.sam3d-scale-note small {
+  margin-top: 4px;
+  color: var(--text-faint);
+  font-size: 9px;
+  line-height: 1.45;
+}
+
+.sam3d-fit-strength > span {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.sam3d-fit-strength output {
+  color: var(--blue);
+  font-variant-numeric: tabular-nums;
+}
+
+.sam3d-fit-strength input {
+  width: 100%;
+  accent-color: var(--blue);
+}
+
+.sam3d-proportions-report {
+  min-width: 0;
+  padding: 18px;
+}
+
+.sam3d-proportions-state {
+  display: grid;
+  grid-template-columns: 10px minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+  min-height: 60px;
+  padding: 12px 14px;
+  color: var(--text-soft);
+  background: var(--surface-raised);
+  border: 1px solid var(--border-soft);
+  border-radius: 10px;
+}
+
+.sam3d-proportions-state .sam3d-progress-dot {
+  background: var(--text-faint);
+}
+
+.sam3d-proportions-state.is-running .sam3d-progress-dot {
+  background: var(--blue);
+  animation: sam3d-pulse 1.5s ease-in-out infinite;
+}
+
+.sam3d-proportions-state.is-ready .sam3d-progress-dot {
+  background: var(--accent);
+}
+
+.sam3d-proportions-state.is-error .sam3d-progress-dot {
+  background: var(--danger);
+}
+
+.sam3d-proportions-state.is-unavailable .sam3d-progress-dot {
+  background: var(--warning);
+}
+
+.sam3d-proportions-state strong {
+  display: block;
+  color: var(--text);
+  font-size: 12px;
+}
+
+.sam3d-proportions-state p {
+  margin: 4px 0 0;
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.sam3d-proportions-summary {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 9px;
+  margin-top: 12px;
+}
+
+.sam3d-proportions-summary > div {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 11px 12px;
+  background: var(--surface-soft);
+  border: 1px solid var(--border-soft);
+  border-radius: 9px;
+}
+
+.sam3d-proportions-summary span {
+  color: var(--text-faint);
+  font-size: 9px;
+}
+
+.sam3d-proportions-summary strong {
+  color: var(--text);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.sam3d-proportions-section {
+  margin-top: 15px;
+}
+
+.sam3d-proportions-section-heading {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.sam3d-proportions-section-heading strong,
+.sam3d-proportions-section-heading span {
+  display: block;
+}
+
+.sam3d-proportions-section-heading strong {
+  color: var(--text);
+  font-size: 11px;
+}
+
+.sam3d-proportions-section-heading span {
+  margin-top: 3px;
+  color: var(--text-faint);
+  font-size: 9px;
+}
+
+.sam3d-measurement-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: 8px;
+}
+
+.sam3d-measurement-item {
+  min-width: 0;
+  padding: 11px;
+  background: var(--surface-soft);
+  border: 1px solid var(--border-soft);
+  border-radius: 9px;
+}
+
+.sam3d-measurement-heading,
+.sam3d-measurement-values {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.sam3d-measurement-heading strong {
+  overflow: hidden;
+  color: var(--text);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sam3d-measurement-heading span {
+  flex: 0 0 auto;
+  padding: 3px 5px;
+  color: var(--text-faint);
+  background: var(--surface-raised);
+  border-radius: 999px;
+  font-size: 7px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.sam3d-measurement-values {
+  margin-top: 9px;
+  font-variant-numeric: tabular-nums;
+}
+
+.sam3d-measurement-values strong {
+  font-size: 13px;
+}
+
+.sam3d-measurement-values span {
+  padding: 3px 6px;
+  color: var(--text-soft);
+  background: var(--surface-raised);
+  border-radius: 999px;
+  font-size: 8px;
+  font-weight: 750;
+}
+
+.sam3d-measurement-values span.is-positive {
+  color: var(--accent);
+}
+
+.sam3d-measurement-values span.is-negative {
+  color: var(--warning);
+}
+
+.sam3d-measurement-item > small {
+  display: block;
+  margin-top: 8px;
+  color: var(--text-faint);
+  font-size: 8px;
+}
+
+.sam3d-morph-change-list {
+  display: grid;
+  overflow: hidden;
+  border: 1px solid var(--border-soft);
+  border-radius: 9px;
+}
+
+.sam3d-morph-change {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 10px 11px;
+  background: var(--surface-soft);
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.sam3d-morph-change:last-child {
+  border-bottom: 0;
+}
+
+.sam3d-morph-change.is-unavailable {
+  opacity: 0.55;
+}
+
+.sam3d-morph-change > div:first-child {
+  min-width: 0;
+}
+
+.sam3d-morph-change > div:first-child strong,
+.sam3d-morph-change > div:first-child small {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sam3d-morph-change > div:first-child strong {
+  color: var(--text);
+  font-size: 10px;
+}
+
+.sam3d-morph-change > div:first-child small {
+  margin-top: 3px;
+  color: var(--text-faint);
+  font-size: 8px;
+}
+
+.sam3d-morph-values {
+  flex: 0 0 auto;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.sam3d-morph-values span,
+.sam3d-morph-values strong {
+  display: block;
+}
+
+.sam3d-morph-values span {
+  color: var(--text-soft);
+  font-size: 9px;
+}
+
+.sam3d-morph-values strong {
+  margin-top: 3px;
+  color: var(--blue);
+  font-size: 10px;
+}
+
+.sam3d-proportions-note {
+  margin: 15px 0 0;
+}
+
+.sam3d-proportions-report > .sam3d-action-row {
+  padding: 12px 0 0;
+}
+
 .sam3d-target-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(155px, 1fr));
@@ -4867,6 +5448,15 @@ body.resource-detail-open {
     grid-template-columns: repeat(2, minmax(0, 1fr));
     row-gap: 22px;
   }
+
+  .sam3d-proportions-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .sam3d-proportions-controls {
+    border-right: 0;
+    border-bottom: 1px solid var(--border-soft);
+  }
 }
 
 @media (max-width: 760px) {
@@ -4877,6 +5467,23 @@ body.resource-detail-open {
 
   .sam3d-heading {
     flex-direction: column;
+  }
+
+  .sam3d-handoff-heading {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .sam3d-handoff-tabs {
+    width: 100%;
+  }
+
+  .sam3d-handoff-target .sam3d-proportions-target {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .sam3d-handoff-target .sam3d-proportions-target > small {
+    grid-column: 1;
   }
 
   .sam3d-title-row {
@@ -4903,6 +5510,10 @@ body.resource-detail-open {
     row-gap: 16px;
   }
 
+  .sam3d-region-grid,
+  .sam3d-proportions-summary {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 
 @media (max-width: 500px) {
@@ -4974,6 +5585,28 @@ body.resource-detail-open {
 
   .sam3d-action-row > button {
     width: 100%;
+  }
+
+  .sam3d-proportions-report,
+  .sam3d-proportions-controls {
+    padding: 13px;
+  }
+
+  .sam3d-handoff-tabs {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .sam3d-profile-actions > button {
+    flex: 1 1 auto;
+  }
+
+  .sam3d-morph-change {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .sam3d-morph-values {
+    text-align: left;
   }
 }
 

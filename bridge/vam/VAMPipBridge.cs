@@ -40,6 +40,8 @@ namespace VAMPip
         private const int MaximumClothingRefsGlobally = 1024;
         private const int MaximumHairItemsPerPerson = 128;
         private const int MaximumHairItemsGlobally = 512;
+        private const int MaximumBodyProportionMorphs = 16;
+        private const int MaximumBodyProportionChanges = 8;
         private const int MaximumRosterDisplayNameLength = 256;
         private const int MaximumRosterTagLength = 100;
         private const int MaximumRosterTagsPerItem = 32;
@@ -61,6 +63,8 @@ namespace VAMPip
         private const float TimelinePublishIntervalSeconds = 1.0f;
         private const float MinimumRescanIntervalSeconds = 5.0f;
         private const float MaximumOperationWaitSeconds = 120.0f;
+        private const float MaximumBodyProportionMagnitude = 1.0f;
+        private const float MaximumBodyProportionDelta = 0.25f;
 
         private const string CommandRescan = "rescan";
         private const string CommandApplyPersonPreset = "applyPersonPreset";
@@ -76,6 +80,10 @@ namespace VAMPip
             "setPersonClothingResource";
         private const string CommandSetPersonHairItem =
             "setPersonHairItem";
+        private const string CommandSetPersonBodyProportions =
+            "setPersonBodyProportions";
+        private const string CommandUndoPersonBodyProportions =
+            "undoPersonBodyProportions";
         private const string CommandSelectPerson = "selectPerson";
         private const string CommandSelectAtom = "selectAtom";
         private const string CommandLoadScene = "loadScene";
@@ -187,6 +195,8 @@ namespace VAMPip
             public string ClothingRevision;
             public string HairRevision;
             public string HairActionToken;
+            public string BodyProportionRevision;
+            public List<BodyProportionChange> BodyProportionChanges;
             public string TimelineId;
             public string TimelineRevision;
             public string TimelineOperation;
@@ -199,6 +209,12 @@ namespace VAMPip
             public string Sam3dSolutionSha256;
             public string Sam3dCameraUid;
             public bool Sam3dCreateCamera;
+        }
+
+        private sealed class BodyProportionChange
+        {
+            public string Key;
+            public float Value;
         }
 
         private sealed class Sam3dControllerSolution
@@ -379,6 +395,42 @@ namespace VAMPip
             public int PublishedCount;
         }
 
+        private sealed class BodyProportionMorphEntry
+        {
+            public DAZMorph Morph;
+            public DAZMorphBank Bank;
+            public string Key;
+            public string Name;
+            public string Region;
+            public float Value;
+            public float Minimum;
+            public float Maximum;
+        }
+
+        private sealed class PersonBodyProportionSnapshot
+        {
+            public Atom Atom;
+            public DAZCharacterSelector Geometry;
+            public string GenerationKey;
+            public string Revision;
+            public List<BodyProportionMorphEntry> Entries;
+        }
+
+        private sealed class BodyProportionUndoValue
+        {
+            public DAZMorph Morph;
+            public float Value;
+        }
+
+        private sealed class PersonBodyProportionUndo
+        {
+            public Atom Atom;
+            public DAZCharacterSelector Geometry;
+            public string TargetUid;
+            public string PostApplyGenerationKey;
+            public List<BodyProportionUndoValue> Values;
+        }
+
         private sealed class TimelineItemSnapshot
         {
             public string Token;
@@ -453,6 +505,12 @@ namespace VAMPip
         private readonly Dictionary<string, PersonHairSnapshot>
             _personHairSnapshots =
                 new Dictionary<string, PersonHairSnapshot>();
+        private readonly Dictionary<string, PersonBodyProportionSnapshot>
+            _personBodyProportionSnapshots =
+                new Dictionary<string, PersonBodyProportionSnapshot>();
+        private readonly Dictionary<string, PersonBodyProportionUndo>
+            _personBodyProportionUndo =
+                new Dictionary<string, PersonBodyProportionUndo>();
         private readonly Dictionary<string, TimelineSnapshot>
             _timelineSnapshots =
                 new Dictionary<string, TimelineSnapshot>();
@@ -860,6 +918,9 @@ namespace VAMPip
                 parsed.ClothingRevision = "";
                 parsed.HairRevision = "";
                 parsed.HairActionToken = "";
+                parsed.BodyProportionRevision = "";
+                parsed.BodyProportionChanges =
+                    new List<BodyProportionChange>();
                 parsed.TimelineId = "";
                 parsed.TimelineRevision = "";
                 parsed.TimelineOperation = "";
@@ -1077,6 +1138,70 @@ namespace VAMPip
                         return;
                     }
                 }
+                else if (command == CommandSetPersonBodyProportions)
+                {
+                    parsed.TargetUid =
+                        ((string)request["targetUid"] ?? "").Trim();
+                    parsed.BodyProportionRevision =
+                        ((string)request["expectedRevision"] ?? "").Trim();
+                    parsed.RescanRequired = false;
+                    JSONArray changes = request["changes"].AsArray;
+                    if (changes == null ||
+                        changes.Count == 0 ||
+                        changes.Count > MaximumBodyProportionChanges)
+                    {
+                        RejectRequest(
+                            requestId,
+                            "changes must contain 1 to " +
+                            MaximumBodyProportionChanges +
+                            " body-proportion updates.");
+                        return;
+                    }
+                    int changeIndex;
+                    for (changeIndex = 0;
+                         changeIndex < changes.Count;
+                         changeIndex++)
+                    {
+                        JSONClass changeNode =
+                            changes[changeIndex].AsObject;
+                        if (changeNode == null ||
+                            !changeNode.HasKey("value"))
+                        {
+                            RejectRequest(
+                                requestId,
+                                "Each body-proportion change requires key and value.");
+                            return;
+                        }
+                        BodyProportionChange change =
+                            new BodyProportionChange();
+                        change.Key =
+                            ((string)changeNode["key"] ?? "").Trim();
+                        change.Value = changeNode["value"].AsFloat;
+                        parsed.BodyProportionChanges.Add(change);
+                    }
+                    string validationError =
+                        ValidateBodyProportionRequest(parsed, false);
+                    if (validationError.Length != 0)
+                    {
+                        RejectRequest(requestId, validationError);
+                        return;
+                    }
+                }
+                else if (command == CommandUndoPersonBodyProportions)
+                {
+                    parsed.TargetUid =
+                        ((string)request["targetUid"] ?? "").Trim();
+                    parsed.BodyProportionRevision =
+                        ((string)request["expectedRevision"] ?? "").Trim();
+                    parsed.RescanRequired = false;
+                    string validationError =
+                        ValidateBodyProportionRequest(parsed, true);
+                    if (validationError.Length != 0)
+                    {
+                        RejectRequest(requestId, validationError);
+                        return;
+                    }
+                }
                 else if (command == CommandLoadScene)
                 {
                     parsed.ResourceRef =
@@ -1202,6 +1327,8 @@ namespace VAMPip
                         "'loadCustomUnityAsset', " +
                         "'selectCustomUnityAssetChoice', " +
                         "'setPersonClothingResource', 'setPersonHairItem', " +
+                        "'setPersonBodyProportions', " +
+                        "'undoPersonBodyProportions', " +
                         "'selectPerson', 'selectAtom', 'loadScene', " +
                         "'controlTimeline', 'applySam3dResult', " +
                         "'undoSam3dResult', and 'captureSam3dResult'.");
@@ -1429,6 +1556,60 @@ namespace VAMPip
             if (!IsHexToken(request.HairActionToken))
             {
                 return "actionToken must contain exactly 32 hexadecimal characters.";
+            }
+            return "";
+        }
+
+        private static string ValidateBodyProportionRequest(
+            BridgeRequest request,
+            bool undo)
+        {
+            string targetError = ValidateTargetUid(request.TargetUid);
+            if (targetError.Length != 0)
+            {
+                return targetError;
+            }
+            if (!IsHexToken(request.BodyProportionRevision))
+            {
+                return
+                    "expectedRevision must contain exactly 32 hexadecimal characters.";
+            }
+            if (undo)
+            {
+                return "";
+            }
+            if (request.BodyProportionChanges == null ||
+                request.BodyProportionChanges.Count == 0 ||
+                request.BodyProportionChanges.Count >
+                    MaximumBodyProportionChanges)
+            {
+                return "A bounded body-proportion change list is required.";
+            }
+            HashSet<string> keys =
+                new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            int index;
+            for (index = 0;
+                 index < request.BodyProportionChanges.Count;
+                 index++)
+            {
+                BodyProportionChange change =
+                    request.BodyProportionChanges[index];
+                if (change == null || !IsHexToken(change.Key))
+                {
+                    return
+                        "Each body-proportion key must contain exactly 32 hexadecimal characters.";
+                }
+                if (!keys.Add(change.Key))
+                {
+                    return "Body-proportion keys must be unique.";
+                }
+                if (!IsFinite(change.Value) ||
+                    Mathf.Abs(change.Value) >
+                        MaximumBodyProportionMagnitude)
+                {
+                    return
+                        "Body-proportion values must be finite and between -1 and 1.";
+                }
             }
             return "";
         }
@@ -2053,6 +2234,15 @@ namespace VAMPip
             {
                 ExecuteSetPersonHairItem(request);
             }
+            else if (
+                request.Command == CommandSetPersonBodyProportions ||
+                request.Command == CommandUndoPersonBodyProportions)
+            {
+                ExecutePersonBodyProportions(
+                    request,
+                    request.Command ==
+                        CommandUndoPersonBodyProportions);
+            }
             else if (request.Command == CommandControlTimeline)
             {
                 ExecuteTimelineControl(request);
@@ -2600,6 +2790,330 @@ namespace VAMPip
                     startedAt,
                     "Person Hair request failed: " +
                     DescribeException(exception));
+            }
+        }
+
+        private static void SetBodyProportionMorphValue(
+            DAZMorph morph,
+            float value)
+        {
+            if (morph == null)
+            {
+                throw new Exception(
+                    "A body-proportion morph is no longer available.");
+            }
+            morph.LoadDeltas();
+            morph.SetValue(value);
+            if (!IsFinite(morph.morphValue) ||
+                Mathf.Abs(morph.morphValue - value) > 0.0001f)
+            {
+                throw new Exception(
+                    "VaM did not accept a body-proportion morph value.");
+            }
+        }
+
+        private static void RestoreBodyProportionValues(
+            List<BodyProportionUndoValue> values)
+        {
+            if (values == null)
+            {
+                return;
+            }
+            int index;
+            for (index = values.Count - 1; index >= 0; index--)
+            {
+                BodyProportionUndoValue saved = values[index];
+                if (saved != null && saved.Morph != null)
+                {
+                    SetBodyProportionMorphValue(
+                        saved.Morph,
+                        saved.Value);
+                }
+            }
+        }
+
+        private void ExecutePersonBodyProportions(
+            BridgeRequest request,
+            bool undo)
+        {
+            string startedAt = UtcNow();
+            List<BodyProportionUndoValue> rollback =
+                new List<BodyProportionUndoValue>();
+            PersonBodyProportionUndo priorUndo = null;
+            bool priorUndoPresent = false;
+            bool undoBookkeepingChanged = false;
+            try
+            {
+                PublishStatus(
+                    StateApplying,
+                    request.RequestId,
+                    startedAt,
+                    "",
+                    "",
+                    undo
+                    ? "Restoring the previous body proportions."
+                    : "Applying bounded body-proportion morphs.");
+
+                Atom person =
+                    SuperController.singleton.GetAtomByUid(
+                        request.TargetUid);
+                Atom selected =
+                    SuperController.singleton.GetSelectedAtom();
+                if (person == null ||
+                    person.type != "Person" ||
+                    !object.ReferenceEquals(person, selected))
+                {
+                    throw new Exception(
+                        "Body proportions can only be changed on the " +
+                        "currently selected Person.");
+                }
+                if (CurrentSam3dSnapshot() != null)
+                {
+                    throw new Exception(
+                        "Undo the currently applied SAM3D pose before " +
+                        "changing body proportions; the two exact undo " +
+                        "snapshots cannot overlap.");
+                }
+                DAZCharacterSelector geometry =
+                    person.GetStorableByID("geometry")
+                    as DAZCharacterSelector;
+                if (geometry == null)
+                {
+                    throw new Exception(
+                        "The selected Person does not expose native geometry.");
+                }
+                priorUndoPresent =
+                    _personBodyProportionUndo.TryGetValue(
+                        request.TargetUid,
+                        out priorUndo);
+                if (!undo && priorUndoPresent)
+                {
+                    throw new Exception(
+                        "This Person already has an exact body-proportion " +
+                        "undo. Restore it before applying another fit.");
+                }
+
+                PersonBodyProportionSnapshot snapshot = null;
+                if (!_personBodyProportionSnapshots.TryGetValue(
+                        request.TargetUid,
+                        out snapshot) ||
+                    !object.ReferenceEquals(snapshot.Atom, person) ||
+                    !object.ReferenceEquals(
+                        snapshot.Geometry,
+                        geometry) ||
+                    !string.Equals(
+                        snapshot.Revision,
+                        request.BodyProportionRevision,
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    throw new Exception(
+                        "The body-proportion revision is stale; refresh the " +
+                        "selected Person.");
+                }
+
+                List<BodyProportionMorphEntry> currentEntries =
+                    GetBodyProportionMorphEntries(geometry);
+                string currentGeneration =
+                    BuildBodyProportionGenerationKey(
+                        geometry,
+                        currentEntries);
+                if (!IsCurrentBodyProportionSnapshot(
+                        snapshot,
+                        currentEntries,
+                        currentGeneration))
+                {
+                    throw new Exception(
+                        "The Person's morph state changed; refresh body " +
+                        "proportions before applying.");
+                }
+
+                if (undo)
+                {
+                    PersonBodyProportionUndo savedUndo = priorUndo;
+                    if (!priorUndoPresent ||
+                        !object.ReferenceEquals(savedUndo.Atom, person) ||
+                        !object.ReferenceEquals(
+                            savedUndo.Geometry,
+                            geometry) ||
+                        !string.Equals(
+                            savedUndo.PostApplyGenerationKey,
+                            currentGeneration,
+                            StringComparison.Ordinal) ||
+                        savedUndo.Values == null ||
+                        savedUndo.Values.Count == 0)
+                    {
+                        throw new Exception(
+                            "No exact body-proportion undo is available for " +
+                            "this revision.");
+                    }
+                    int undoIndex;
+                    for (undoIndex = 0;
+                         undoIndex < savedUndo.Values.Count;
+                         undoIndex++)
+                    {
+                        BodyProportionUndoValue saved =
+                            savedUndo.Values[undoIndex];
+                        if (!ContainsEligibleBodyProportionMorph(
+                                currentEntries,
+                                saved.Morph))
+                        {
+                            throw new Exception(
+                                "A saved body-proportion morph is no longer " +
+                                "eligible; undo was not applied.");
+                        }
+                        BodyProportionUndoValue rollbackValue =
+                            new BodyProportionUndoValue();
+                        rollbackValue.Morph = saved.Morph;
+                        rollbackValue.Value = saved.Morph.morphValue;
+                        rollback.Add(rollbackValue);
+                    }
+                    RestoreBodyProportionValues(savedUndo.Values);
+                    _personBodyProportionUndo.Remove(
+                        request.TargetUid);
+                    undoBookkeepingChanged = true;
+                }
+                else
+                {
+                    PersonBodyProportionUndo newUndo =
+                        new PersonBodyProportionUndo();
+                    newUndo.Atom = person;
+                    newUndo.Geometry = geometry;
+                    newUndo.TargetUid = request.TargetUid;
+                    newUndo.Values =
+                        new List<BodyProportionUndoValue>();
+
+                    int changeIndex;
+                    for (changeIndex = 0;
+                         changeIndex <
+                            request.BodyProportionChanges.Count;
+                         changeIndex++)
+                    {
+                        BodyProportionChange change =
+                            request.BodyProportionChanges[changeIndex];
+                        BodyProportionMorphEntry entry =
+                            FindBodyProportionEntryByKey(
+                                snapshot.Entries,
+                                change.Key);
+                        if (entry == null ||
+                            !ContainsEligibleBodyProportionMorph(
+                                currentEntries,
+                                entry.Morph))
+                        {
+                            throw new Exception(
+                                "A body-proportion key is stale or no longer " +
+                                "eligible.");
+                        }
+                        if (change.Value < entry.Minimum ||
+                            change.Value > entry.Maximum)
+                        {
+                            throw new Exception(
+                                "A body-proportion value is outside its " +
+                                "published safe range.");
+                        }
+                        float oldValue = entry.Morph.morphValue;
+                        if (!IsFinite(oldValue) ||
+                            Mathf.Abs(change.Value - oldValue) >
+                                MaximumBodyProportionDelta + 0.0001f)
+                        {
+                            throw new Exception(
+                                "A body-proportion change exceeds the " +
+                                "maximum 0.25 step.");
+                        }
+                        if (Mathf.Abs(change.Value - oldValue) <=
+                            0.000001f)
+                        {
+                            continue;
+                        }
+                        BodyProportionUndoValue old =
+                            new BodyProportionUndoValue();
+                        old.Morph = entry.Morph;
+                        old.Value = oldValue;
+                        newUndo.Values.Add(old);
+                        BodyProportionUndoValue rollbackValue =
+                            new BodyProportionUndoValue();
+                        rollbackValue.Morph = entry.Morph;
+                        rollbackValue.Value = oldValue;
+                        rollback.Add(rollbackValue);
+                        SetBodyProportionMorphValue(
+                            entry.Morph,
+                            change.Value);
+                    }
+                    if (newUndo.Values.Count != 0)
+                    {
+                        List<BodyProportionMorphEntry> postEntries =
+                            GetBodyProportionMorphEntries(geometry);
+                        newUndo.PostApplyGenerationKey =
+                            BuildBodyProportionGenerationKey(
+                                geometry,
+                                postEntries);
+                        _personBodyProportionUndo[
+                            request.TargetUid] = newUndo;
+                        undoBookkeepingChanged = true;
+                    }
+                }
+
+                SuperController.singleton.ResetSimulation(
+                    Sam3dPhysicsResetFrames,
+                    undo
+                    ? "Restore VAM-PIP body proportions"
+                    : "Apply VAM-PIP body proportions",
+                    true);
+                _personBodyProportionSnapshots.Remove(
+                    request.TargetUid);
+                CompleteRequest(request.RequestId);
+                PublishSceneStatus();
+                PublishStatus(
+                    StateOk,
+                    request.RequestId,
+                    startedAt,
+                    UtcNow(),
+                    "vam",
+                    undo
+                    ? "Previous body proportions restored."
+                    : "Body-proportion morphs applied; exact undo is available.");
+                SuperController.LogMessage(
+                    "[VAM-PIP Bridge] " +
+                    (undo
+                    ? "Body proportions restored on "
+                    : "Body proportions applied to ") +
+                    request.TargetUid +
+                    ".");
+            }
+            catch (Exception exception)
+            {
+                string rollbackError = "";
+                if (rollback.Count != 0)
+                {
+                    try
+                    {
+                        RestoreBodyProportionValues(rollback);
+                    }
+                    catch (Exception rollbackException)
+                    {
+                        rollbackError =
+                            " Rollback also failed: " +
+                            DescribeException(rollbackException);
+                    }
+                }
+                if (undoBookkeepingChanged)
+                {
+                    if (priorUndoPresent && priorUndo != null)
+                    {
+                        _personBodyProportionUndo[
+                            request.TargetUid] = priorUndo;
+                    }
+                    else
+                    {
+                        _personBodyProportionUndo.Remove(
+                            request.TargetUid);
+                    }
+                }
+                FailRequest(
+                    request,
+                    startedAt,
+                    "Person body-proportion request failed: " +
+                    DescribeException(exception) +
+                    rollbackError);
             }
         }
 
@@ -7301,6 +7815,850 @@ namespace VAMPip
             return result;
         }
 
+        private static bool IsAllowlistedBodyProportionMorphName(
+            string name)
+        {
+            return
+                name == "Body Scale" ||
+                name == "Lower Body Length" ||
+                name == "Legs Length" ||
+                name == "Upper Body Length" ||
+                name == "Upper Torso Length" ||
+                name == "Shoulder Width" ||
+                name == "Shoulder Width (B)";
+        }
+
+        private static bool IsEligibleBodyProportionMorph(
+            DAZMorphBank bank,
+            DAZMorph morph)
+        {
+            if (bank == null ||
+                morph == null ||
+                !morph.visible ||
+                morph.disable ||
+                morph.isPoseControl ||
+                morph.isDriven ||
+                !morph.isLatestVersion ||
+                morph.isInPackage ||
+                morph.isRuntime ||
+                morph.isTransient ||
+                !IsFinite(morph.morphValue) ||
+                Mathf.Abs(morph.morphValue) >
+                    MaximumBodyProportionMagnitude)
+            {
+                return false;
+            }
+            string name = morph.resolvedDisplayName ?? "";
+            if (!IsAllowlistedBodyProportionMorphName(name))
+            {
+                return false;
+            }
+            DAZMorph builtIn =
+                bank.GetBuiltInMorphByUid(morph.uid);
+            return object.ReferenceEquals(builtIn, morph);
+        }
+
+        private static int CompareBodyProportionMorphEntries(
+            BodyProportionMorphEntry left,
+            BodyProportionMorphEntry right)
+        {
+            int nameOrder = string.Compare(
+                left == null ? "" : left.Name,
+                right == null ? "" : right.Name,
+                StringComparison.Ordinal);
+            if (nameOrder != 0)
+            {
+                return nameOrder;
+            }
+            return string.Compare(
+                left == null || left.Morph == null
+                    ? ""
+                    : left.Morph.uid,
+                right == null || right.Morph == null
+                    ? ""
+                    : right.Morph.uid,
+                StringComparison.Ordinal);
+        }
+
+        private static void AddBodyProportionMorphs(
+            List<BodyProportionMorphEntry> result,
+            DAZMorphBank bank)
+        {
+            if (result == null || bank == null || bank.morphs == null)
+            {
+                return;
+            }
+            int index;
+            for (index = 0;
+                 index < bank.morphs.Count &&
+                    result.Count < MaximumBodyProportionMorphs;
+                 index++)
+            {
+                DAZMorph morph = bank.morphs[index];
+                if (!IsEligibleBodyProportionMorph(bank, morph))
+                {
+                    continue;
+                }
+                bool duplicate = false;
+                int existingIndex;
+                for (existingIndex = 0;
+                     existingIndex < result.Count;
+                     existingIndex++)
+                {
+                    if (object.ReferenceEquals(
+                            result[existingIndex].Morph,
+                            morph))
+                    {
+                        duplicate = true;
+                        break;
+                    }
+                }
+                if (duplicate)
+                {
+                    continue;
+                }
+                float minimum = Mathf.Max(
+                    morph.min,
+                    -MaximumBodyProportionMagnitude);
+                float maximum = Mathf.Min(
+                    morph.max,
+                    MaximumBodyProportionMagnitude);
+                if (!IsFinite(minimum) ||
+                    !IsFinite(maximum) ||
+                    minimum > maximum ||
+                    morph.morphValue < minimum ||
+                    morph.morphValue > maximum)
+                {
+                    continue;
+                }
+                BodyProportionMorphEntry entry =
+                    new BodyProportionMorphEntry();
+                entry.Morph = morph;
+                entry.Bank = bank;
+                entry.Name = morph.resolvedDisplayName ?? "";
+                entry.Region = morph.resolvedRegionName ?? "";
+                entry.Value = morph.morphValue;
+                entry.Minimum = minimum;
+                entry.Maximum = maximum;
+                result.Add(entry);
+            }
+        }
+
+        private static List<BodyProportionMorphEntry>
+            GetBodyProportionMorphEntries(
+                DAZCharacterSelector geometry)
+        {
+            List<BodyProportionMorphEntry> result =
+                new List<BodyProportionMorphEntry>();
+            if (geometry == null)
+            {
+                return result;
+            }
+            AddBodyProportionMorphs(result, geometry.morphBank1);
+            AddBodyProportionMorphs(result, geometry.morphBank2);
+            AddBodyProportionMorphs(result, geometry.morphBank3);
+            result.Sort(CompareBodyProportionMorphEntries);
+            return result;
+        }
+
+        private static string BuildBodyProportionGenerationKey(
+            DAZCharacterSelector geometry,
+            List<BodyProportionMorphEntry> entries)
+        {
+            ulong first = 1469598103934665603UL;
+            ulong second = 7809847782465536322UL;
+            HashCuaText(
+                ref first,
+                ref second,
+                geometry == null ? "" : geometry.gender.ToString());
+            HashBodyProportionBankState(
+                ref first,
+                ref second,
+                geometry == null ? null : geometry.morphBank1);
+            HashBodyProportionBankState(
+                ref first,
+                ref second,
+                geometry == null ? null : geometry.morphBank2);
+            HashBodyProportionBankState(
+                ref first,
+                ref second,
+                geometry == null ? null : geometry.morphBank3);
+            HashCuaText(
+                ref first,
+                ref second,
+                entries == null ? "-1" : entries.Count.ToString());
+            if (entries != null)
+            {
+                int index;
+                for (index = 0; index < entries.Count; index++)
+                {
+                    BodyProportionMorphEntry entry = entries[index];
+                    HashCuaText(
+                        ref first,
+                        ref second,
+                        entry.Morph == null ? "" : entry.Morph.uid);
+                    HashCuaText(ref first, ref second, entry.Name);
+                    HashCuaText(ref first, ref second, entry.Region);
+                    HashCuaText(
+                        ref first,
+                        ref second,
+                        entry.Value.ToString("R"));
+                    HashCuaText(
+                        ref first,
+                        ref second,
+                        entry.Minimum.ToString("R"));
+                    HashCuaText(
+                        ref first,
+                        ref second,
+                        entry.Maximum.ToString("R"));
+                }
+            }
+            return first.ToString("x16") + second.ToString("x16");
+        }
+
+        private static void HashBodyProportionBankState(
+            ref ulong first,
+            ref ulong second,
+            DAZMorphBank bank)
+        {
+            if (bank == null || bank.morphs == null)
+            {
+                HashCuaText(ref first, ref second, "-1");
+                return;
+            }
+            int structuralCount = 0;
+            int index;
+            for (index = 0; index < bank.morphs.Count; index++)
+            {
+                DAZMorph morph = bank.morphs[index];
+                if (morph == null ||
+                    morph.isPoseControl ||
+                    morph.isDriven ||
+                    !morph.hasBoneModificationFormulas ||
+                    !IsFinite(morph.morphValue))
+                {
+                    continue;
+                }
+                structuralCount++;
+                HashCuaText(
+                    ref first,
+                    ref second,
+                    morph.uid);
+                HashCuaText(
+                    ref first,
+                    ref second,
+                    morph.morphValue.ToString("R"));
+                HashCuaText(
+                    ref first,
+                    ref second,
+                    morph.disable ? "disabled" : "enabled");
+                HashCuaText(
+                    ref first,
+                    ref second,
+                    morph.isLatestVersion ? "latest" : "superseded");
+            }
+            HashCuaText(
+                ref first,
+                ref second,
+                structuralCount.ToString());
+        }
+
+        private static bool IsCurrentBodyProportionSnapshot(
+            PersonBodyProportionSnapshot snapshot,
+            List<BodyProportionMorphEntry> current,
+            string currentGeneration)
+        {
+            if (snapshot == null ||
+                snapshot.Entries == null ||
+                current == null ||
+                snapshot.Entries.Count != current.Count ||
+                !string.Equals(
+                    snapshot.GenerationKey,
+                    currentGeneration,
+                    StringComparison.Ordinal))
+            {
+                return false;
+            }
+            int index;
+            for (index = 0; index < current.Count; index++)
+            {
+                if (!object.ReferenceEquals(
+                        snapshot.Entries[index].Morph,
+                        current[index].Morph))
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        private static BodyProportionMorphEntry
+            FindBodyProportionEntryByKey(
+                List<BodyProportionMorphEntry> entries,
+                string key)
+        {
+            BodyProportionMorphEntry match = null;
+            int matches = 0;
+            if (entries == null)
+            {
+                return null;
+            }
+            int index;
+            for (index = 0; index < entries.Count; index++)
+            {
+                BodyProportionMorphEntry entry = entries[index];
+                if (entry != null &&
+                    string.Equals(
+                        entry.Key,
+                        key,
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    match = entry;
+                    matches++;
+                }
+            }
+            return matches == 1 ? match : null;
+        }
+
+        private static bool ContainsEligibleBodyProportionMorph(
+            List<BodyProportionMorphEntry> entries,
+            DAZMorph morph)
+        {
+            if (entries == null || morph == null)
+            {
+                return false;
+            }
+            int index;
+            for (index = 0; index < entries.Count; index++)
+            {
+                if (object.ReferenceEquals(
+                        entries[index].Morph,
+                        morph))
+                {
+                    return IsEligibleBodyProportionMorph(
+                        entries[index].Bank,
+                        morph);
+                }
+            }
+            return false;
+        }
+
+        private static DAZBone BodyProportionBone(
+            DAZCharacterSelector geometry,
+            params string[] names)
+        {
+            if (geometry == null ||
+                geometry.rootBones == null ||
+                names == null)
+            {
+                return null;
+            }
+            int index;
+            for (index = 0; index < names.Length; index++)
+            {
+                DAZBone bone =
+                    geometry.rootBones.GetDAZBone(names[index]);
+                if (bone != null)
+                {
+                    return bone;
+                }
+            }
+            return null;
+        }
+
+        private static bool IsFiniteBodyProportionPoint(Vector3 point)
+        {
+            return
+                IsFinite(point.x) &&
+                IsFinite(point.y) &&
+                IsFinite(point.z) &&
+                Mathf.Abs(point.x) <= MaximumSam3dCoordinate &&
+                Mathf.Abs(point.y) <= MaximumSam3dCoordinate &&
+                Mathf.Abs(point.z) <= MaximumSam3dCoordinate;
+        }
+
+        private static bool TryBodyProportionDistance(
+            DAZBone first,
+            DAZBone second,
+            out float distance)
+        {
+            distance = 0f;
+            if (first == null || second == null)
+            {
+                return false;
+            }
+            Vector3 firstPoint = first.morphedWorldPosition;
+            Vector3 secondPoint = second.morphedWorldPosition;
+            if (!IsFiniteBodyProportionPoint(firstPoint) ||
+                !IsFiniteBodyProportionPoint(secondPoint))
+            {
+                return false;
+            }
+            distance = Vector3.Distance(firstPoint, secondPoint);
+            return IsFinite(distance) &&
+                distance > 0.000001f &&
+                distance <= MaximumSam3dCoordinate;
+        }
+
+        private static bool TryBodyProportionMidpointDistance(
+            DAZBone firstLeft,
+            DAZBone firstRight,
+            DAZBone secondLeft,
+            DAZBone secondRight,
+            out float distance)
+        {
+            distance = 0f;
+            if (firstLeft == null ||
+                firstRight == null ||
+                secondLeft == null ||
+                secondRight == null)
+            {
+                return false;
+            }
+            Vector3 firstLeftPoint =
+                firstLeft.morphedWorldPosition;
+            Vector3 firstRightPoint =
+                firstRight.morphedWorldPosition;
+            Vector3 secondLeftPoint =
+                secondLeft.morphedWorldPosition;
+            Vector3 secondRightPoint =
+                secondRight.morphedWorldPosition;
+            if (!IsFiniteBodyProportionPoint(firstLeftPoint) ||
+                !IsFiniteBodyProportionPoint(firstRightPoint) ||
+                !IsFiniteBodyProportionPoint(secondLeftPoint) ||
+                !IsFiniteBodyProportionPoint(secondRightPoint))
+            {
+                return false;
+            }
+            Vector3 firstMidpoint =
+                (firstLeftPoint + firstRightPoint) * 0.5f;
+            Vector3 secondMidpoint =
+                (secondLeftPoint + secondRightPoint) * 0.5f;
+            distance =
+                Vector3.Distance(firstMidpoint, secondMidpoint);
+            return IsFinite(distance) &&
+                distance > 0.000001f &&
+                distance <= MaximumSam3dCoordinate;
+        }
+
+        private static JSONClass UnavailableBodyProportionMeasurement(
+            string reason)
+        {
+            JSONClass result = new JSONClass();
+            result["available"].AsBool = false;
+            result["reason"] = reason;
+            return result;
+        }
+
+        private static JSONClass BodyProportionMeasurement(
+            float meters,
+            float structuralHeight,
+            string method)
+        {
+            JSONClass result = new JSONClass();
+            result["available"].AsBool = true;
+            result["meters"].AsFloat = meters;
+            result["confidence"].AsFloat = 1f;
+            result["method"] = method;
+            if (structuralHeight > 0.000001f)
+            {
+                result["ratio"].AsFloat =
+                    meters / structuralHeight;
+            }
+            return result;
+        }
+
+        private static JSONClass PairedBodyProportionMeasurement(
+            DAZBone leftStart,
+            DAZBone leftEnd,
+            DAZBone rightStart,
+            DAZBone rightEnd,
+            float structuralHeight,
+            string method)
+        {
+            float left;
+            float right;
+            bool hasLeft = TryBodyProportionDistance(
+                leftStart,
+                leftEnd,
+                out left);
+            bool hasRight = TryBodyProportionDistance(
+                rightStart,
+                rightEnd,
+                out right);
+            if (!hasLeft && !hasRight)
+            {
+                return UnavailableBodyProportionMeasurement(
+                    "Required neutral-bind bones are unavailable.");
+            }
+            float average =
+                hasLeft && hasRight
+                ? (left + right) * 0.5f
+                : hasLeft
+                ? left
+                : right;
+            JSONClass result =
+                BodyProportionMeasurement(
+                    average,
+                    structuralHeight,
+                    method);
+            if (hasLeft)
+            {
+                result["leftMeters"].AsFloat = left;
+            }
+            if (hasRight)
+            {
+                result["rightMeters"].AsFloat = right;
+            }
+            result["bilateral"].AsBool = hasLeft && hasRight;
+            if (!hasLeft || !hasRight)
+            {
+                result["reason"] =
+                    "Only one side was available; meters is the available side.";
+            }
+            return result;
+        }
+
+        private static JSONClass BuildBodyProportionMeasurements(
+            DAZCharacterSelector geometry)
+        {
+            JSONClass result = new JSONClass();
+            result["schema"].AsInt = 1;
+            result["space"] = "vam-morphed-neutral-bind";
+            JSONClass measurements = new JSONClass();
+            result["measurements"] = measurements;
+
+            DAZBone leftShoulder =
+                BodyProportionBone(geometry, "lShldr", "lShoulder");
+            DAZBone rightShoulder =
+                BodyProportionBone(geometry, "rShldr", "rShoulder");
+            DAZBone leftForearm =
+                BodyProportionBone(geometry, "lForeArm", "lForearm");
+            DAZBone rightForearm =
+                BodyProportionBone(geometry, "rForeArm", "rForearm");
+            DAZBone leftHand =
+                geometry == null ? null : geometry.leftHandBone;
+            if (leftHand == null)
+            {
+                leftHand =
+                    BodyProportionBone(geometry, "lHand");
+            }
+            DAZBone rightHand =
+                geometry == null ? null : geometry.rightHandBone;
+            if (rightHand == null)
+            {
+                rightHand =
+                    BodyProportionBone(geometry, "rHand");
+            }
+            DAZBone leftThigh =
+                BodyProportionBone(geometry, "lThigh");
+            DAZBone rightThigh =
+                BodyProportionBone(geometry, "rThigh");
+            DAZBone leftShin =
+                BodyProportionBone(geometry, "lShin");
+            DAZBone rightShin =
+                BodyProportionBone(geometry, "rShin");
+            DAZBone leftFoot =
+                geometry == null ? null : geometry.leftFootBone;
+            if (leftFoot == null)
+            {
+                leftFoot =
+                    BodyProportionBone(geometry, "lFoot");
+            }
+            DAZBone rightFoot =
+                geometry == null ? null : geometry.rightFootBone;
+            if (rightFoot == null)
+            {
+                rightFoot =
+                    BodyProportionBone(geometry, "rFoot");
+            }
+            DAZBone head =
+                geometry == null ? null : geometry.headBone;
+            if (head == null)
+            {
+                head = BodyProportionBone(geometry, "head");
+            }
+
+            float structuralHeight = 0f;
+            bool hasStructuralHeight = false;
+            if (head != null &&
+                (leftFoot != null || rightFoot != null))
+            {
+                Vector3 headPoint = head.morphedWorldPosition;
+                Vector3 feetPoint =
+                    leftFoot != null && rightFoot != null
+                    ? (
+                        leftFoot.morphedWorldPosition +
+                        rightFoot.morphedWorldPosition) * 0.5f
+                    : leftFoot != null
+                    ? leftFoot.morphedWorldPosition
+                    : rightFoot.morphedWorldPosition;
+                if (IsFiniteBodyProportionPoint(headPoint) &&
+                    IsFiniteBodyProportionPoint(feetPoint))
+                {
+                    structuralHeight =
+                        Mathf.Abs(headPoint.y - feetPoint.y);
+                    hasStructuralHeight =
+                        IsFinite(structuralHeight) &&
+                        structuralHeight > 0.000001f;
+                }
+            }
+            JSONClass normalizer = new JSONClass();
+            normalizer["id"] = "structuralHeight";
+            normalizer["available"].AsBool =
+                hasStructuralHeight;
+            if (hasStructuralHeight)
+            {
+                normalizer["meters"].AsFloat =
+                    structuralHeight;
+            }
+            else
+            {
+                normalizer["reason"] =
+                    "Head-to-foot neutral-bind joints are unavailable.";
+            }
+            result["normalizer"] = normalizer;
+            measurements["structuralHeight"] =
+                hasStructuralHeight
+                ? BodyProportionMeasurement(
+                    structuralHeight,
+                    structuralHeight,
+                    "head-joint-to-foot-joint-y")
+                : UnavailableBodyProportionMeasurement(
+                    "Head-to-foot neutral-bind joints are unavailable.");
+
+            measurements["upperArm"] =
+                PairedBodyProportionMeasurement(
+                    leftShoulder,
+                    leftForearm,
+                    rightShoulder,
+                    rightForearm,
+                    structuralHeight,
+                    "shoulder-joint-to-forearm-joint");
+            measurements["forearm"] =
+                PairedBodyProportionMeasurement(
+                    leftForearm,
+                    leftHand,
+                    rightForearm,
+                    rightHand,
+                    structuralHeight,
+                    "forearm-joint-to-hand-joint");
+            measurements["thigh"] =
+                PairedBodyProportionMeasurement(
+                    leftThigh,
+                    leftShin,
+                    rightThigh,
+                    rightShin,
+                    structuralHeight,
+                    "thigh-joint-to-shin-joint");
+            measurements["shin"] =
+                PairedBodyProportionMeasurement(
+                    leftShin,
+                    leftFoot,
+                    rightShin,
+                    rightFoot,
+                    structuralHeight,
+                    "shin-joint-to-foot-joint");
+
+            float distance;
+            measurements["torso"] =
+                TryBodyProportionMidpointDistance(
+                    leftShoulder,
+                    rightShoulder,
+                    leftThigh,
+                    rightThigh,
+                    out distance)
+                ? BodyProportionMeasurement(
+                    distance,
+                    structuralHeight,
+                    "shoulder-midpoint-to-thigh-root-midpoint")
+                : UnavailableBodyProportionMeasurement(
+                    "Shoulder or thigh-root neutral-bind joints are unavailable.");
+            measurements["shoulderSpan"] =
+                TryBodyProportionDistance(
+                    leftShoulder,
+                    rightShoulder,
+                    out distance)
+                ? BodyProportionMeasurement(
+                    distance,
+                    structuralHeight,
+                    "left-to-right-shoulder-joint")
+                : UnavailableBodyProportionMeasurement(
+                    "Both shoulder neutral-bind joints are required.");
+            measurements["hipSpan"] =
+                TryBodyProportionDistance(
+                    leftThigh,
+                    rightThigh,
+                    out distance)
+                ? BodyProportionMeasurement(
+                    distance,
+                    structuralHeight,
+                    "left-to-right-thigh-root-joint")
+                : UnavailableBodyProportionMeasurement(
+                    "Both thigh-root neutral-bind joints are required.");
+            return result;
+        }
+
+        private JSONClass BuildPersonBodyProportionStatus(
+            Atom atom,
+            bool selected)
+        {
+            JSONClass result = new JSONClass();
+            result["schema"].AsInt = 1;
+            result["selectedOnly"].AsBool = true;
+            result["ready"].AsBool = false;
+            result["revision"] = "";
+            result["undoAvailable"].AsBool = false;
+            result["undoRevision"] = "";
+            result["blockedBySam3d"].AsBool =
+                _sam3dUndoSnapshot != null;
+            JSONArray publishedMorphs = new JSONArray();
+            result["morphs"] = publishedMorphs;
+            JSONClass limits = new JSONClass();
+            limits["maxMorphs"].AsInt =
+                MaximumBodyProportionMorphs;
+            limits["maxChanges"].AsInt =
+                MaximumBodyProportionChanges;
+            limits["maxAbsoluteValue"].AsFloat =
+                MaximumBodyProportionMagnitude;
+            limits["maxDeltaPerRequest"].AsFloat =
+                MaximumBodyProportionDelta;
+            result["limits"] = limits;
+
+            if (atom == null || atom.type != "Person" || !selected)
+            {
+                result["reason"] =
+                    "Select this Person to publish its body proportions.";
+                if (atom != null)
+                {
+                    _personBodyProportionSnapshots.Remove(atom.uid);
+                }
+                return result;
+            }
+            DAZCharacterSelector geometry =
+                atom.GetStorableByID("geometry")
+                as DAZCharacterSelector;
+            if (geometry == null)
+            {
+                result["reason"] =
+                    "The selected Person has no native geometry.";
+                _personBodyProportionSnapshots.Remove(atom.uid);
+                _personBodyProportionUndo.Remove(atom.uid);
+                return result;
+            }
+
+            JSONClass measurementSignature =
+                BuildBodyProportionMeasurements(geometry);
+            result["space"] =
+                (string)measurementSignature["space"] ?? "";
+            result["normalizer"] =
+                measurementSignature["normalizer"];
+            result["measurements"] =
+                measurementSignature["measurements"];
+            List<BodyProportionMorphEntry> entries =
+                GetBodyProportionMorphEntries(geometry);
+            string generationKey =
+                BuildBodyProportionGenerationKey(
+                    geometry,
+                    entries);
+            PersonBodyProportionSnapshot snapshot = null;
+            bool reuse =
+                _personBodyProportionSnapshots.TryGetValue(
+                    atom.uid,
+                    out snapshot) &&
+                object.ReferenceEquals(snapshot.Atom, atom) &&
+                object.ReferenceEquals(
+                    snapshot.Geometry,
+                    geometry) &&
+                IsCurrentBodyProportionSnapshot(
+                    snapshot,
+                    entries,
+                    generationKey);
+            if (!reuse)
+            {
+                snapshot =
+                    new PersonBodyProportionSnapshot();
+                snapshot.Revision =
+                    Guid.NewGuid().ToString("N");
+                snapshot.Entries =
+                    new List<BodyProportionMorphEntry>();
+                int newIndex;
+                for (newIndex = 0;
+                     newIndex < entries.Count;
+                     newIndex++)
+                {
+                    entries[newIndex].Key =
+                        Guid.NewGuid().ToString("N");
+                    snapshot.Entries.Add(entries[newIndex]);
+                }
+            }
+            else
+            {
+                int reuseIndex;
+                for (reuseIndex = 0;
+                     reuseIndex < entries.Count;
+                     reuseIndex++)
+                {
+                    entries[reuseIndex].Key =
+                        snapshot.Entries[reuseIndex].Key;
+                }
+                snapshot.Entries = entries;
+            }
+            snapshot.Atom = atom;
+            snapshot.Geometry = geometry;
+            snapshot.GenerationKey = generationKey;
+            _personBodyProportionSnapshots[atom.uid] =
+                snapshot;
+
+            int index;
+            for (index = 0; index < snapshot.Entries.Count; index++)
+            {
+                BodyProportionMorphEntry entry =
+                    snapshot.Entries[index];
+                JSONClass published = new JSONClass();
+                published["key"] = entry.Key;
+                published["name"] = entry.Name;
+                published["region"] = entry.Region;
+                published["value"].AsFloat = entry.Value;
+                published["min"].AsFloat = entry.Minimum;
+                published["max"].AsFloat = entry.Maximum;
+                published["builtIn"].AsBool = true;
+                publishedMorphs.Add(published);
+            }
+
+            PersonBodyProportionUndo undo = null;
+            bool undoAvailable =
+                _personBodyProportionUndo.TryGetValue(
+                    atom.uid,
+                    out undo) &&
+                object.ReferenceEquals(undo.Atom, atom) &&
+                object.ReferenceEquals(
+                    undo.Geometry,
+                    geometry) &&
+                undo.Values != null &&
+                undo.Values.Count != 0 &&
+                string.Equals(
+                    undo.PostApplyGenerationKey,
+                    generationKey,
+                    StringComparison.Ordinal);
+            if (!undoAvailable)
+            {
+                _personBodyProportionUndo.Remove(atom.uid);
+            }
+            result["ready"].AsBool = entries.Count != 0;
+            result["revision"] = snapshot.Revision;
+            result["undoAvailable"].AsBool = undoAvailable;
+            result["undoRevision"] =
+                undoAvailable ? snapshot.Revision : "";
+            result["morphCount"].AsInt = entries.Count;
+            if (entries.Count == 0)
+            {
+                result["reason"] =
+                    "No eligible built-in body-proportion morphs are available.";
+            }
+            return result;
+        }
+
         private static string BuildPersonClothingGenerationKey(
             DAZCharacterSelector geometry,
             List<ActiveClothingEntry> entries)
@@ -9089,6 +10447,10 @@ namespace VAMPip
             capabilities.Add("person-clothing-item-toggle");
             capabilities.Add("person-hair-roster");
             capabilities.Add("person-hair-item-toggle");
+            capabilities.Add("person-body-proportions-v1");
+            capabilities.Add("person-body-proportion-measurements-v1");
+            capabilities.Add("person-body-proportion-apply-v1");
+            capabilities.Add("person-body-proportion-undo-v1");
             capabilities.Add("person-add");
             capabilities.Add("person-select");
             capabilities.Add("timeline-roster");
@@ -9519,6 +10881,10 @@ namespace VAMPip
                             BuildPersonHairStatus(
                                 atom,
                                 ref globalHairItemBudget);
+                        person["bodyProportions"] =
+                            BuildPersonBodyProportionStatus(
+                                atom,
+                                isSelected);
                         persons.Add(person);
                     }
                 }
@@ -9573,6 +10939,41 @@ namespace VAMPip
                 {
                     _personHairSnapshots.Remove(
                         removedPersonUids[removedOffset]);
+                }
+                removedPersonUids.Clear();
+                foreach (
+                    KeyValuePair<
+                        string,
+                        PersonBodyProportionSnapshot> entry
+                    in _personBodyProportionSnapshots)
+                {
+                    if (!livePersonUids.Contains(entry.Key))
+                    {
+                        removedPersonUids.Add(entry.Key);
+                    }
+                }
+                foreach (
+                    KeyValuePair<
+                        string,
+                        PersonBodyProportionUndo> entry
+                    in _personBodyProportionUndo)
+                {
+                    if (!livePersonUids.Contains(entry.Key) &&
+                        !removedPersonUids.Contains(entry.Key))
+                    {
+                        removedPersonUids.Add(entry.Key);
+                    }
+                }
+                for (removedOffset = 0;
+                     removedOffset < removedPersonUids.Count;
+                     removedOffset++)
+                {
+                    string removedUid =
+                        removedPersonUids[removedOffset];
+                    _personBodyProportionSnapshots.Remove(
+                        removedUid);
+                    _personBodyProportionUndo.Remove(
+                        removedUid);
                 }
                 scene["atoms"] = atoms;
                 scene["persons"] = persons;

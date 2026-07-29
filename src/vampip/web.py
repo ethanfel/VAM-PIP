@@ -38,6 +38,9 @@ _RESOURCE_LEASE = re.compile(r"^/api/resources/([0-9]+)/lease$")
 _RESOURCE_DETAILS = re.compile(r"^/api/resources/([0-9]+)/details$")
 _PACKAGE_RESOURCES = re.compile(r"^/api/packages/([^/]+)/resources$")
 _SAM3D_JOB = re.compile(r"^/api/sam3d/jobs/([0-9a-f]{32})$")
+_SAM3D_BODY_PROPORTIONS = re.compile(
+    r"^/api/sam3d/jobs/([0-9a-f]{32})/body-proportions$"
+)
 _SAM3D_ARTIFACT = re.compile(
     r"^/api/sam3d/jobs/([0-9a-f]{32})/artifacts/"
     r"(source|manifest|overlay|capture)$"
@@ -381,6 +384,55 @@ class ManagerRequestHandler(BaseHTTPRequestHandler):
                     for item in items:
                         if isinstance(item, dict):
                             self._sam3d_job_links(item)
+                self._json(HTTPStatus.OK, result)
+                return
+            sam3d_body = _SAM3D_BODY_PROPORTIONS.fullmatch(parsed.path)
+            if sam3d_body:
+                unexpected_fields = sorted(
+                    set(query)
+                    - {
+                        "target_uid",
+                        "person_index",
+                        "fit_strength",
+                        "regions",
+                        "token",
+                    }
+                )
+                if unexpected_fields:
+                    raise ValueError(
+                        "unsupported body-proportion query field(s): "
+                        + ", ".join(unexpected_fields)
+                    )
+                target_values = query.get("target_uid", [])
+                if len(target_values) != 1 or not target_values[0]:
+                    raise ValueError("target_uid must be supplied exactly once")
+                person_values = query.get("person_index", ["0"])
+                strength_values = query.get("fit_strength", ["0.5"])
+                region_values = query.get("regions", [])
+                if (
+                    len(person_values) != 1
+                    or len(strength_values) != 1
+                    or len(region_values) > 1
+                ):
+                    raise ValueError(
+                        "body-proportion query fields may be supplied only once"
+                    )
+                regions = (
+                    [
+                        value
+                        for value in region_values[0].split(",")
+                        if value
+                    ]
+                    if region_values
+                    else None
+                )
+                result = self.server.service.sam3d_body_proportions(
+                    sam3d_body.group(1),
+                    target_uid=target_values[0],
+                    person_index=int(person_values[0]),
+                    strength=float(strength_values[0]),
+                    regions=regions,
+                )
                 self._json(HTTPStatus.OK, result)
                 return
             sam3d_job = _SAM3D_JOB.fullmatch(parsed.path)
@@ -846,6 +898,104 @@ class ManagerRequestHandler(BaseHTTPRequestHandler):
                 return
 
             document = self._read_json() if method == "POST" else {}
+            sam3d_body = _SAM3D_BODY_PROPORTIONS.fullmatch(parsed.path)
+            if method == "POST" and sam3d_body:
+                action = document.get("action")
+                if action not in {"analyze", "apply", "undo"}:
+                    raise ValueError(
+                        "body-proportion action must be analyze, apply, or undo"
+                    )
+                common_fields = {
+                    "action",
+                    "expected_job_revision",
+                    "target_uid",
+                    "person_index",
+                    "regions",
+                    "fit_strength",
+                }
+                action_fields = {
+                    "analyze": common_fields,
+                    "apply": common_fields | {"expected_analysis_revision"},
+                    "undo": {
+                        "action",
+                        "target_uid",
+                        "expected_apply_revision",
+                    },
+                }[action]
+                unexpected_fields = sorted(set(document) - action_fields)
+                if unexpected_fields:
+                    raise ValueError(
+                        "unsupported body-proportion field(s): "
+                        + ", ".join(unexpected_fields)
+                    )
+                if action == "undo":
+                    missing = {
+                        "target_uid",
+                        "expected_apply_revision",
+                    } - set(document)
+                    if missing:
+                        raise ValueError(
+                            "missing body-proportion undo field(s): "
+                            + ", ".join(sorted(missing))
+                        )
+                    result = service.undo_sam3d_body_proportions(
+                        sam3d_body.group(1),
+                        target_uid=document["target_uid"],
+                        expected_apply_revision=document[
+                            "expected_apply_revision"
+                        ],
+                    )
+                    self._json(HTTPStatus.ACCEPTED, result)
+                    return
+
+                missing = {
+                    "expected_job_revision",
+                    "target_uid",
+                } - set(document)
+                if missing:
+                    raise ValueError(
+                        "missing body-proportion field(s): "
+                        + ", ".join(sorted(missing))
+                    )
+                person_index = document.get("person_index", 0)
+                strength = document.get("fit_strength", 0.5)
+                regions = document.get("regions")
+                result = service.sam3d_body_proportions(
+                    sam3d_body.group(1),
+                    target_uid=document["target_uid"],
+                    person_index=person_index,
+                    strength=strength,
+                    regions=regions,
+                )
+                if result.get("job_revision") != document[
+                    "expected_job_revision"
+                ]:
+                    raise ValueError(
+                        "SAM3D job revision has changed; analyze again"
+                    )
+                if action == "analyze":
+                    self._json(HTTPStatus.OK, result)
+                    return
+                if "expected_analysis_revision" not in document:
+                    raise ValueError(
+                        "missing body-proportion field: "
+                        "expected_analysis_revision"
+                    )
+                result = service.apply_sam3d_body_proportions(
+                    sam3d_body.group(1),
+                    expected_job_revision=document[
+                        "expected_job_revision"
+                    ],
+                    expected_analysis_revision=document[
+                        "expected_analysis_revision"
+                    ],
+                    target_uid=document["target_uid"],
+                    person_index=person_index,
+                    strength=strength,
+                    regions=regions,
+                )
+                self._json(HTTPStatus.ACCEPTED, result)
+                return
             sam3d_run = _SAM3D_RUN.fullmatch(parsed.path)
             if method == "POST" and sam3d_run:
                 if document:

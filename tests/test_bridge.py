@@ -1338,6 +1338,99 @@ class BridgeSourceTests(unittest.TestCase):
         self.assertNotIn('request["actionName"]', source)
         self.assertNotIn('request["solutionPath"]', source)
 
+    def test_bridge_body_proportions_are_tokenized_bounded_and_reversible(
+        self,
+    ) -> None:
+        repository = Path(__file__).resolve().parents[1]
+        source = (
+            repository / "src" / "vampip" / "bridge_assets" / "VAMPipBridge.cs"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn('"setPersonBodyProportions"', source)
+        self.assertIn('"undoPersonBodyProportions"', source)
+        self.assertIn("MaximumBodyProportionChanges = 8", source)
+        self.assertIn("MaximumBodyProportionDelta = 0.25f", source)
+        self.assertIn('"person-body-proportions-v1"', source)
+        self.assertIn('result["undoRevision"]', source)
+        self.assertIn(
+            '"Undo the currently applied SAM3D pose before "',
+            source,
+        )
+
+        apply_start = source.index(
+            "private static void SetBodyProportionMorphValue("
+        )
+        apply_end = source.index(
+            "private IEnumerator ExecuteLoadScene(",
+            apply_start,
+        )
+        apply_source = source[apply_start:apply_end]
+        self.assertIn("morph.LoadDeltas();", apply_source)
+        self.assertIn("morph.SetValue(value);", apply_source)
+        self.assertIn("RestoreBodyProportionValues(", apply_source)
+        self.assertIn("CurrentSam3dSnapshot() != null", apply_source)
+        self.assertIn(
+            "Restore it before applying another fit.",
+            apply_source,
+        )
+        self.assertIn("undoBookkeepingChanged", apply_source)
+        self.assertIn(
+            "_personBodyProportionUndo[\n"
+            "                            request.TargetUid] = priorUndo;",
+            apply_source,
+        )
+        self.assertIn(
+            "SuperController.singleton.ResetSimulation(",
+            apply_source,
+        )
+        self.assertIn(
+            '"Apply VAM-PIP body proportions"',
+            apply_source,
+        )
+
+        catalog_start = source.index(
+            "private static bool IsAllowlistedBodyProportionMorphName("
+        )
+        catalog_end = source.index(
+            "private static string BuildPersonClothingGenerationKey(",
+            catalog_start,
+        )
+        catalog_source = source[catalog_start:catalog_end]
+        for rejection in (
+            "morph.disable",
+            "morph.isPoseControl",
+            "morph.isDriven",
+            "!morph.isLatestVersion",
+            "morph.isInPackage",
+            "morph.isRuntime",
+            "morph.isTransient",
+        ):
+            self.assertIn(rejection, catalog_source)
+        self.assertIn(
+            "bank.GetBuiltInMorphByUid(morph.uid)",
+            catalog_source,
+        )
+        self.assertIn(
+            "HashBodyProportionBankState(",
+            catalog_source,
+        )
+        self.assertIn(
+            "morph.hasBoneModificationFormulas",
+            catalog_source,
+        )
+        for measurement in (
+            "upperArm",
+            "forearm",
+            "thigh",
+            "shin",
+            "torso",
+            "shoulderSpan",
+            "hipSpan",
+            "structuralHeight",
+        ):
+            self.assertIn(f'"{measurement}"', catalog_source)
+        self.assertNotIn("morphedWorldPosition =", catalog_source)
+
     def test_bridge_sam3d_pose_changes_are_physics_safe_and_reversible(
         self,
     ) -> None:

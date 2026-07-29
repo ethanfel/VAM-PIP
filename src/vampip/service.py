@@ -29,6 +29,7 @@ from vampip.bridge import (
     request_custom_unity_asset_choice,
     request_custom_unity_asset_load,
     request_person_clothing,
+    request_person_body_proportions,
     request_person_hair_item,
     request_person_preset,
     request_rescan,
@@ -40,7 +41,15 @@ from vampip.bridge import (
     request_sam3d_undo,
     request_subscene_load,
     request_timeline_control,
+    request_undo_person_body_proportions,
     TIMELINE_CONTROL_OPERATIONS,
+)
+from vampip.body_proportions import (
+    build_analysis as build_body_proportion_analysis,
+    normalize_regions as normalize_body_proportion_regions,
+    normalize_strength as normalize_body_proportion_strength,
+    signature_from_live as live_body_proportion_signature,
+    signature_from_manifest as sam3d_body_proportion_signature,
 )
 from vampip.catalog import (
     catalog_facets as load_catalog_facets,
@@ -1124,6 +1133,109 @@ def _public_sam3d_status(value: object) -> dict[str, object] | None:
     return result
 
 
+def _public_body_proportions(value: object) -> dict[str, object] | None:
+    if not isinstance(value, dict):
+        return None
+    revision = _equipment_text(value.get("revision"), maximum=32).casefold()
+    if re.fullmatch(r"[0-9a-f]{32}", revision) is None:
+        revision = ""
+    undo_revision = _equipment_text(
+        value.get("undoRevision"),
+        maximum=32,
+    ).casefold()
+    if re.fullmatch(r"[0-9a-f]{32}", undo_revision) is None:
+        undo_revision = ""
+    measurements: dict[str, float] = {}
+    raw_measurements = value.get("measurements")
+    if isinstance(raw_measurements, dict):
+        for key in (
+            "upperArm",
+            "forearm",
+            "thigh",
+            "shin",
+            "torso",
+            "shoulderSpan",
+            "hipSpan",
+        ):
+            raw = raw_measurements.get(key)
+            if isinstance(raw, dict):
+                raw = raw.get("meters")
+            number = _sam3d_settlement_number(
+                raw,
+                minimum=0.000001,
+                maximum=10.0,
+            )
+            if number is not None:
+                measurements[key] = number
+
+    morphs: list[dict[str, object]] = []
+    seen: set[str] = set()
+    raw_morphs = value.get("morphs")
+    if isinstance(raw_morphs, list):
+        for raw in raw_morphs[:64]:
+            if not isinstance(raw, dict):
+                continue
+            key = _equipment_text(raw.get("key"), maximum=32).casefold()
+            name = _presentation_text(raw.get("name"), maximum=128)
+            if (
+                re.fullmatch(r"[0-9a-f]{32}", key) is None
+                or key in seen
+                or not name
+            ):
+                continue
+            current = _sam3d_settlement_number(
+                raw.get("value"),
+                minimum=-100.0,
+                maximum=100.0,
+            )
+            minimum = _sam3d_settlement_number(
+                raw.get("min"),
+                minimum=-100.0,
+                maximum=100.0,
+            )
+            maximum = _sam3d_settlement_number(
+                raw.get("max"),
+                minimum=-100.0,
+                maximum=100.0,
+            )
+            if (
+                current is None
+                or minimum is None
+                or maximum is None
+                or minimum > maximum
+                or current < minimum - 1e-5
+                or current > maximum + 1e-5
+            ):
+                continue
+            seen.add(key)
+            morphs.append(
+                {
+                    "key": key,
+                    "name": name,
+                    "region": _presentation_text(
+                        raw.get("region"),
+                        maximum=128,
+                    ),
+                    "value": current,
+                    "min": minimum,
+                    "max": maximum,
+                }
+            )
+    return {
+        "ready": bool(
+            value.get("ready") is True
+            and revision
+            and len(measurements) == 7
+        ),
+        "selectedOnly": value.get("selectedOnly") is True,
+        "revision": revision or None,
+        "undoRevision": undo_revision or None,
+        "measurements": measurements,
+        "morphs": morphs,
+        "undoAvailable": value.get("undoAvailable") is True,
+    }
+
+
 def _public_cua_status(value: object) -> dict[str, object] | None:
     if not isinstance(value, dict):
         return None
@@ -1658,6 +1770,11 @@ class ManagerService:
                     "uid": uid,
                     "selected": person.get("selected") is True,
                 }
+                body_proportions = _public_body_proportions(
+                    person.get("bodyProportions")
+                )
+                if body_proportions is not None:
+                    public_person["bodyProportions"] = body_proportions
                 clothing = person.get("clothing")
                 if isinstance(clothing, dict):
                     public_clothing: dict[str, object] = {
@@ -2414,6 +2531,278 @@ class ManagerService:
                 "camera_uid does not match the currently applied SAM3D solution"
             )
         return live
+
+    @staticmethod
+    def _live_body_proportion_status(
+        scene: dict[str, object],
+        target_uid: str,
+    ) -> dict[str, object]:
+        person = next(
+            (
+                value
+                for value in scene.get("persons", [])
+                if isinstance(value, dict)
+                and value.get("uid") == target_uid
+            ),
+            None,
+        )
+        if person is None:
+            raise ValueError("the selected Person is no longer available")
+        status = person.get("bodyProportions")
+        if not isinstance(status, dict) or status.get("ready") is not True:
+            raise ValueError(
+                "the bridge has not published body proportions for this Person; "
+                "select the Person in VaM and refresh"
+            )
+        if status.get("selectedOnly") is True and person.get("selected") is not True:
+            raise ValueError(
+                "body proportions are available only for the Person selected in VaM"
+            )
+        return status
+
+    @staticmethod
+    def _body_analysis_revision(document: dict[str, object]) -> str:
+        unsigned = {
+            key: value
+            for key, value in document.items()
+            if key not in {"analysis_revision", "analysisRevision"}
+        }
+        encoded = json.dumps(
+            unsigned,
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("ascii")
+        return hashlib.sha256(encoded).hexdigest()[:32]
+
+    def sam3d_body_proportions(
+        self,
+        job_id: str,
+        *,
+        target_uid: object,
+        person_index: int = 0,
+        strength: object = 0.5,
+        regions: object = None,
+    ) -> dict[str, object]:
+        job_id = validate_sam3d_job_id(job_id)
+        if isinstance(person_index, bool) or not isinstance(person_index, int):
+            raise TypeError("person_index must be an integer")
+        strength_value = normalize_body_proportion_strength(strength)
+        region_values = normalize_body_proportion_regions(regions)
+        scene = self._require_live_capability(
+            "person-body-proportions-v1",
+            action_label="analyzing body proportions",
+        )
+        target_uid, _ = self._validate_live_atom_target(
+            scene,
+            target_uid,
+            expected_atom_type="Person",
+            create_if_missing=False,
+        )
+        body_status = self._live_body_proportion_status(scene, target_uid)
+        manager = self._sam3d()
+        job = manager.get(job_id)
+        if job["state"] != "succeeded":
+            raise Sam3dJobError("SAM3D job has not completed successfully")
+        manifest = manager.manifest(job_id)
+        job_revision = str(manifest["revision"])
+        target = sam3d_body_proportion_signature(manifest, person_index)
+        current = live_body_proportion_signature(body_status)
+        analysis = build_body_proportion_analysis(
+            target,
+            current,
+            body_status,
+            strength=strength_value,
+            regions=region_values,
+        )
+        live_sam3d = scene.get("sam3d")
+        pose_applied = bool(
+            isinstance(live_sam3d, dict)
+            and live_sam3d.get("applied") is True
+        )
+        person_fit_active = body_status.get("undoAvailable") is True
+        result: dict[str, object] = {
+            **analysis,
+            "job_id": job_id,
+            "job_revision": job_revision,
+            "target_uid": target_uid,
+            "person_index": person_index,
+            "proposed_morphs": analysis["changes"],
+            "confidence": target["overallConfidence"],
+            "model_disagreement": None,
+            # The bridge owns one exact undo snapshot per Person, independent
+            # of whichever reconstruction happens to be open in the UI.
+            "applied": person_fit_active,
+            "person_fit_active": person_fit_active,
+            "apply_revision": (
+                body_status.get("undoRevision")
+                if person_fit_active
+                else None
+            ),
+            "can_apply": bool(
+                analysis["canApply"]
+                and not pose_applied
+                and not person_fit_active
+            ),
+            "can_undo": person_fit_active,
+            "pose_applied": pose_applied,
+        }
+        if person_fit_active:
+            result["canApply"] = False
+            result["can_apply"] = False
+            result["apply_blocked_reason"] = (
+                "This Person already has an active body fit. Restore its "
+                "one-level morph snapshot before applying another fit."
+            )
+        elif pose_applied:
+            result["canApply"] = False
+            result["can_apply"] = False
+            result["apply_blocked_reason"] = (
+                "Undo the current SAM3D pose before changing body proportions."
+            )
+        revision = self._body_analysis_revision(result)
+        result["analysis_revision"] = revision
+        result["analysisRevision"] = revision
+        bridge_request = read_bridge_request(self.vam_root)
+        bridge_status = scene.get("bridge")
+        if (
+            isinstance(bridge_request, dict)
+            and bridge_request.get("command")
+            in {
+                "setPersonBodyProportions",
+                "undoPersonBodyProportions",
+            }
+            and bridge_request.get("targetUid") == target_uid
+            and isinstance(bridge_status, dict)
+            and bridge_status.get("requestId")
+            == bridge_request.get("requestId")
+        ):
+            state = str(bridge_status.get("state") or "").casefold()
+            if state:
+                result["state"] = state
+            message = str(bridge_status.get("message") or "")
+            if message:
+                result["message"] = message
+        return result
+
+    def apply_sam3d_body_proportions(
+        self,
+        job_id: str,
+        *,
+        expected_job_revision: object,
+        expected_analysis_revision: object,
+        target_uid: object,
+        person_index: int = 0,
+        strength: object = 0.5,
+        regions: object = None,
+    ) -> dict[str, object]:
+        expected_job_revision = self._sam3d_solution_revision(
+            expected_job_revision,
+            label="expected_job_revision",
+        )
+        expected_analysis_revision = self._sam3d_solution_revision(
+            expected_analysis_revision,
+            label="expected_analysis_revision",
+        )
+        analysis = self.sam3d_body_proportions(
+            job_id,
+            target_uid=target_uid,
+            person_index=person_index,
+            strength=strength,
+            regions=regions,
+        )
+        if analysis["job_revision"] != expected_job_revision:
+            raise ValueError("SAM3D job revision has changed; analyze again")
+        if analysis["analysis_revision"] != expected_analysis_revision:
+            raise ValueError(
+                "the Person, morph catalog, or fit settings changed; analyze again"
+            )
+        if analysis.get("can_apply") is not True:
+            reason = analysis.get("apply_blocked_reason")
+            raise ValueError(
+                str(reason or "no safe body-proportion morph changes are available")
+            )
+        body_revision = analysis.get("bodyRevision")
+        if not isinstance(body_revision, str):
+            raise ValueError("the live body-proportion catalog has no revision")
+        changes = [
+            {"key": item["key"], "value": item["value"]}
+            for item in analysis["changes"]
+            if isinstance(item, dict)
+            and isinstance(item.get("key"), str)
+            and isinstance(item.get("value"), (int, float))
+        ]
+        request_id = self._queue_bridge_request(
+            lambda: request_person_body_proportions(
+                self.vam_root,
+                target_uid=str(analysis["target_uid"]),
+                expected_revision=body_revision,
+                changes=changes,
+            )
+        )
+        return {
+            "job_id": job_id,
+            "job_revision": expected_job_revision,
+            "analysis_revision": expected_analysis_revision,
+            "apply_revision": None,
+            "bridge_request": request_id,
+            "target_uid": analysis["target_uid"],
+            "proposed_morphs": analysis["changes"],
+            "action_state": "queued",
+            "applied": False,
+            "can_undo": False,
+            "message": (
+                "Body-proportion morphs are queued in VaM. Apply the pose and "
+                "camera after the bridge reports completion. Body Scale is "
+                "unchanged, but length morphs can change final height."
+            ),
+        }
+
+    def undo_sam3d_body_proportions(
+        self,
+        job_id: str,
+        *,
+        target_uid: object,
+        expected_apply_revision: object,
+    ) -> dict[str, object]:
+        job_id = validate_sam3d_job_id(job_id)
+        expected = self._sam3d_solution_revision(
+            expected_apply_revision,
+            label="expected_apply_revision",
+        )
+        scene = self._require_live_capability(
+            "person-body-proportions-v1",
+            action_label="undoing body proportions",
+        )
+        target_uid, _ = self._validate_live_atom_target(
+            scene,
+            target_uid,
+            expected_atom_type="Person",
+            create_if_missing=False,
+        )
+        body_status = self._live_body_proportion_status(scene, target_uid)
+        if body_status.get("undoAvailable") is not True:
+            raise ValueError("no matching body-proportion undo is available")
+        revision = body_status.get("undoRevision")
+        if revision != expected:
+            raise ValueError(
+                "the Person or body-proportion state changed; refresh before undo"
+            )
+        request_id = self._queue_bridge_request(
+            lambda: request_undo_person_body_proportions(
+                self.vam_root,
+                target_uid=target_uid,
+                expected_revision=expected,
+            )
+        )
+        return {
+            "job_id": job_id,
+            "apply_revision": expected,
+            "bridge_request": request_id,
+            "target_uid": target_uid,
+            "action_state": "queued",
+            "message": "The previous body-proportion morph values are being restored.",
+        }
 
     def apply_sam3d_result(
         self,

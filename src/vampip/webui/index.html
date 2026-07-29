@@ -6,8 +6,8 @@
     <meta name="color-scheme" content="dark">
     <meta name="theme-color" content="#111316">
     <title>VAM-PIP Manager</title>
-    <link rel="stylesheet" href="/styles.css?v=0.15.4">
-    <script src="/app.js?v=0.15.4" defer></script>
+    <link rel="stylesheet" href="/styles.css?v=0.16.0">
+    <script src="/app.js?v=0.16.0" defer></script>
   </head>
   <body>
     <a class="skip-link" href="#main-content">Skip to library</a>
@@ -879,10 +879,284 @@
                 </div>
               </section>
 
-              <section class="sam3d-panel sam3d-apply-panel" id="sam3d-apply-panel" hidden aria-labelledby="sam3d-apply-title">
+              <section
+                class="sam3d-handoff"
+                id="sam3d-handoff"
+                hidden
+                aria-labelledby="sam3d-handoff-title"
+              >
+                <div class="sam3d-handoff-heading">
+                  <div>
+                    <p class="eyebrow">Post-reconstruction handoff</p>
+                    <h3 id="sam3d-handoff-title">Fit the body, then place it</h3>
+                  </div>
+                  <div
+                    class="sam3d-handoff-tabs"
+                    role="tablist"
+                    aria-label="SAM 3D VaM handoff"
+                  >
+                    <button
+                      class="active"
+                      id="sam3d-handoff-morph-tab"
+                      type="button"
+                      role="tab"
+                      aria-selected="true"
+                      aria-controls="sam3d-proportions-panel"
+                      data-sam3d-handoff-tab="morph"
+                    >
+                      <span>1</span>
+                      Morph
+                    </button>
+                    <button
+                      id="sam3d-handoff-pose-tab"
+                      type="button"
+                      role="tab"
+                      aria-selected="false"
+                      aria-controls="sam3d-apply-panel"
+                      data-sam3d-handoff-tab="pose"
+                    >
+                      <span>2</span>
+                      Pose + camera
+                    </button>
+                  </div>
+                </div>
+
+                <div class="sam3d-handoff-target">
+                  <label class="sam3d-proportions-target" for="sam3d-person-target">
+                    <span>Target Person</span>
+                    <select id="sam3d-person-target">
+                      <option value="">Waiting for VaM…</option>
+                    </select>
+                    <small>
+                      Shared by both tabs. Morph analysis is read-only until you press Apply morphs.
+                    </small>
+                  </label>
+                </div>
+
+                <section
+                  class="sam3d-panel sam3d-proportions-panel"
+                  id="sam3d-proportions-panel"
+                  role="tabpanel"
+                  aria-labelledby="sam3d-handoff-morph-tab"
+                >
                 <header class="sam3d-panel-heading">
                   <div>
                     <span class="sam3d-step">4</span>
+                    <div>
+                      <p class="eyebrow">Body proportions</p>
+                      <h3 id="sam3d-proportions-title">Fit lengths and widths before posing</h3>
+                    </div>
+                  </div>
+                  <button
+                    class="primary-button"
+                    id="sam3d-proportions-analyze"
+                    type="button"
+                    disabled
+                  >Analyze</button>
+                </header>
+
+                <div class="sam3d-proportions-layout">
+                  <div class="sam3d-proportions-controls">
+                    <section
+                      class="sam3d-profile-panel"
+                      aria-labelledby="sam3d-profile-title"
+                    >
+                      <div class="sam3d-profile-heading">
+                        <div>
+                          <span>Local preferences</span>
+                          <strong id="sam3d-profile-title">Person profile</strong>
+                        </div>
+                        <button
+                          class="quiet-button"
+                          id="sam3d-profile-new"
+                          type="button"
+                        >New</button>
+                      </div>
+                      <label for="sam3d-profile-select">
+                        <span>Named profile</span>
+                        <select id="sam3d-profile-select">
+                          <option value="">No profile · current controls</option>
+                        </select>
+                      </label>
+                      <label for="sam3d-profile-reference-job">
+                        <span>Reference reconstruction</span>
+                        <select id="sam3d-profile-reference-job">
+                          <option value="">Current job</option>
+                        </select>
+                      </label>
+                      <div class="sam3d-profile-actions">
+                        <button
+                          class="secondary-button small"
+                          id="sam3d-profile-save"
+                          type="button"
+                          disabled
+                        >Save preferences</button>
+                        <button
+                          class="secondary-button small"
+                          id="sam3d-profile-use-reference"
+                          type="button"
+                          disabled
+                        >Open reference</button>
+                        <button
+                          class="quiet-button"
+                          id="sam3d-profile-delete"
+                          type="button"
+                          disabled
+                        >Delete</button>
+                      </div>
+                      <p id="sam3d-profile-note">
+                        Profiles stay in this browser and store regions, fit strength,
+                        and a reference job—never live morph values or revisions.
+                      </p>
+                    </section>
+
+                    <fieldset class="sam3d-region-fieldset">
+                      <legend>Regions to fit</legend>
+                      <div class="sam3d-region-grid">
+                        <label for="sam3d-region-arms">
+                          <input id="sam3d-region-arms" type="checkbox" value="arms" checked>
+                          <span>
+                            <strong>Arms</strong>
+                            <small>Upper arm + forearm</small>
+                          </span>
+                        </label>
+                        <label for="sam3d-region-legs">
+                          <input id="sam3d-region-legs" type="checkbox" value="legs" checked>
+                          <span>
+                            <strong>Legs</strong>
+                            <small>Thigh + shin</small>
+                          </span>
+                        </label>
+                        <label for="sam3d-region-torso">
+                          <input id="sam3d-region-torso" type="checkbox" value="torso" checked>
+                          <span>
+                            <strong>Torso</strong>
+                            <small>Upper + lower torso</small>
+                          </span>
+                        </label>
+                        <label for="sam3d-region-widths">
+                          <input id="sam3d-region-widths" type="checkbox" value="widths" checked>
+                          <span>
+                            <strong>Widths</strong>
+                            <small>Shoulders fitted · hips measured</small>
+                          </span>
+                        </label>
+                      </div>
+                    </fieldset>
+
+                    <div class="sam3d-scale-note">
+                      <strong>Relative skeletal fit</strong>
+                      <small>
+                        Body Scale stays untouched. Leg and torso length morphs can
+                        still change the Person’s final height.
+                      </small>
+                    </div>
+
+                    <label class="sam3d-fit-strength" for="sam3d-fit-strength">
+                      <span>
+                        <strong>Fit strength</strong>
+                        <output id="sam3d-fit-strength-value" for="sam3d-fit-strength">75%</output>
+                      </span>
+                      <input id="sam3d-fit-strength" type="range" min="0" max="100" step="5" value="75">
+                      <small>Lower values blend the proposed morph changes toward the current body.</small>
+                    </label>
+                  </div>
+
+                  <div class="sam3d-proportions-report">
+                    <div
+                      class="sam3d-proportions-state"
+                      id="sam3d-proportions-state"
+                      role="status"
+                      aria-live="polite"
+                    >
+                      <span class="sam3d-progress-dot" aria-hidden="true"></span>
+                      <div>
+                        <strong id="sam3d-proportions-state-title">Analyze before changing VaM</strong>
+                        <p id="sam3d-proportions-state-message">
+                          Compare the neutral SAM 3D body with the selected Person. Analysis is read-only.
+                        </p>
+                      </div>
+                      <button
+                        class="secondary-button small"
+                        id="sam3d-proportions-retry"
+                        type="button"
+                        hidden
+                      >Retry</button>
+                    </div>
+
+                    <div id="sam3d-proportions-results" hidden>
+                      <div class="sam3d-proportions-summary">
+                        <div>
+                          <span>Geometric confidence</span>
+                          <strong id="sam3d-proportions-confidence">—</strong>
+                        </div>
+                        <div>
+                          <span>Model disagreement</span>
+                          <strong id="sam3d-proportions-disagreement">—</strong>
+                        </div>
+                      </div>
+
+                      <div class="sam3d-proportions-section">
+                        <div class="sam3d-proportions-section-heading">
+                          <div>
+                            <strong>Measured proportions</strong>
+                            <span>Current VaM → image target</span>
+                          </div>
+                        </div>
+                        <div
+                          class="sam3d-measurement-list"
+                          id="sam3d-proportions-measurements"
+                        ></div>
+                      </div>
+
+                      <div class="sam3d-proportions-section">
+                        <div class="sam3d-proportions-section-heading">
+                          <div>
+                            <strong>Proposed morph changes</strong>
+                            <span>Bounded changes at the selected fit strength</span>
+                          </div>
+                        </div>
+                        <div
+                          class="sam3d-morph-change-list"
+                          id="sam3d-proportions-morphs"
+                        ></div>
+                      </div>
+                    </div>
+
+                    <p
+                      class="sam3d-apply-note sam3d-proportions-note"
+                      id="sam3d-proportions-note"
+                    >
+                      Arms, legs, torso, and widths are geometric fits. Soft-body physics is not inferred.
+                    </p>
+                    <div class="sam3d-action-row">
+                      <button
+                        class="primary-button"
+                        id="sam3d-proportions-apply"
+                        type="button"
+                        disabled
+                      >Apply morphs</button>
+                      <button
+                        class="secondary-button"
+                        id="sam3d-proportions-undo"
+                        type="button"
+                        disabled
+                      >Undo body fit</button>
+                    </div>
+                  </div>
+                </div>
+                </section>
+
+                <section
+                  class="sam3d-panel sam3d-apply-panel"
+                  id="sam3d-apply-panel"
+                  role="tabpanel"
+                  aria-labelledby="sam3d-handoff-pose-tab"
+                  hidden
+                >
+                <header class="sam3d-panel-heading">
+                  <div>
+                    <span class="sam3d-step">5</span>
                     <div>
                       <p class="eyebrow">VaM handoff</p>
                       <h3 id="sam3d-apply-title">Apply Person pose and camera together</h3>
@@ -892,12 +1166,6 @@
                 </header>
 
                 <div class="sam3d-target-grid">
-                  <label>
-                    <span>Target Person</span>
-                    <select id="sam3d-person-target">
-                      <option value="">Waiting for VaM…</option>
-                    </select>
-                  </label>
                   <label>
                     <span>VR Video &amp; Funscript camera</span>
                     <select id="sam3d-camera-target">
@@ -951,6 +1219,7 @@
                   <button class="secondary-button" id="sam3d-undo-button" type="button" disabled>Undo last apply</button>
                   <button class="secondary-button" id="sam3d-capture-button" type="button" disabled>Take VaM screenshot</button>
                 </div>
+                </section>
               </section>
             </div>
 

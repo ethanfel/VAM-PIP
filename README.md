@@ -23,7 +23,7 @@ leaving managed mode restores that baseline.
 
 ## Current status
 
-Version 0.15.4 is functional but should still be treated as an early release.
+Version 0.16.0 is functional but should still be treated as an early release.
 Package switching is deliberately conservative:
 
 - entering managed mode requires explicit confirmation;
@@ -276,6 +276,21 @@ The worker is isolated from ComfyUI, and bridge installation includes the
 fixed camera preset and renderer scripts needed by that workflow. See the
 [standalone SAM 3D Body setup](docs/SAM3D_SETUP.md) for environment, model,
 and configuration instructions.
+
+Completed reconstructions now use a two-stage handoff. **Morph** first compares
+the model's neutral skeleton with the currently selected VaM Person, shows
+seven relative measurements, and proposes bounded built-in morph changes.
+Applying those changes creates one exact Person-wide undo snapshot; another
+fit cannot replace that snapshot until it is restored. **Pose + camera** remains
+a separate second action so body-shape review never moves controllers
+implicitly. Body Scale, face morphs, and soft-body physics are not changed.
+Leg and torso length morphs can still alter final height.
+
+Named Person profiles stay in browser-local storage. They remember selected
+regions, fit strength, and one reconstruction reference, but never store live
+VaM morph identifiers, values, or revision tokens. Reopening a profile
+therefore always requires a fresh read-only analysis against the current
+Person before **Apply morphs** becomes available.
 
 ## External workspace
 

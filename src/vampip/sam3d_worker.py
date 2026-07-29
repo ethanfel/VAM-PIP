@@ -8,6 +8,7 @@ dependencies remain on the worker side of the subprocess boundary.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -15,6 +16,11 @@ from pathlib import Path
 import re
 import sys
 from typing import Any
+
+if __package__:
+    from .sam3d_body_signature import derive_body_proportions
+else:
+    from sam3d_body_signature import derive_body_proportions
 
 
 MHR70_NAMES = (
@@ -115,6 +121,24 @@ BODY_LINKS = (
 )
 
 MODEL_CONFIG_LIMIT = 64 * 1024
+NUMERIC_ARRAY_SHAPES = {
+    "pred_keypoints_3d": (70, 3),
+    "pred_keypoints_2d": (70, 2),
+    "pred_vertices": (18439, 3),
+    "pred_cam_t": (3,),
+    "pred_pose_raw": (266,),
+    "global_rot": (3,),
+    "body_pose_params": (133,),
+    "hand_pose_params": (108,),
+    "scale_params": (28,),
+    "shape_params": (45,),
+    "expr_params": (72,),
+    "pred_joint_coords": (127, 3),
+    "pred_global_rots": (127, 3, 3),
+    "mhr_model_params": (204,),
+    "lhand_bbox": (4,),
+    "rhand_bbox": (4,),
+}
 
 
 def _model_config_path(checkpoint: Path) -> Path | None:
@@ -207,6 +231,162 @@ def _nested_finite(value: Any) -> list[object]:
         return number
 
     return validate(result)
+
+
+def _validated_numeric_array(
+    np: Any,
+    value: Any,
+    *,
+    name: str,
+) -> Any:
+    """Return one exact, finite float32 array from the official model output."""
+
+    expected_shape = NUMERIC_ARRAY_SHAPES[name]
+    array = np.asarray(value)
+    if (
+        tuple(array.shape) != expected_shape
+        or array.dtype == np.dtype(bool)
+        or not np.issubdtype(array.dtype, np.number)
+        or np.issubdtype(array.dtype, np.complexfloating)
+        or not bool(np.isfinite(array).all())
+    ):
+        raise ValueError(
+            f"SAM 3D Body {name} must be finite numeric data with shape "
+            f"{expected_shape}"
+        )
+    normalized = np.ascontiguousarray(array, dtype=np.float32)
+    if not bool(np.isfinite(normalized).all()):
+        raise ValueError(f"SAM 3D Body {name} overflows float32")
+    return normalized
+
+
+def _validated_person_arrays(
+    np: Any,
+    output: dict[str, Any],
+    *,
+    person_index: int,
+) -> dict[str, Any]:
+    missing = set(NUMERIC_ARRAY_SHAPES) - set(output)
+    if missing:
+        raise ValueError(
+            "SAM 3D Body numeric output is incomplete: "
+            + ", ".join(sorted(missing))
+        )
+    return {
+        f"person_{person_index}_{name}": _validated_numeric_array(
+            np,
+            output[name],
+            name=name,
+        )
+        for name in NUMERIC_ARRAY_SHAPES
+    }
+
+
+def _validate_stored_numeric_arrays(
+    np: Any,
+    path: Path,
+    *,
+    person_count: int,
+) -> None:
+    expected = {
+        f"person_{person_index}_{name}": shape
+        for person_index in range(person_count)
+        for name, shape in NUMERIC_ARRAY_SHAPES.items()
+    }
+    try:
+        with np.load(path, allow_pickle=False) as stored:
+            if len(stored.files) != len(expected) or set(stored.files) != set(expected):
+                raise ValueError("stored SAM 3D Body arrays have an invalid key set")
+            for name, shape in expected.items():
+                array = stored[name]
+                if (
+                    tuple(array.shape) != shape
+                    or array.dtype != np.dtype(np.float32)
+                    or not bool(np.isfinite(array).all())
+                ):
+                    raise ValueError(
+                        f"stored SAM 3D Body array {name} is invalid"
+                    )
+    except (OSError, ValueError) as error:
+        if isinstance(error, ValueError) and str(error).startswith(
+            "stored SAM 3D Body"
+        ):
+            raise
+        raise ValueError("stored SAM 3D Body arrays are unreadable") from error
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        while chunk := stream.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _neutral_body_proportions(
+    model: Any,
+    output: dict[str, Any],
+    *,
+    np: Any,
+    torch: Any,
+) -> dict[str, object]:
+    """Regenerate the inferred identity in the neutral MHR bind pose."""
+
+    head = getattr(model, "head_pose", None)
+    if head is None or not callable(getattr(head, "mhr_forward", None)):
+        raise RuntimeError("SAM 3D Body model has no neutral MHR geometry path")
+    device = head.scale_mean.device
+    dtype = head.scale_mean.dtype
+
+    def tensor(name: str) -> Any:
+        return torch.as_tensor(
+            np.asarray(output[name]),
+            device=device,
+            dtype=dtype,
+        ).reshape(1, -1)
+
+    with torch.no_grad():
+        neutral = head.mhr_forward(
+            global_trans=torch.zeros((1, 3), device=device, dtype=dtype),
+            global_rot=torch.zeros((1, 3), device=device, dtype=dtype),
+            body_pose_params=torch.zeros_like(tensor("body_pose_params")),
+            hand_pose_params=torch.zeros_like(tensor("hand_pose_params")),
+            scale_params=tensor("scale_params"),
+            shape_params=tensor("shape_params"),
+            expr_params=torch.zeros_like(tensor("expr_params")),
+            return_keypoints=True,
+        )
+    if not isinstance(neutral, tuple) or len(neutral) < 2:
+        raise RuntimeError("neutral MHR geometry returned an invalid result")
+    vertices = neutral[0].detach().cpu().numpy()[0]
+    keypoints = neutral[1].detach().cpu().numpy()[0, :70]
+    if (
+        tuple(vertices.shape) != NUMERIC_ARRAY_SHAPES["pred_vertices"]
+        or tuple(keypoints.shape) != NUMERIC_ARRAY_SHAPES["pred_keypoints_3d"]
+        or not bool(np.isfinite(vertices).all())
+        or not bool(np.isfinite(keypoints).all())
+    ):
+        raise RuntimeError("neutral MHR geometry is invalid")
+
+    shoulder_midpoint = (
+        keypoints[MHR70_NAMES.index("left-shoulder")]
+        + keypoints[MHR70_NAMES.index("right-shoulder")]
+    ) * 0.5
+    hip_midpoint = (
+        keypoints[MHR70_NAMES.index("left-hip")]
+        + keypoints[MHR70_NAMES.index("right-hip")]
+    ) * 0.5
+    longitudinal_axis = shoulder_midpoint - hip_midpoint
+    axis_length = float(np.linalg.norm(longitudinal_axis))
+    if not math.isfinite(axis_length) or axis_length <= 1e-6:
+        raise RuntimeError("neutral MHR longitudinal axis is invalid")
+    longitudinal_axis = longitudinal_axis / axis_length
+    projections = vertices @ longitudinal_axis
+    stature = float(np.max(projections) - np.min(projections))
+    return derive_body_proportions(
+        keypoints.tolist(),
+        stature_m=stature,
+    )
 
 
 def _camera_intrinsics(
@@ -419,24 +599,6 @@ def run(
 
     people: list[dict[str, object]] = []
     arrays: dict[str, Any] = {}
-    numeric_array_names = (
-        "pred_keypoints_3d",
-        "pred_keypoints_2d",
-        "pred_vertices",
-        "pred_cam_t",
-        "pred_pose_raw",
-        "global_rot",
-        "body_pose_params",
-        "hand_pose_params",
-        "scale_params",
-        "shape_params",
-        "expr_params",
-        "pred_joint_coords",
-        "pred_global_rots",
-        "mhr_model_params",
-        "lhand_bbox",
-        "rhand_bbox",
-    )
     for index, output in enumerate(outputs):
         keypoints3d = _nested_finite(output["pred_keypoints_3d"])
         keypoints2d = _nested_finite(output["pred_keypoints_2d"])
@@ -453,17 +615,38 @@ def run(
             "keypointNames": list(MHR70_NAMES),
             "keypoints3d": keypoints3d,
             "keypoints2d": keypoints2d,
+            "bodyProportions": _neutral_body_proportions(
+                model,
+                output,
+                np=np,
+                torch=torch,
+            ),
         }
         people.append(person)
-        for name in numeric_array_names:
-            value = output.get(name)
-            if value is not None:
-                arrays[f"person_{index}_{name}"] = np.asarray(value)
+        arrays.update(
+            _validated_person_arrays(
+                np,
+                output,
+                person_index=index,
+            )
+        )
     arrays_path = output_dir / "arrays.npz"
     arrays_partial = output_dir / ".arrays.npz.partial"
     with arrays_partial.open("wb") as handle:
         np.savez_compressed(handle, **arrays)
     os.replace(arrays_partial, arrays_path)
+    _validate_stored_numeric_arrays(
+        np,
+        arrays_path,
+        person_count=len(people),
+    )
+    arrays_metadata = {
+        "schema": 1,
+        "format": "numpy-npz",
+        "sha256": _file_sha256(arrays_path),
+        "bytes": arrays_path.stat().st_size,
+        "people": len(people),
+    }
 
     overlay = _draw_overlay(cv2, image_bgr, people)
     overlay_partial = output_dir / ".overlay.png.partial"
@@ -498,6 +681,7 @@ def run(
         "people": people,
         "artifacts": {
             "arrays": "arrays.npz",
+            "arraysMetadata": arrays_metadata,
             "overlay": "overlay.png",
         },
     }

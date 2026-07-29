@@ -600,6 +600,75 @@ def request_person_hair_item(
     )
 
 
+def request_person_body_proportions(
+    vam_root: Path,
+    *,
+    target_uid: str,
+    expected_revision: str,
+    changes: list[dict[str, object]],
+) -> str:
+    if not isinstance(changes, list):
+        raise TypeError("changes must be a list")
+    if not 1 <= len(changes) <= 8:
+        raise ValueError("changes must contain between 1 and 8 morph updates")
+    normalized: list[dict[str, object]] = []
+    seen: set[str] = set()
+    for index, change in enumerate(changes):
+        if not isinstance(change, dict) or set(change) != {"key", "value"}:
+            raise ValueError(
+                f"changes[{index}] must contain only key and value"
+            )
+        key = _validate_opaque_token(
+            change["key"],
+            label=f"changes[{index}].key",
+        )
+        if key in seen:
+            raise ValueError("changes contains a duplicate morph key")
+        value = change["value"]
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(float(value))
+            or abs(float(value)) > 1.0
+        ):
+            raise ValueError(
+                f"changes[{index}].value must be a bounded finite number"
+            )
+        seen.add(key)
+        normalized.append({"key": key, "value": float(value)})
+    return _write_request(
+        vam_root,
+        {
+            "command": "setPersonBodyProportions",
+            "targetUid": _validate_target_uid(target_uid),
+            "expectedRevision": _validate_opaque_token(
+                expected_revision,
+                label="expected_revision",
+            ),
+            "changes": normalized,
+        },
+    )
+
+
+def request_undo_person_body_proportions(
+    vam_root: Path,
+    *,
+    target_uid: str,
+    expected_revision: str,
+) -> str:
+    return _write_request(
+        vam_root,
+        {
+            "command": "undoPersonBodyProportions",
+            "targetUid": _validate_target_uid(target_uid),
+            "expectedRevision": _validate_opaque_token(
+                expected_revision,
+                label="expected_revision",
+            ),
+        },
+    )
+
+
 def request_select_atom(vam_root: Path, target_uid: str) -> str:
     return _write_request(
         vam_root,
@@ -956,6 +1025,20 @@ def read_scene_status(vam_root: Path) -> dict[str, object] | None:
                                 continue
                             _normalize_bool(item, "locked")
                             _normalize_bool(item, "simulated")
+                body_proportions = person.get("bodyProportions")
+                if isinstance(body_proportions, dict):
+                    for key in (
+                        "ready",
+                        "selectedOnly",
+                        "undoAvailable",
+                        "blockedBySam3d",
+                    ):
+                        _normalize_bool(body_proportions, key)
+                    measurements = body_proportions.get("measurements")
+                    if isinstance(measurements, dict):
+                        for measurement in measurements.values():
+                            if isinstance(measurement, dict):
+                                _normalize_bool(measurement, "available")
     atoms = document.get("atoms")
     if isinstance(atoms, list):
         for atom in atoms:
