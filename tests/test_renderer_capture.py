@@ -4,12 +4,15 @@ import unittest
 from pathlib import Path
 
 
-RENDERER_SOURCE = (
+RENDERER_ROOT = (
     Path(__file__).resolve().parents[1]
     / "src"
     / "vampip"
     / "renderer_assets"
     / "VRRendererX"
+)
+RENDERER_SOURCE = (
+    RENDERER_ROOT
     / "src"
     / "vamrobot_VRVideoAndFunscriptExporter.cs"
 )
@@ -67,6 +70,21 @@ class VAMPipRendererCaptureLifecycleTests(unittest.TestCase):
             "ReleaseVAMPipEncoderThread(threadIdx, captureFreeFlags, captureSemaphore);",
             self.source,
         )
+
+    def test_cslist_entries_are_existing_csharp_sources(self) -> None:
+        entries = [
+            line.strip()
+            for line in (RENDERER_ROOT / "Eosin_VRRenderer.cslist")
+            .read_text(encoding="utf-8")
+            .splitlines()
+            if line.strip()
+        ]
+
+        self.assertTrue(entries)
+        for entry in entries:
+            with self.subTest(entry=entry):
+                self.assertTrue(entry.endswith(".cs"))
+                self.assertTrue((RENDERER_ROOT / entry).is_file())
 
 
 if __name__ == "__main__":
