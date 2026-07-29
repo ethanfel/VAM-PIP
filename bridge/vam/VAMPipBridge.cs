@@ -17,7 +17,7 @@ namespace VAMPip
     public class VAMPipBridge : MVRScript
     {
         private const int ProtocolVersion = 2;
-        private const string BridgeVersion = "0.8.0";
+        private const string BridgeVersion = "0.8.1";
 
         private const string PluginDataRoot = "Saves\\PluginData";
         private const string DataRoot = "Saves\\PluginData\\VAMPip";
@@ -54,6 +54,8 @@ namespace VAMPip
             "selectCustomUnityAssetChoice";
         private const string CommandSetPersonClothingResource =
             "setPersonClothingResource";
+        private const string CommandSetPersonHairItem =
+            "setPersonHairItem";
         private const string CommandSelectPerson = "selectPerson";
         private const string CommandSelectAtom = "selectAtom";
         private const string CommandLoadScene = "loadScene";
@@ -136,6 +138,8 @@ namespace VAMPip
             public string ChoiceToken;
             public bool ClothingActive;
             public string ClothingRevision;
+            public string HairRevision;
+            public string HairActionToken;
         }
 
         private sealed class AtomCreationResult
@@ -207,6 +211,9 @@ namespace VAMPip
             public DAZCharacterSelector Geometry;
             public string GenerationKey;
             public string Revision;
+            public List<DAZHairGroup> Items;
+            public List<string> ActionTokens;
+            public int PublishedCount;
         }
 
         private bool _operational;
@@ -493,6 +500,8 @@ namespace VAMPip
                 parsed.ChoiceToken = "";
                 parsed.ClothingActive = false;
                 parsed.ClothingRevision = "";
+                parsed.HairRevision = "";
+                parsed.HairActionToken = "";
 
                 if (command == CommandRescan)
                 {
@@ -675,6 +684,33 @@ namespace VAMPip
                         return;
                     }
                 }
+                else if (command == CommandSetPersonHairItem)
+                {
+                    parsed.TargetUid =
+                        ((string)request["targetUid"] ?? "").Trim();
+                    parsed.HairRevision =
+                        (string)request["revision"] ?? "";
+                    parsed.HairActionToken =
+                        (string)request["actionToken"] ?? "";
+                    parsed.RescanRequired = false;
+                    string desiredState =
+                        (string)request["desiredState"] ?? "";
+                    if (desiredState != "removed")
+                    {
+                        RejectRequest(
+                            requestId,
+                            "Hair desiredState must be exactly 'removed'.");
+                        return;
+                    }
+
+                    string validationError =
+                        ValidatePersonHairRequest(parsed);
+                    if (validationError.Length != 0)
+                    {
+                        RejectRequest(requestId, validationError);
+                        return;
+                    }
+                }
                 else if (command == CommandLoadScene)
                 {
                     parsed.ResourceRef =
@@ -699,7 +735,8 @@ namespace VAMPip
                         "'applyAtomPreset', 'loadSubscene', " +
                         "'loadCustomUnityAsset', " +
                         "'selectCustomUnityAssetChoice', " +
-                        "'setPersonClothingResource', 'selectPerson', " +
+                        "'setPersonClothingResource', 'setPersonHairItem', " +
+                        "'selectPerson', " +
                         "'selectAtom', and 'loadScene'.");
                     return;
                 }
@@ -908,6 +945,25 @@ namespace VAMPip
                 ".vam",
                 false,
                 "clothing items");
+        }
+
+        private static string ValidatePersonHairRequest(
+            BridgeRequest request)
+        {
+            string targetError = ValidateTargetUid(request.TargetUid);
+            if (targetError.Length != 0)
+            {
+                return targetError;
+            }
+            if (!IsHexToken(request.HairRevision))
+            {
+                return "revision must contain exactly 32 hexadecimal characters.";
+            }
+            if (!IsHexToken(request.HairActionToken))
+            {
+                return "actionToken must contain exactly 32 hexadecimal characters.";
+            }
+            return "";
         }
 
         private static string GetClothingResourcePrefix(string resourceRef)
@@ -1328,6 +1384,10 @@ namespace VAMPip
             {
                 ExecuteSetPersonClothingResource(request);
             }
+            else if (request.Command == CommandSetPersonHairItem)
+            {
+                ExecuteSetPersonHairItem(request);
+            }
             else
             {
                 ExecuteSelectAtom(
@@ -1724,6 +1784,153 @@ namespace VAMPip
                         Time.realtimeSinceStartup +
                         MinimumRescanIntervalSeconds;
                 }
+            }
+        }
+
+        private void ExecuteSetPersonHairItem(BridgeRequest request)
+        {
+            string startedAt = UtcNow();
+            try
+            {
+                PublishStatus(
+                    StateApplying,
+                    request.RequestId,
+                    startedAt,
+                    "",
+                    "",
+                    "Removing one active Hair layer.");
+
+                Atom person =
+                    SuperController.singleton.GetAtomByUid(request.TargetUid);
+                if (person == null || person.type != "Person")
+                {
+                    throw new Exception(
+                        "targetUid does not identify a Person atom in the " +
+                        "current scene.");
+                }
+                DAZCharacterSelector geometry =
+                    person.GetStorableByID("geometry")
+                    as DAZCharacterSelector;
+                if (geometry == null)
+                {
+                    throw new Exception(
+                        "The target Person does not expose native geometry.");
+                }
+
+                PersonHairSnapshot snapshot = null;
+                if (!_personHairSnapshots.TryGetValue(
+                        request.TargetUid,
+                        out snapshot) ||
+                    !object.ReferenceEquals(snapshot.Atom, person) ||
+                    !object.ReferenceEquals(snapshot.Geometry, geometry) ||
+                    !string.Equals(
+                        snapshot.Revision,
+                        request.HairRevision,
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    throw new Exception(
+                        "The Person Hair revision is stale; refresh the live " +
+                        "roster.");
+                }
+
+                List<ActiveHairEntry> entries =
+                    GetActiveHairEntries(person, geometry);
+                string currentGeneration =
+                    BuildPersonHairGenerationKey(geometry, entries);
+                if (!string.Equals(
+                        snapshot.GenerationKey,
+                        currentGeneration,
+                        StringComparison.Ordinal) ||
+                    snapshot.Items == null ||
+                    snapshot.ActionTokens == null ||
+                    snapshot.Items.Count != entries.Count ||
+                    snapshot.ActionTokens.Count != entries.Count ||
+                    snapshot.PublishedCount < 0 ||
+                    snapshot.PublishedCount > entries.Count)
+                {
+                    throw new Exception(
+                        "The Person's Hair changed; refresh the live roster.");
+                }
+
+                ActiveHairEntry selected = null;
+                int selectedIndex = -1;
+                int tokenMatches = 0;
+                int entryIndex;
+                for (entryIndex = 0;
+                     entryIndex < entries.Count;
+                     entryIndex++)
+                {
+                    if (!object.ReferenceEquals(
+                            snapshot.Items[entryIndex],
+                            entries[entryIndex].Item))
+                    {
+                        throw new Exception(
+                            "The Person's Hair identity changed; refresh the " +
+                            "live roster.");
+                    }
+                    if (snapshot.ActionTokens[entryIndex].Equals(
+                            request.HairActionToken,
+                            StringComparison.OrdinalIgnoreCase))
+                    {
+                        tokenMatches++;
+                        selected = entries[entryIndex];
+                        selectedIndex = entryIndex;
+                    }
+                }
+                if (tokenMatches != 1 ||
+                    selected == null ||
+                    selectedIndex < 0 ||
+                    selectedIndex >= snapshot.PublishedCount)
+                {
+                    throw new Exception(
+                        "The Hair action token is stale or ambiguous; refresh " +
+                        "the live roster.");
+                }
+                if (selected.Locked || selected.Item.locked)
+                {
+                    throw new Exception(
+                        "The Hair layer is locked in VaM; unlock it before " +
+                        "removing it externally.");
+                }
+                if (!selected.Item.active)
+                {
+                    throw new Exception(
+                        "The Hair layer is no longer active; refresh the live " +
+                        "roster.");
+                }
+
+                geometry.SetActiveHairItem(
+                    selected.Item,
+                    false,
+                    false,
+                    false);
+                if (selected.Item.active)
+                {
+                    throw new Exception(
+                        "VaM refused to disable the selected Hair layer.");
+                }
+
+                CompleteRequest(request.RequestId);
+                PublishSceneStatus();
+                PublishStatus(
+                    StateOk,
+                    request.RequestId,
+                    startedAt,
+                    UtcNow(),
+                    "vam",
+                    "Hair layer was removed.");
+                SuperController.LogMessage(
+                    "[VAM-PIP Bridge] Hair layer removed from " +
+                    request.TargetUid +
+                    ".");
+            }
+            catch (Exception exception)
+            {
+                FailRequest(
+                    request,
+                    startedAt,
+                    "Person Hair request failed: " +
+                    DescribeException(exception));
             }
         }
 
@@ -3730,6 +3937,11 @@ namespace VAMPip
                 GetActiveHairEntries(atom, geometry);
             string generationKey =
                 BuildPersonHairGenerationKey(geometry, entries);
+            int publishableCount = Math.Min(
+                entries.Count,
+                Math.Min(
+                    MaximumHairItemsPerPerson,
+                    Math.Max(0, globalItemBudget)));
             PersonHairSnapshot snapshot = null;
             bool reuse =
                 _personHairSnapshots.TryGetValue(
@@ -3741,10 +3953,47 @@ namespace VAMPip
                     snapshot.GenerationKey,
                     generationKey,
                     StringComparison.Ordinal);
+            if (reuse &&
+                (snapshot.Items == null ||
+                 snapshot.ActionTokens == null ||
+                 snapshot.Items.Count != entries.Count ||
+                 snapshot.ActionTokens.Count != entries.Count ||
+                 snapshot.PublishedCount != publishableCount))
+            {
+                reuse = false;
+            }
+            if (reuse)
+            {
+                int identityIndex;
+                for (identityIndex = 0;
+                     identityIndex < entries.Count;
+                     identityIndex++)
+                {
+                    if (!object.ReferenceEquals(
+                            snapshot.Items[identityIndex],
+                            entries[identityIndex].Item))
+                    {
+                        reuse = false;
+                        break;
+                    }
+                }
+            }
             if (!reuse)
             {
                 snapshot = new PersonHairSnapshot();
                 snapshot.Revision = Guid.NewGuid().ToString("N");
+                snapshot.Items = new List<DAZHairGroup>();
+                snapshot.ActionTokens = new List<string>();
+                snapshot.PublishedCount = publishableCount;
+                int tokenIndex;
+                for (tokenIndex = 0;
+                     tokenIndex < entries.Count;
+                     tokenIndex++)
+                {
+                    snapshot.Items.Add(entries[tokenIndex].Item);
+                    snapshot.ActionTokens.Add(
+                        Guid.NewGuid().ToString("N"));
+                }
             }
             snapshot.Atom = atom;
             snapshot.Geometry = geometry;
@@ -3764,8 +4013,7 @@ namespace VAMPip
                     lockedCount++;
                 }
                 if (
-                    publishedCount >= MaximumHairItemsPerPerson ||
-                    globalItemBudget <= 0)
+                    entryIndex >= snapshot.PublishedCount)
                 {
                     continue;
                 }
@@ -3774,6 +4022,8 @@ namespace VAMPip
                 publishedItem["tags"] = BuildRosterTags(entry.Tags);
                 publishedItem["locked"].AsBool = entry.Locked;
                 publishedItem["simulated"].AsBool = entry.Simulated;
+                publishedItem["actionToken"] =
+                    snapshot.ActionTokens[entryIndex];
                 publishedItems.Add(publishedItem);
                 publishedCount++;
                 globalItemBudget--;
@@ -3909,6 +4159,7 @@ namespace VAMPip
             capabilities.Add("person-preset-skin");
             capabilities.Add("person-clothing-item-toggle");
             capabilities.Add("person-hair-roster");
+            capabilities.Add("person-hair-item-toggle");
             capabilities.Add("person-add");
             capabilities.Add("person-select");
             return capabilities;

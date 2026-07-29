@@ -31,7 +31,7 @@ every resource can be applied in the same way.
 | Individual clothing | `Clothing (Female)` and `Clothing (Male)` | Set `geometry`'s exact `clothing:<resource>` boolean to worn or removed | Implemented with catalogue-derived package-qualified resource identity and revisioned live state |
 | Clothing item styles | `Clothing Item Presets` | Load an active item's own preset manager | Conservative same-folder style suggestions are browseable; live apply still requires a reliable exact clothing-item relationship |
 | Worn clothing | Not represented reliably by the offline catalogue | Publish a bounded presentation roster plus private validated worn and locked references from the target Person's `geometry` | Implemented as a complete character-sheet projection; opaque or built-in rows remain read-only |
-| Worn hair | Not represented reliably by the offline catalogue | Publish bounded active layer labels, tags, lock state, and simulation kind from the target Person's `geometry` | Implemented as a read-only Hair Studio roster; typed settings remain later work |
+| Worn hair | Not represented reliably by the offline catalogue | Publish bounded active layer labels, tags, lock state, simulation kind, and private revision-scoped action tokens from the target Person's `geometry` | Implemented with safe per-layer disable for exact unlocked layers; typed settings remain later work |
 | Individual morph sliders | Preset files only | Publish UID, label, region, current value, and min/max; set a bounded numeric value | Later revisioned live-control schema |
 | Materials, pose, and physics controls | Preset files only | Publish an allowlisted typed control schema | Later; do not expose arbitrary storables |
 
@@ -78,13 +78,15 @@ gets a read-only **In-game item** card instead of disappearing, while truncated
 rows are still counted explicitly.
 
 The sheet changes with the selected Person category. Clothing categories show
-the live wardrobe. Hair shows a bounded multi-layer roster and a read-only
-inspector organized as **Style & shape**, **Color & materials**, **Physics &
-simulation**, and **Scalp & fit**. Actual Hair settings stay in VaM until each
-control has a typed, bounded, revisioned protocol. Appearance, skin, morph,
-pose, animation, physics, general, and Person-plugin presets use compact recipe
-views. They can change overlapping state, so the sheet never claims that one
-is the authoritative current preset.
+the live wardrobe. Hair shows a bounded multi-layer roster where exact unlocked
+layers can be disabled individually, plus a read-only inspector organized as
+**Style & shape**, **Color & materials**, **Physics & simulation**, and
+**Scalp & fit**. Locked, stale, truncated, and ambiguous Hair actions fail
+closed. Actual Hair settings stay in VaM until each control has a typed,
+bounded, revisioned protocol. Appearance, skin, morph, pose, animation,
+physics, general, and Person-plugin presets use compact recipe views. They can
+change overlapping state, so the sheet never claims that one is the
+authoritative current preset.
 
 For clothing cards, VAM-PIP may present same-package, same-folder item presets
 whose filenames clearly share the clothing item's basename as **Related
@@ -120,7 +122,8 @@ The useful order is:
 2. completed: individual clothing wear/remove with exact resource identity,
    revisioned worn state, lock reporting, and gender checks;
 3. completed: complete clothing presentation for opaque/built-in items,
-   adaptive Person sheets, and a bounded read-only Hair layer roster;
+   adaptive Person sheets, a bounded Hair layer roster, and exact unlocked
+   Hair-layer disable;
 4. next: classify trusted raw plugin entry points and add an explicitly
    confirmed code-loading workflow;
 5. add save/export workflows after their overwrite and screenshot semantics

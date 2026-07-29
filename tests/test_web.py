@@ -156,8 +156,8 @@ class WebSecurityTests(unittest.TestCase):
             "frame-ancestors 'none'", response.getheader("Content-Security-Policy")
         )
         document = response.read().decode("utf-8")
-        self.assertIn("/styles.css?v=0.8.0", document)
-        self.assertIn("/app.js?v=0.8.0", document)
+        self.assertIn("/styles.css?v=0.8.1", document)
+        self.assertIn("/app.js?v=0.8.1", document)
 
     def test_session_plugin_endpoints_report_and_import_defaults(self) -> None:
         preset_path = write_web_session_defaults(self.vam_root)
@@ -507,6 +507,88 @@ class WebSecurityTests(unittest.TestCase):
         self.assertEqual(response.status, 200)
         self.assertEqual(self.response_json(response), hair)
         self.server.service.person_hair.assert_called_once_with("Person 2")
+
+    def test_person_hair_remove_route_accepts_only_opaque_public_state(
+        self,
+    ) -> None:
+        revision = "b" * 32
+        item_key = "hair-" + "1" * 24
+        result = {
+            "operation": "set-person-hair",
+            "target_uid": "Person 2",
+            "revision": revision,
+            "item_key": item_key,
+            "active": False,
+            "bridge_request": "hair-remove-request",
+            "bridge_busy": False,
+            "bridge_message": None,
+        }
+        self.server.service.set_person_hair = mock.Mock(return_value=result)
+        headers = {
+            "X-VAMPIP-Token": self.token,
+            "Content-Type": "application/json",
+        }
+        body = json.dumps(
+            {
+                "target_uid": "Person 2",
+                "revision": revision,
+                "item_key": item_key,
+                "active": False,
+            }
+        ).encode("utf-8")
+        self.connection.request(
+            "POST",
+            "/api/vam/person/hair",
+            body=body,
+            headers={**headers, "Content-Length": str(len(body))},
+        )
+        response = self.connection.getresponse()
+        self.assertEqual(response.status, 200)
+        self.assertEqual(self.response_json(response), result)
+        self.server.service.set_person_hair.assert_called_once_with(
+            target_uid="Person 2",
+            revision=revision,
+            item_key=item_key,
+            active=False,
+        )
+
+        for forbidden_document, message in (
+            (
+                {
+                    "target_uid": "Person 2",
+                    "revision": revision,
+                    "item_key": item_key,
+                    "active": False,
+                    "action_token": "f" * 32,
+                },
+                "unsupported Person hair field",
+            ),
+            (
+                {
+                    "target_uid": "Person 2",
+                    "revision": revision,
+                    "item_key": item_key,
+                    "active": True,
+                },
+                "only be removed",
+            ),
+        ):
+            with self.subTest(message=message):
+                forbidden = json.dumps(forbidden_document).encode("utf-8")
+                self.connection.request(
+                    "POST",
+                    "/api/vam/person/hair",
+                    body=forbidden,
+                    headers={
+                        **headers,
+                        "Content-Length": str(len(forbidden)),
+                    },
+                )
+                response = self.connection.getresponse()
+                self.assertEqual(response.status, 400)
+                document = self.response_json(response)
+                self.assertIn(message, document["error"])
+        self.assertEqual(self.server.service.set_person_hair.call_count, 1)
 
     def test_clothing_route_accepts_only_opaque_catalog_state(self) -> None:
         result = {

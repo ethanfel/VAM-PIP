@@ -21,7 +21,7 @@ leaving managed mode restores that baseline.
 
 ## Current status
 
-Version 0.8.0 is functional but should still be treated as an early release.
+Version 0.8.1 is functional but should still be treated as an early release.
 Package switching is deliberately conservative:
 
 - entering managed mode requires explicit confirmation;
@@ -196,12 +196,13 @@ organize the display but never impose one-item equipment slots. Clothing that
 VaM reports without a safe catalogue identity remains visible as a read-only
 in-game item instead of disappearing.
 
-The Hair category swaps the wardrobe for a read-only Hair Studio showing every
-bounded active layer and whether it uses VaM hair simulation. It groups the
-future Hair controls into style, material, simulation, and scalp areas without
-inventing current values. Other preset families use compact recipe views,
-because VaM does not publish a reliable single “currently equipped preset” for
-them.
+The Hair category swaps the wardrobe for a Hair Studio showing every bounded
+active layer and whether it uses VaM hair simulation. Exact unlocked layers
+can be disabled individually; locked, ambiguous, and truncated state fails
+closed instead of guessing. The inspector groups future Hair controls into
+style, material, simulation, and scalp areas without inventing current values.
+Other preset families use compact recipe views, because VaM does not publish a
+reliable single “currently equipped preset” for them.
 
 Replacing a Scene requires explicit confirmation in both the browser and API.
 General and Person Plugin presets, non-Person atom presets, SubScenes, and raw

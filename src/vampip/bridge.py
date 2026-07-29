@@ -460,6 +460,33 @@ def request_person_clothing(
     )
 
 
+def request_person_hair_item(
+    vam_root: Path,
+    target_uid: str,
+    action_token: str,
+    *,
+    active: bool,
+    revision: str,
+) -> str:
+    target_uid = _validate_target_uid(target_uid)
+    action_token = _validate_revision(action_token)
+    if not isinstance(active, bool):
+        raise TypeError("active must be a bool")
+    if active:
+        raise ValueError("active Hair layers can only be removed externally")
+    revision = _validate_revision(revision)
+    return _write_request(
+        vam_root,
+        {
+            "command": "setPersonHairItem",
+            "targetUid": target_uid,
+            "actionToken": action_token,
+            "desiredState": "removed",
+            "revision": revision,
+        },
+    )
+
+
 def request_select_atom(vam_root: Path, target_uid: str) -> str:
     return _write_request(
         vam_root,

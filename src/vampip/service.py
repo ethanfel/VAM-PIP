@@ -27,6 +27,7 @@ from vampip.bridge import (
     request_custom_unity_asset_choice,
     request_custom_unity_asset_load,
     request_person_clothing,
+    request_person_hair_item,
     request_person_preset,
     request_rescan,
     request_scene_load,
@@ -2035,6 +2036,34 @@ class ManagerService:
 
         items: list[dict[str, object]] = []
         raw_items = hair.get("items")
+        capabilities = {
+            str(value)
+            for value in scene.get("capabilities", [])
+            if isinstance(value, str)
+        }
+        action_token_counts: dict[str, int] = {}
+        if isinstance(raw_items, list):
+            for raw_item in raw_items[:128]:
+                if not isinstance(raw_item, dict):
+                    continue
+                action_token = raw_item.get("actionToken")
+                if (
+                    isinstance(action_token, str)
+                    and re.fullmatch(r"[0-9a-fA-F]{32}", action_token)
+                    is not None
+                ):
+                    identity = action_token.casefold()
+                    action_token_counts[identity] = (
+                        action_token_counts.get(identity, 0) + 1
+                    )
+        action_surface_ready = (
+            "person-hair-item-toggle" in capabilities
+            and not truncated
+            and isinstance(raw_items, list)
+            and len(raw_items) <= 128
+            and len(raw_items) == active_count
+            and all(isinstance(raw_item, dict) for raw_item in raw_items)
+        )
         if isinstance(raw_items, list):
             for item_index, raw_item in enumerate(raw_items[:128]):
                 if not isinstance(raw_item, dict):
@@ -2043,6 +2072,18 @@ class ManagerService:
                     raw_item.get("displayName"),
                     maximum=256,
                 )
+                action_token = raw_item.get("actionToken")
+                has_action_token = (
+                    isinstance(action_token, str)
+                    and re.fullmatch(r"[0-9a-fA-F]{32}", action_token)
+                    is not None
+                    and action_token_counts.get(
+                        action_token.casefold(),
+                        0,
+                    )
+                    == 1
+                )
+                locked = raw_item.get("locked") is True
                 items.append(
                     {
                         "key": _revision_scoped_key(
@@ -2050,13 +2091,17 @@ class ManagerService:
                             "hair",
                             item_index,
                         ),
-                        "actionable": False,
+                        "actionable": (
+                            action_surface_ready
+                            and has_action_token
+                            and not locked
+                        ),
                         "display_name": display_name or "Unnamed hair item",
                         "tags": _presentation_tags(
                             raw_item.get("tags"),
                             maximum=32,
                         ),
-                        "locked": raw_item.get("locked") is True,
+                        "locked": locked,
                         "simulated": raw_item.get("simulated") is True,
                         "state": "in-game",
                     }
@@ -2079,6 +2124,145 @@ class ManagerService:
             }
         )
         return result
+
+    def set_person_hair(
+        self,
+        *,
+        target_uid: str,
+        revision: str,
+        item_key: str,
+        active: bool,
+    ) -> dict[str, object]:
+        """Disable one exact unlocked Hair layer from a fresh live roster."""
+
+        uid = self._validate_target_uid(target_uid)
+        if (
+            not isinstance(revision, str)
+            or re.fullmatch(r"[0-9a-fA-F]{32}", revision) is None
+        ):
+            raise ValueError(
+                "revision must contain exactly 32 hexadecimal characters"
+            )
+        if (
+            not isinstance(item_key, str)
+            or re.fullmatch(r"hair-[0-9a-f]{24}", item_key) is None
+        ):
+            raise ValueError("item_key is not a valid opaque Hair item key")
+        if not isinstance(active, bool):
+            raise TypeError("active must be a boolean")
+        if active:
+            raise ValueError("active Hair layers can only be removed externally")
+
+        with self._bridge_mailbox_transaction():
+            scene = self._require_live_capability(
+                "person-hair-item-toggle",
+                action_label="an active Hair layer can be removed",
+                include_clothing_refs=True,
+            )
+            person = next(
+                (
+                    value
+                    for value in scene.get("persons", [])
+                    if isinstance(value, dict)
+                    and str(value.get("uid") or "") == uid
+                ),
+                None,
+            )
+            if person is None:
+                raise ValueError(f"Person atom is no longer available: {uid}")
+            hair = person.get("hair")
+            if not isinstance(hair, dict) or hair.get("ready") is not True:
+                raise ValueError(
+                    "the selected Person has no ready live Hair snapshot"
+                )
+            live_revision = str(hair.get("revision") or "")
+            if live_revision != revision:
+                raise ValueError(
+                    "the Person Hair revision is stale; refresh and try again"
+                )
+            if hair.get("truncated") is True:
+                raise ValueError(
+                    "the Person Hair roster is truncated and cannot be "
+                    "changed safely"
+                )
+
+            raw_items = hair.get("items")
+            if not isinstance(raw_items, list):
+                raise ValueError(
+                    "the selected Person has no actionable live Hair roster"
+                )
+            if (
+                len(raw_items) > 128
+                or len(raw_items)
+                != _nonnegative_int(hair.get("activeCount"))
+                or any(not isinstance(raw_item, dict) for raw_item in raw_items)
+            ):
+                raise ValueError(
+                    "the Person Hair roster is incomplete or ambiguous; "
+                    "refresh and try again"
+                )
+            matches: list[dict[str, object]] = []
+            for item_index, raw_item in enumerate(raw_items[:128]):
+                if (
+                    isinstance(raw_item, dict)
+                    and _revision_scoped_key(
+                        live_revision,
+                        "hair",
+                        item_index,
+                    )
+                    == item_key
+                ):
+                    matches.append(raw_item)
+            if len(matches) != 1:
+                raise ValueError(
+                    "the Hair item key is stale or ambiguous; refresh and try again"
+                )
+            selected = matches[0]
+            if selected.get("locked") is True:
+                raise ValueError(
+                    "the Hair layer is locked in VaM and cannot be removed "
+                    "externally"
+                )
+            action_token = selected.get("actionToken")
+            if (
+                not isinstance(action_token, str)
+                or re.fullmatch(r"[0-9a-fA-F]{32}", action_token) is None
+            ):
+                raise ValueError(
+                    "the Hair layer does not have a valid private action token"
+                )
+            token_identity = action_token.casefold()
+            token_matches = sum(
+                1
+                for raw_item in raw_items[:128]
+                if isinstance(raw_item, dict)
+                and isinstance(raw_item.get("actionToken"), str)
+                and str(raw_item["actionToken"]).casefold() == token_identity
+            )
+            if token_matches != 1:
+                raise ValueError(
+                    "the Hair layer action token is ambiguous; refresh and try again"
+                )
+
+            request_id, bridge_message = self._try_queue_bridge_request(
+                lambda: request_person_hair_item(
+                    self.vam_root,
+                    target_uid=uid,
+                    action_token=action_token,
+                    active=False,
+                    revision=revision,
+                )
+            )
+            return {
+                "operation": "set-person-hair",
+                "target_uid": uid,
+                "revision": revision,
+                "item_key": item_key,
+                "active": False,
+                "bridge_request": request_id,
+                "bridge_busy": bridge_message is not None,
+                "bridge_message": bridge_message,
+            }
 
     def catalog_facets(self) -> dict[str, object]:
         with connect(self.state_dir) as connection:

@@ -695,6 +695,8 @@ const app = {
   personHairRequestedKey: "",
   personHairRequestGeneration: 0,
   personHairRequestController: null,
+  hairMutationInFlight: false,
+  pendingHairMutation: null,
   clothingMutationInFlight: false,
   selectedAtomUid: "",
   atomTargetMode: "existing",
@@ -963,6 +965,11 @@ function bindEvents() {
     const removeButton = event.target.closest("[data-equipment-remove]");
     if (removeButton && !removeButton.disabled) {
       removeEquippedItem(removeButton.dataset.equipmentRemove, removeButton);
+      return;
+    }
+    const hairButton = event.target.closest("[data-hair-disable]");
+    if (hairButton && !hairButton.disabled) {
+      disableHairLayer(hairButton.dataset.hairDisable, hairButton);
     }
   });
   elements.atomTarget.addEventListener("change", () => {
@@ -1160,6 +1167,7 @@ async function loadActivity({ refreshOnTerminal = true } = {}) {
       app.view === "workspace" ? currentWorkspaceCategory() : null;
     const shouldPollScene =
       workspaceActionIsActive() ||
+      Boolean(app.pendingHairMutation) ||
       snapshotBridgeBusy() ||
       Boolean(
         workspaceCategory &&
@@ -1167,7 +1175,8 @@ async function loadActivity({ refreshOnTerminal = true } = {}) {
             categoryUsesPersonContext(workspaceCategory) ||
             ATOM_TARGET_KINDS.has(workspaceCategory.targetKind)),
       );
-    const scenePollInterval = workspaceActionIsActive() ? 900 : 3000;
+    const scenePollInterval =
+      workspaceActionIsActive() || app.pendingHairMutation ? 900 : 3000;
     if (
       shouldPollScene &&
       Date.now() - app.personPollAt > scenePollInterval
@@ -2092,6 +2101,40 @@ function personControlKey() {
   });
 }
 
+function reconcilePendingHairMutation(snapshot = app.person || {}) {
+  const pending = app.pendingHairMutation;
+  if (!pending) return false;
+  const person = personList(snapshot).find(
+    (candidate) => candidate.uid === pending.targetUid,
+  );
+  if (snapshot.available && !person) {
+    app.pendingHairMutation = null;
+    return true;
+  }
+  const revision = String(person?.hair?.revision || "").trim().toLowerCase();
+  if (
+    person?.hair?.ready === true &&
+    /^[0-9a-f]{32}$/.test(revision) &&
+    revision !== pending.revision
+  ) {
+    app.pendingHairMutation = null;
+    return true;
+  }
+  const bridgeState = String(snapshot?.bridge?.state || "").toLowerCase();
+  const bridgeRequest = String(
+    snapshot?.bridge?.requestId || snapshot?.bridge?.request_id || "",
+  ).trim();
+  if (
+    bridgeState === "error" &&
+    Boolean(pending.requestId) &&
+    bridgeRequest === pending.requestId
+  ) {
+    app.pendingHairMutation = null;
+    return true;
+  }
+  return false;
+}
+
 function acceptPersonSnapshot(snapshot, generation) {
   if (
     generation !== undefined &&
@@ -2116,6 +2159,7 @@ function acceptPersonSnapshot(snapshot, generation) {
         ? selected.uid
         : persons[0]?.uid || "";
   }
+  reconcilePendingHairMutation(snapshot);
 
   const atoms = atomList(snapshot);
   const knownAtoms = new Set(atoms.map((atom) => atom.uid));
@@ -2233,6 +2277,11 @@ function safePresentationLabel(value, fallback) {
 function safeOpaqueKey(value, fallback) {
   const key = String(value || "").trim();
   return /^[a-z0-9_-]{1,128}$/i.test(key) ? key : fallback;
+}
+
+function safeHairActionKey(value) {
+  const key = String(value || "").trim();
+  return /^hair-[0-9a-f]{24}$/.test(key) ? key : "";
 }
 
 function normalizePersonEquipment(payload, targetUid, revision) {
@@ -2508,29 +2557,40 @@ function normalizePersonHair(payload, targetUid) {
       ? payload
       : {};
   const items = [];
-  const seen = new Set();
+  const seen = new Map();
   for (const rawItem of asArray(document.items)) {
     if (!rawItem || typeof rawItem !== "object" || Array.isArray(rawItem)) {
       continue;
     }
     const index = items.length + 1;
     const key = safeOpaqueKey(rawItem.key, `layer-${index}`);
-    if (seen.has(key)) continue;
-    seen.add(key);
+    const actionKey = safeHairActionKey(key);
+    const duplicate = seen.get(key);
+    if (duplicate) {
+      duplicate.actionable = false;
+      continue;
+    }
     const tags = normalizeTags(rawItem.tags)
       .map((tag) => safePresentationLabel(tag, ""))
       .filter(Boolean)
       .slice(0, 8);
-    items.push({
+    const locked = booleanValue(rawItem.locked, false);
+    const normalizedItem = {
       key,
       displayName: safePresentationLabel(
         rawItem.display_name,
         `Hair layer ${index}`,
       ),
       tags,
-      locked: booleanValue(rawItem.locked, false),
+      locked,
+      actionable:
+        booleanValue(rawItem.actionable, false) &&
+        !locked &&
+        Boolean(actionKey),
       simulated: booleanValue(rawItem.simulated, false),
-    });
+    };
+    seen.set(key, normalizedItem);
+    items.push(normalizedItem);
   }
   return {
     available: booleanValue(document.available, false),
@@ -3234,8 +3294,180 @@ function renderWardrobeCharacterSheet(category) {
   elements.equipmentWarning.textContent = warnings.join(" ");
 }
 
-function createHairLayerCard(item, index) {
+function hairActionAvailability(item, hair = app.personHair) {
+  const snapshot = app.person || {};
+  const identity = personHairIdentity();
+  const itemKey = safeHairActionKey(item?.key);
+  const rosterRevision = String(hair?.revision || "").trim().toLowerCase();
+  let reason = "";
+
+  if (item?.locked === true) {
+    reason = "This hair layer is locked in VaM";
+  } else if (item?.actionable !== true) {
+    reason =
+      "This layer is presentation-only and must be managed inside VaM";
+  } else if (!itemKey) {
+    reason = "This hair layer has no safe action key";
+  } else if (characterSheetMode() !== "hair") {
+    reason = "Open Hair Studio before changing a hair layer";
+  } else if (app.personError) {
+    reason = "The live VaM bridge is unavailable";
+  } else if (!personVamRunning(snapshot)) {
+    reason = "Start VaM before changing hair";
+  } else if (!snapshot.available) {
+    reason = "The bridge is not publishing a fresh scene snapshot";
+  } else if (snapshot.loading) {
+    reason = "Wait for VaM to finish loading the scene";
+  } else if (
+    !identity ||
+    !hair ||
+    hair.available !== true ||
+    hair.ready !== true ||
+    app.personHairKey !== identity.key
+  ) {
+    reason = "Refresh the active hair roster before changing it";
+  } else if (
+    !/^[0-9a-f]{32}$/.test(rosterRevision) ||
+    rosterRevision !== identity.revision
+  ) {
+    reason = "The hair state changed; wait for this roster to refresh";
+  } else if (app.hairMutationInFlight) {
+    reason = "Wait for the current hair change to be queued";
+  } else if (app.pendingHairMutation) {
+    reason = "Wait for the pending hair change to finish in VaM";
+  } else if (snapshotBridgeBusy(snapshot)) {
+    reason = "Wait for the current bridge action to finish";
+  } else if (workspaceActionIsActive()) {
+    reason = "Wait for the current Hair preset load to finish";
+  } else if (operationIsBusy()) {
+    reason = "Wait for the current package update to finish";
+  }
+
+  return {
+    allowed: reason === "",
+    reason,
+    itemKey,
+    revision: rosterRevision,
+  };
+}
+
+function pendingHairMutationFor(item, hair) {
+  const pending = app.pendingHairMutation;
+  return Boolean(
+    pending &&
+      pending.targetUid === app.selectedPersonUid &&
+      pending.revision === String(hair?.revision || "").trim().toLowerCase() &&
+      pending.itemKey === item?.key,
+  )
+    ? pending
+    : null;
+}
+
+async function disableHairLayer(itemKeyValue, sourceButton) {
+  if (app.hairMutationInFlight || app.pendingHairMutation) return;
+  const identity = personHairIdentity();
+  const hair =
+    identity && app.personHairKey === identity.key ? app.personHair : null;
+  const itemKey = safeHairActionKey(itemKeyValue);
+  const item = asArray(hair?.items).find(
+    (candidate) => candidate.key === itemKey,
+  );
+  if (!item) {
+    toast(
+      "Hair roster changed",
+      "This layer is no longer in the selected Person’s active hair roster.",
+      "error",
+    );
+    await syncPersonHair({ quiet: true, retry: true });
+    return;
+  }
+  const availability = hairActionAvailability(item, hair);
+  if (!availability.allowed) {
+    toast("Hair state changed", availability.reason, "error");
+    return;
+  }
+
+  const targetUid = identity.targetUid;
+  const revision = availability.revision;
+  const displayName = item.displayName;
+  const pending = {
+    targetUid,
+    revision,
+    itemKey: availability.itemKey,
+    displayName,
+    state: "sending",
+    requestId: "",
+  };
+  app.hairMutationInFlight = true;
+  app.pendingHairMutation = pending;
+  renderCharacterSheet();
+  if (app.view === "workspace") renderLibrary();
+
+  try {
+    const result = await api("/api/vam/person/hair", {
+      method: "POST",
+      body: {
+        target_uid: targetUid,
+        revision,
+        item_key: availability.itemKey,
+        active: false,
+      },
+    });
+    requireWorkspaceBridgeQueue(result, "Hair disable");
+    const responseRevision = String(result.revision || "").trim().toLowerCase();
+    if (
+      result.operation !== "set-person-hair" ||
+      String(result.target_uid || "") !== targetUid ||
+      responseRevision !== revision ||
+      String(result.item_key || "") !== availability.itemKey ||
+      result.active !== false
+    ) {
+      throw new Error(
+        "Hair disable returned a mismatched response; the live roster was not assumed to have changed.",
+      );
+    }
+    pending.state = "queued";
+    pending.requestId = String(result.bridge_request || "").trim();
+    toast(
+      "Hair disable queued",
+      result.bridge_message ||
+        `“${displayName}” will be disabled for ${targetUid}.`,
+    );
+    app.personPollAt = 0;
+    await loadPersons({ quiet: true });
+    await syncPersonHair({ quiet: true, retry: true });
+  } catch (error) {
+    if (app.pendingHairMutation === pending) {
+      app.pendingHairMutation = null;
+    }
+    toast(
+      `Could not disable ${displayName}`,
+      errorMessage(error),
+      "error",
+    );
+    if (/revision|stale|changed/i.test(errorMessage(error))) {
+      app.personPollAt = 0;
+      await loadPersons({ quiet: true });
+      await syncPersonHair({ quiet: true, retry: true });
+    }
+  } finally {
+    app.hairMutationInFlight = false;
+    if (
+      app.pendingHairMutation === pending &&
+      pending.state === "sending"
+    ) {
+      app.pendingHairMutation = null;
+    }
+    setButtonBusy(sourceButton, false);
+    renderCharacterSheet();
+    if (app.view === "workspace") renderLibrary();
+  }
+}
+
+function createHairLayerCard(item, index, hair) {
   const card = createElement("article", "hair-layer-card");
+  card.classList.toggle("is-locked", item.locked);
+  card.classList.toggle("is-presentation-only", item.actionable !== true);
   const visual = createElement("span", "hair-layer-visual");
   visual.textContent = String(index + 1);
   visual.setAttribute("aria-hidden", "true");
@@ -3257,12 +3489,49 @@ function createHairLayerCard(item, index) {
   }
   copy.append(name, tags);
   const status = badge(
-    `${item.simulated ? "Simulated" : "Mesh / legacy"}${
-      item.locked ? " · Locked" : ""
-    }`,
+    item.simulated ? "Simulated" : "Mesh / legacy",
     `hair-simulation-state${item.simulated ? " is-simulated" : ""}`,
   );
-  card.append(visual, copy, status);
+  const actions = createElement("div", "hair-layer-actions");
+  actions.append(status);
+  if (item.locked) {
+    const locked = createElement("span", "hair-layer-control is-locked");
+    locked.textContent = "Locked";
+    locked.title = "Unlock this layer inside VaM before disabling it";
+    actions.append(locked);
+  } else if (item.actionable !== true) {
+    const presentation = createElement(
+      "span",
+      "hair-layer-control is-presentation-only",
+    );
+    presentation.textContent = "In-game only";
+    presentation.title =
+      "The bridge did not provide a safe action for this layer";
+    actions.append(presentation);
+  } else {
+    const availability = hairActionAvailability(item, hair);
+    const pending = pendingHairMutationFor(item, hair);
+    const disable = button(
+      pending
+        ? pending.state === "sending"
+          ? "Disabling…"
+          : "Waiting for VaM…"
+        : "Disable",
+      "secondary-button hair-disable-button",
+    );
+    disable.disabled = !availability.allowed || Boolean(pending);
+    disable.dataset.hairDisable = item.key;
+    disable.setAttribute(
+      "aria-label",
+      `Disable ${item.displayName} for ${app.selectedPersonUid}`,
+    );
+    disable.title = pending
+      ? "This hair change is queued in VaM"
+      : availability.reason ||
+        `Disable ${item.displayName} without changing other active layers`;
+    actions.append(disable);
+  }
+  card.append(visual, copy, actions);
   return card;
 }
 
@@ -3319,11 +3588,21 @@ function renderHairStudio(category) {
     simCount,
     lockedCount,
     truncated: Boolean(hair?.truncated),
+    mutating: app.hairMutationInFlight,
+    pending: app.pendingHairMutation
+      ? [
+          app.pendingHairMutation.targetUid,
+          app.pendingHairMutation.revision,
+          app.pendingHairMutation.itemKey,
+          app.pendingHairMutation.state,
+        ]
+      : null,
     items: items.map((item) => [
       item.key,
       item.displayName,
       item.tags,
       item.locked,
+      item.actionable,
       item.simulated,
     ]),
   });
@@ -3375,7 +3654,7 @@ function renderHairStudio(category) {
     elements.hairLayerList.append(state);
   } else {
     items.forEach((item, index) =>
-      elements.hairLayerList.append(createHairLayerCard(item, index)),
+      elements.hairLayerList.append(createHairLayerCard(item, index, hair)),
     );
   }
   renderHairInspectorGroups();
@@ -5606,6 +5885,11 @@ function workspaceApplyAvailability(item, category = currentWorkspaceCategory())
     reason = "This catalogue entry cannot be resolved safely";
   } else if (!category || !category.liveAction) {
     reason = "This category is browse-only with the current manager";
+  } else if (
+    category.id === "preset-hair" &&
+    (app.hairMutationInFlight || app.pendingHairMutation)
+  ) {
+    reason = "Wait for the pending hair disable to finish in VaM";
   } else if (app.personError) {
     reason = "The live VaM bridge is unavailable";
   } else if (!gameRunning) {
@@ -5763,6 +6047,12 @@ async function applyWorkspaceResource(
 ) {
   const resourceId = Number(item.id);
   if (!Number.isInteger(resourceId) || resourceId < 1 || !category) return;
+  if (
+    category.id === "preset-hair" &&
+    (app.hairMutationInFlight || app.pendingHairMutation)
+  ) {
+    return;
+  }
 
   const key = `${category.id}:${resourceId}`;
   if (

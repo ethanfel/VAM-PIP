@@ -275,9 +275,12 @@ class PersonWorkspaceTests(unittest.TestCase):
         revision: str = "b" * 32,
         truncated: bool = False,
         items: list[dict[str, object]] | None = None,
+        toggle: bool = False,
     ) -> dict[str, object]:
         roster = PersonWorkspaceTests.roster()
         roster["capabilities"].append("person-hair-roster")
+        if toggle:
+            roster["capabilities"].append("person-hair-item-toggle")
         hair_items = (
             [
                 {
@@ -364,6 +367,7 @@ class PersonWorkspaceTests(unittest.TestCase):
                     ],
                     "locked": False,
                     "simulated": True,
+                    "actionToken": "c" * 32,
                     "resourceRef": "Private.Hair.1:/Custom/Hair/Secret.vam",
                 }
             ],
@@ -455,6 +459,7 @@ class PersonWorkspaceTests(unittest.TestCase):
         self.assertNotIn("resourceRef", public["bridge"])
         self.assertNotIn("private-clothing-uid", json.dumps(public))
         self.assertNotIn("Private.Hair", json.dumps(public))
+        self.assertNotIn('"actionToken"', json.dumps(public))
         self.assertNotIn("Private.Person", json.dumps(public))
         self.assertNotIn("Private.Asset", json.dumps(public))
         self.assertNotIn("Private.Bridge", json.dumps(public))
@@ -685,12 +690,14 @@ class PersonWorkspaceTests(unittest.TestCase):
         roster = self.hair_roster(
             active_count="2",
             locked_count="1",
+            toggle=True,
             items=[
                 {
                     "displayName": "Soft Bob",
                     "tags": ["Sim", "Short", "Sim"],
                     "locked": True,
                     "simulated": True,
+                    "actionToken": "1" * 32,
                     "uid": "private-hair-uid",
                     "resourceRef": (
                         "Private.Hair.1:/Custom/Hair/Secret.vam"
@@ -701,6 +708,7 @@ class PersonWorkspaceTests(unittest.TestCase):
                     "tags": ["Bangs"],
                     "locked": False,
                     "simulated": False,
+                    "actionToken": "2" * 32,
                     "packageUid": "private-package",
                 },
             ],
@@ -741,6 +749,7 @@ class PersonWorkspaceTests(unittest.TestCase):
         self.assertEqual(items[0]["tags"], ["Sim", "Short"])
         self.assertTrue(items[0]["locked"])
         self.assertTrue(items[0]["simulated"])
+        self.assertTrue(items[1]["actionable"])
         serialized = json.dumps(first)
         for private_value in (
             "private-hair-uid",
@@ -748,8 +757,197 @@ class PersonWorkspaceTests(unittest.TestCase):
             "Secret.vam",
             "private-package",
             "resourceRef",
+            "1" * 32,
+            "2" * 32,
         ):
             self.assertNotIn(private_value, serialized)
+
+    def test_person_hair_actionability_requires_new_unique_safe_surface(
+        self,
+    ) -> None:
+        token = "3" * 32
+        item = {
+            "displayName": "Soft Bob",
+            "tags": ["Sim"],
+            "locked": False,
+            "simulated": True,
+            "actionToken": token,
+        }
+        cases = (
+            (self.hair_roster(items=[item]), False),
+            (self.hair_roster(items=[item], toggle=True), True),
+            (
+                self.hair_roster(
+                    items=[item],
+                    toggle=True,
+                    truncated=True,
+                ),
+                False,
+            ),
+            (
+                self.hair_roster(
+                    active_count=2,
+                    items=[item, dict(item)],
+                    toggle=True,
+                ),
+                False,
+            ),
+        )
+        for roster, expected in cases:
+            with self.subTest(expected=expected):
+                with mock.patch.object(
+                    self.service,
+                    "_scene_snapshot",
+                    return_value=roster,
+                ):
+                    result = self.service.person_hair("Person")
+                self.assertIs(
+                    result["items"][0]["actionable"],
+                    expected,
+                )
+                self.assertNotIn(token, json.dumps(result))
+
+    def test_person_hair_remove_maps_opaque_key_to_private_token(self) -> None:
+        token = "4" * 32
+        roster = self.hair_roster(
+            toggle=True,
+            items=[
+                {
+                    "displayName": "Soft Bob",
+                    "tags": ["Sim"],
+                    "locked": False,
+                    "simulated": True,
+                    "actionToken": token,
+                    "uid": "private-hair-uid",
+                }
+            ],
+        )
+        with (
+            mock.patch.object(
+                self.service,
+                "_scene_snapshot",
+                return_value=roster,
+            ),
+            mock.patch(
+                "vampip.service.request_person_hair_item",
+                return_value="hair-remove-request",
+            ) as request,
+        ):
+            public = self.service.person_hair("Person")
+            item_key = public["items"][0]["key"]
+            removed = self.service.set_person_hair(
+                target_uid="Person",
+                revision="b" * 32,
+                item_key=item_key,
+                active=False,
+            )
+
+        self.assertEqual(
+            removed,
+            {
+                "operation": "set-person-hair",
+                "target_uid": "Person",
+                "revision": "b" * 32,
+                "item_key": item_key,
+                "active": False,
+                "bridge_request": "hair-remove-request",
+                "bridge_busy": False,
+                "bridge_message": None,
+            },
+        )
+        request.assert_called_once_with(
+            self.vam_root,
+            target_uid="Person",
+            action_token=token,
+            active=False,
+            revision="b" * 32,
+        )
+        serialized = json.dumps(removed)
+        self.assertNotIn(token, serialized)
+        self.assertNotIn("private-hair-uid", serialized)
+
+    def test_person_hair_remove_refuses_unsafe_or_stale_rosters(self) -> None:
+        token = "5" * 32
+        base_item = {
+            "displayName": "Soft Bob",
+            "tags": ["Sim"],
+            "locked": False,
+            "simulated": True,
+            "actionToken": token,
+        }
+        valid = self.hair_roster(toggle=True, items=[base_item])
+        with mock.patch.object(
+            self.service,
+            "_scene_snapshot",
+            return_value=valid,
+        ):
+            item_key = self.service.person_hair("Person")["items"][0]["key"]
+
+        cases = (
+            (
+                self.hair_roster(items=[base_item]),
+                "does not provide person-hair-item-toggle",
+            ),
+            (
+                self.hair_roster(
+                    toggle=True,
+                    truncated=True,
+                    items=[base_item],
+                ),
+                "roster is truncated",
+            ),
+            (
+                self.hair_roster(
+                    toggle=True,
+                    items=[{**base_item, "locked": True}],
+                ),
+                "locked in VaM",
+            ),
+            (
+                self.hair_roster(
+                    active_count=2,
+                    toggle=True,
+                    items=[base_item, dict(base_item)],
+                ),
+                "action token is ambiguous",
+            ),
+        )
+        for roster, message in cases:
+            with self.subTest(message=message):
+                with (
+                    mock.patch.object(
+                        self.service,
+                        "_scene_snapshot",
+                        return_value=roster,
+                    ),
+                    self.assertRaisesRegex(ValueError, message),
+                ):
+                    self.service.set_person_hair(
+                        target_uid="Person",
+                        revision="b" * 32,
+                        item_key=item_key,
+                        active=False,
+                    )
+
+        with mock.patch.object(
+            self.service,
+            "_scene_snapshot",
+            return_value=valid,
+        ):
+            with self.assertRaisesRegex(ValueError, "revision is stale"):
+                self.service.set_person_hair(
+                    target_uid="Person",
+                    revision="a" * 32,
+                    item_key=item_key,
+                    active=False,
+                )
+            with self.assertRaisesRegex(ValueError, "only be removed"):
+                self.service.set_person_hair(
+                    target_uid="Person",
+                    revision="b" * 32,
+                    item_key=item_key,
+                    active=True,
+                )
 
     def test_live_presentation_values_redact_paths_and_resource_refs(self) -> None:
         private_ref = "Private.Asset.1:/Custom/Clothing/Female/Secret.vam"

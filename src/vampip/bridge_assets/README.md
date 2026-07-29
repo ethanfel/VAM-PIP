@@ -150,6 +150,27 @@ when the resource category is incompatible with the Person's current gender,
 and rejects a state change when the item is locked. A rescan, when needed,
 finishes before the checks and assignment.
 
+One active, unlocked Hair layer can be removed with the private token from the
+same revision of `scene.json`:
+
+```json
+{
+  "protocol": 2,
+  "requestId": "unique-hair-1",
+  "command": "setPersonHairItem",
+  "targetUid": "Person",
+  "actionToken": "abcdef0123456789abcdef0123456789",
+  "desiredState": "removed",
+  "revision": "fedcba9876543210fedcba9876543210"
+}
+```
+
+Only `removed` is accepted. The manager maps its public revision-scoped item
+key to this private token; neither the token nor any Hair UID or runtime path
+is exposed through the public API. The bridge revalidates the exact Person,
+geometry, revision, active `DAZHairGroup` object, unique token, and current
+lock state before calling VaM's exact-object `SetActiveHairItem` overload.
+
 Generic non-Person atom creation uses an exact, case-sensitive static allowlist
 of atom types verified against VaM 1.22. Packaged/custom atom types remain
 browse-only. A request is:
@@ -315,7 +336,7 @@ The bridge writes `status.json`:
 ```json
 {
   "protocol": 2,
-  "bridgeVersion": "0.8.0",
+  "bridgeVersion": "0.8.1",
   "instanceId": "id-created-when-the-plugin-started",
   "requestId": "a-new-unique-id",
   "lastCompletedRequestId": "a-new-unique-id",
@@ -350,6 +371,7 @@ The bridge writes `status.json`:
     "person-preset-skin",
     "person-clothing-item-toggle",
     "person-hair-roster",
+    "person-hair-item-toggle",
     "person-add",
     "person-select"
   ]
@@ -378,7 +400,7 @@ The bridge refreshes `scene.json` once per second:
 ```json
 {
   "protocol": 2,
-  "bridgeVersion": "0.8.0",
+  "bridgeVersion": "0.8.1",
   "instanceId": "id-created-when-the-plugin-started",
   "updatedAtUtc": "2026-07-28T12:00:02.0000000Z",
   "loading": false,
@@ -446,13 +468,15 @@ The bridge refreshes `scene.json` once per second:
             "displayName": "Long Hair",
             "tags": ["Long"],
             "locked": false,
-            "simulated": true
+            "simulated": true,
+            "actionToken": "abcdef0123456789abcdef0123456789"
           },
           {
             "displayName": "Side Bangs",
             "tags": ["Bangs"],
             "locked": false,
-            "simulated": false
+            "simulated": false,
+            "actionToken": "0123456789abcdef0123456789abcdef"
           }
         ]
       }
@@ -483,6 +507,7 @@ The bridge refreshes `scene.json` once per second:
     "person-preset-skin",
     "person-clothing-item-toggle",
     "person-hair-roster",
+    "person-hair-item-toggle",
     "person-add",
     "person-select"
   ]
@@ -509,11 +534,14 @@ The clothing revision is bound to the exact Person and `geometry` instances
 and their semantic clothing, lock, and gender state. A stale write fails before
 VaM changes the clothing boolean.
 
-Hair publication is read-only and bounded to 128 active layers per Person and
-512 across the roster. It exposes only sanitized labels and tags, lock state,
-and whether each layer has a `HairSimControl`; it publishes no runtime path,
-package UID, internal UID, or writable storable. Its separate revision rotates
-when the active layer roster changes.
+Hair publication is bounded to 128 active layers per Person and 512 across the
+roster. It exposes sanitized labels and tags, lock state, whether each layer
+has a `HairSimControl`, and a private random action token; it publishes no
+runtime path, package UID, internal UID, or writable storable. The manager
+strips the private token from public scene and Hair APIs. Its separate revision
+and tokens rotate when the active layer roster or published subset changes.
+The only write is removal of one exact active, unlocked layer using its current
+revision and unique private token.
 
 ## Safety contract
 
@@ -533,6 +561,9 @@ when the active layer roster changes.
   Gender-incompatible wear and locked changes fail closed. The external
   workspace also disables an action when bounded-publication truncation leaves
   that item's current state unknown.
+- Hair removal requires the current target-specific Hair revision and a unique
+  private action token from a complete published roster. Stale, truncated,
+  locked, inactive, missing, and ambiguous targets fail closed.
 - The generic atom and SubScene resource containers can include plugin
   configurations. Path/type validation does not establish that their semantic
   contents are trusted or side-effect free.

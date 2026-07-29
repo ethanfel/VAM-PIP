@@ -20,6 +20,7 @@ from vampip.bridge import (
     request_custom_unity_asset_choice,
     request_custom_unity_asset_load,
     request_person_clothing,
+    request_person_hair_item,
     request_person_preset,
     request_rescan,
     request_scene_load,
@@ -323,6 +324,67 @@ class BridgeProtocolTests(unittest.TestCase):
                 revision=revision,
                 rescan=1,  # type: ignore[arg-type]
             )
+
+    def test_person_hair_request_uses_only_private_action_token(self) -> None:
+        request_id = request_person_hair_item(
+            self.vam_root,
+            "Person #2",
+            "1" * 32,
+            active=False,
+            revision="A2" * 16,
+        )
+
+        request = self.read_request()
+        self.assertEqual(request["requestId"], request_id)
+        self.assertEqual(request["command"], "setPersonHairItem")
+        self.assertEqual(request["targetUid"], "Person #2")
+        self.assertEqual(request["actionToken"], "1" * 32)
+        self.assertEqual(request["revision"], "A2" * 16)
+        self.assertEqual(request["desiredState"], "removed")
+        self.assertEqual(
+            set(request) - {"protocol", "requestId", "createdAtUtc"},
+            {
+                "command",
+                "targetUid",
+                "actionToken",
+                "desiredState",
+                "revision",
+            },
+        )
+        serialized = json.dumps(request)
+        self.assertNotIn("hairUid", serialized)
+        self.assertNotIn("packageUid", serialized)
+        self.assertNotIn("internalUid", serialized)
+        self.assertNotIn("resourceRef", serialized)
+        self.assertNotIn("Custom/", serialized)
+
+    def test_person_hair_request_rejects_enable_and_invalid_tokens(self) -> None:
+        with self.assertRaisesRegex(ValueError, "only be removed"):
+            request_person_hair_item(
+                self.vam_root,
+                "Person",
+                "1" * 32,
+                active=True,
+                revision="2" * 32,
+            )
+        with self.assertRaises(TypeError):
+            request_person_hair_item(
+                self.vam_root,
+                "Person",
+                "1" * 32,
+                active=0,  # type: ignore[arg-type]
+                revision="2" * 32,
+            )
+        for token in ("", "1" * 31, "g" * 32, "1" * 33):
+            with self.subTest(token=token):
+                with self.assertRaises(ValueError):
+                    request_person_hair_item(
+                        self.vam_root,
+                        "Person",
+                        token,
+                        active=False,
+                        revision="2" * 32,
+                    )
 
     def test_add_atom_request_uses_exact_native_allowlist(self) -> None:
         request_id = request_add_atom(
@@ -879,7 +941,7 @@ class BridgeSourceTests(unittest.TestCase):
             repository / "src" / "vampip" / "bridge_assets" / "VAMPipBridge.cs"
         ).read_text(encoding="utf-8")
         self.assertIn("ProtocolVersion = 2", source)
-        self.assertIn('BridgeVersion = "0.8.0"', source)
+        self.assertIn('BridgeVersion = "0.8.1"', source)
         self.assertIn("IgnoreCompletedLegacyRequest();", source)
         self.assertIn(
             "Ignored completed protocol-",
@@ -1012,6 +1074,33 @@ class BridgeSourceTests(unittest.TestCase):
             source,
         )
         self.assertIn('"person-hair-roster"', source)
+        self.assertIn('"person-hair-item-toggle"', source)
+        self.assertIn('"setPersonHairItem"', source)
+        self.assertIn("ValidatePersonHairRequest", source)
+        self.assertIn(
+            'desiredState != "removed"',
+            source,
+        )
+        self.assertIn("snapshot.ActionTokens", source)
+        self.assertIn("snapshot.PublishedCount", source)
+        self.assertIn(
+            "snapshot.PublishedCount != publishableCount",
+            source,
+        )
+        self.assertIn(
+            "object.ReferenceEquals(\n"
+            "                            snapshot.Items[identityIndex]",
+            source,
+        )
+        self.assertIn(
+            "geometry.SetActiveHairItem(\n"
+            "                    selected.Item,\n"
+            "                    false,\n"
+            "                    false,\n"
+            "                    false);",
+            source,
+        )
+        self.assertNotIn("selected.Item.active = false", source)
 
         clothing_key_start = source.index(
             "private static string BuildPersonClothingGenerationKey"
@@ -1036,6 +1125,7 @@ class BridgeSourceTests(unittest.TestCase):
         self.assertIn('publishedItem["tags"]', hair_status)
         self.assertIn('publishedItem["locked"]', hair_status)
         self.assertIn('publishedItem["simulated"]', hair_status)
+        self.assertIn('publishedItem["actionToken"]', hair_status)
         for private_identity in (
             "resourceRef",
             "ResourceRef",

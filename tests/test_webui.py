@@ -369,7 +369,7 @@ class WorkspaceWebUITests(unittest.TestCase):
         activity = self.javascript[activity_start:activity_end]
         self.assertIn("workspaceActionIsActive() ||", activity)
         self.assertIn(
-            "workspaceActionIsActive() ? 900 : 3000",
+            "workspaceActionIsActive() || app.pendingHairMutation ? 900 : 3000",
             activity,
         )
         self.assertIn("instanceChanged && workspaceActionIsActive()", activity)
@@ -873,8 +873,9 @@ class WorkspaceWebUITests(unittest.TestCase):
         render_end = self.javascript.index("function renderCharacterRecipe(", render_start)
         render = self.javascript[render_start:render_end]
         self.assertIn("hair?.items || []", render)
-        self.assertIn("createHairLayerCard(item, index)", render)
+        self.assertIn("createHairLayerCard(item, index, hair)", render)
         self.assertIn("item.locked", render)
+        self.assertIn("item.actionable", render)
         self.assertIn("lockedCount", render)
         self.assertIn("VAM-PIP will not guess the current preset", render)
         self.assertNotIn("type = \"range\"", render)
@@ -885,6 +886,123 @@ class WorkspaceWebUITests(unittest.TestCase):
         hair_html = self.html[hair_html_start:hair_html_end]
         self.assertIn("Typed hair controls are not available yet", hair_html)
         self.assertNotIn('type="range"', hair_html)
+
+    def test_hair_disable_is_exact_revision_keyed_and_presentation_safe(
+        self,
+    ) -> None:
+        normalize_start = self.javascript.index("function normalizePersonHair(")
+        normalize_end = self.javascript.index(
+            "async function syncPersonHair(", normalize_start
+        )
+        normalize = self.javascript[normalize_start:normalize_end]
+        self.assertIn("const seen = new Map()", normalize)
+        self.assertIn("const actionKey = safeHairActionKey(key)", normalize)
+        self.assertIn("Boolean(actionKey)", normalize)
+        self.assertIn("const duplicate = seen.get(key)", normalize)
+        self.assertIn("duplicate.actionable = false", normalize)
+        self.assertIn("seen.set(key, normalizedItem)", normalize)
+
+        card_start = self.javascript.index("function createHairLayerCard(")
+        card_end = self.javascript.index(
+            "function renderHairInspectorGroups(", card_start
+        )
+        card = self.javascript[card_start:card_end]
+        self.assertIn("if (item.locked)", card)
+        self.assertIn('locked.textContent = "Locked"', card)
+        self.assertIn("else if (item.actionable !== true)", card)
+        self.assertIn('presentation.textContent = "In-game only"', card)
+        self.assertIn('button(', card)
+        self.assertIn('"Disable"', card)
+        self.assertIn("disable.dataset.hairDisable = item.key", card)
+        self.assertLess(
+            card.index("else if (item.actionable !== true)"),
+            card.index("const availability = hairActionAvailability(item, hair)"),
+        )
+
+        action_start = self.javascript.index("async function disableHairLayer(")
+        action_end = card_start
+        action = self.javascript[action_start:action_end]
+        self.assertIn('api("/api/vam/person/hair"', action)
+        for field in (
+            "target_uid: targetUid",
+            "revision,",
+            "item_key: availability.itemKey",
+            "active: false",
+        ):
+            with self.subTest(field=field):
+                self.assertIn(field, action)
+        self.assertIn('result.operation !== "set-person-hair"', action)
+        self.assertIn("result.active !== false", action)
+        self.assertIn('requireWorkspaceBridgeQueue(result, "Hair disable")', action)
+        self.assertIn("await loadPersons({ quiet: true })", action)
+        self.assertIn("await syncPersonHair({ quiet: true, retry: true })", action)
+        self.assertIn("/revision|stale|changed/i", action)
+        self.assertNotIn("app.personHair.items", action)
+        self.assertNotIn(".splice(", action)
+        for forbidden in ("resource_ref", "resource_path", "hair_uid", "storable"):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, action)
+
+        availability_start = self.javascript.index(
+            "function hairActionAvailability("
+        )
+        availability_end = self.javascript.index(
+            "function pendingHairMutationFor(", availability_start
+        )
+        availability = self.javascript[availability_start:availability_end]
+        for guard in (
+            "item?.locked === true",
+            "item?.actionable !== true",
+            "rosterRevision !== identity.revision",
+            "app.hairMutationInFlight",
+            "app.pendingHairMutation",
+            "snapshotBridgeBusy(snapshot)",
+            "workspaceActionIsActive()",
+        ):
+            with self.subTest(guard=guard):
+                self.assertIn(guard, availability)
+
+        workspace_start = self.javascript.index(
+            "function workspaceApplyAvailability("
+        )
+        workspace_end = self.javascript.index(
+            "async function confirmSceneLoad(", workspace_start
+        )
+        workspace = self.javascript[workspace_start:workspace_end]
+        self.assertIn('category.id === "preset-hair"', workspace)
+        self.assertIn(
+            "(app.hairMutationInFlight || app.pendingHairMutation)",
+            workspace,
+        )
+        reconcile_start = self.javascript.index(
+            "function reconcilePendingHairMutation("
+        )
+        reconcile_end = self.javascript.index(
+            "function acceptPersonSnapshot(", reconcile_start
+        )
+        reconcile = self.javascript[reconcile_start:reconcile_end]
+        self.assertIn("revision !== pending.revision", reconcile)
+        self.assertIn("app.pendingHairMutation = null", reconcile)
+        accept_start = reconcile_end
+        accept_end = self.javascript.index(
+            "function acceptPersonSnapshotError(", accept_start
+        )
+        self.assertIn(
+            "reconcilePendingHairMutation(snapshot)",
+            self.javascript[accept_start:accept_end],
+        )
+        activity_start = self.javascript.index("async function loadActivity(")
+        activity_end = self.javascript.index(
+            "async function fetchLiveSceneSnapshot()", activity_start
+        )
+        activity = self.javascript[activity_start:activity_end]
+        self.assertIn("Boolean(app.pendingHairMutation)", activity)
+        self.assertIn(
+            "workspaceActionIsActive() || app.pendingHairMutation ? 900 : 3000",
+            activity,
+        )
+        self.assertIn(".hair-disable-button", self.styles)
+        self.assertIn(".hair-layer-control.is-locked", self.styles)
 
     def test_other_person_categories_use_a_compact_recipe_view(self) -> None:
         for element_id in (
@@ -1057,8 +1175,8 @@ class WorkspaceWebUITests(unittest.TestCase):
         self.assertIn('aria-hidden="true"', self.html)
 
     def test_static_assets_use_the_current_cache_version(self) -> None:
-        self.assertIn("/styles.css?v=0.8.0", self.html)
-        self.assertIn("/app.js?v=0.8.0", self.html)
+        self.assertIn("/styles.css?v=0.8.1", self.html)
+        self.assertIn("/app.js?v=0.8.1", self.html)
 
 
 if __name__ == "__main__":

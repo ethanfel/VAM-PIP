@@ -605,6 +605,45 @@ class ManagerRequestHandler(BaseHTTPRequestHandler):
                     ),
                 )
                 return
+            if method == "POST" and parsed.path == "/api/vam/person/hair":
+                allowed_fields = {
+                    "target_uid",
+                    "revision",
+                    "item_key",
+                    "active",
+                }
+                unexpected_fields = sorted(set(document) - allowed_fields)
+                if unexpected_fields:
+                    raise ValueError(
+                        "unsupported Person hair field(s): "
+                        + ", ".join(unexpected_fields)
+                    )
+                target_uid = document.get("target_uid")
+                revision = document.get("revision")
+                item_key = document.get("item_key")
+                active = document.get("active")
+                if not isinstance(target_uid, str):
+                    raise ValueError("target_uid must be a string")
+                if not isinstance(revision, str):
+                    raise ValueError("revision must be a string")
+                if not isinstance(item_key, str):
+                    raise ValueError("item_key must be a string")
+                if not isinstance(active, bool):
+                    raise ValueError("active must be a boolean")
+                if active:
+                    raise ValueError(
+                        "active Hair layers can only be removed externally"
+                    )
+                self._json(
+                    HTTPStatus.OK,
+                    service.set_person_hair(
+                        target_uid=target_uid,
+                        revision=revision,
+                        item_key=item_key,
+                        active=active,
+                    ),
+                )
+                return
             if method == "POST" and parsed.path == "/api/vam/person/clothing":
                 allowed_fields = {
                     "resource_id",
