@@ -1,5 +1,7 @@
 # VAM-PIP
 
+[![Tests](https://github.com/ethanfel/VAM-PIP/actions/workflows/tests.yml/badge.svg)](https://github.com/ethanfel/VAM-PIP/actions/workflows/tests.yml)
+
 VAM-PIP is a Linux-first package manager for large Virt-A-Mate libraries. It
 keeps the complete `.var` collection on disk while exposing a much smaller,
 dependency-closed set to VaM.
@@ -41,7 +43,8 @@ A backup of an important VaM installation is still recommended.
 - Python 3.10 or newer
 - a local filesystem supporting Linux `renameat2(RENAME_NOREPLACE)`
 - a VaM installation with an `AddonPackages` directory
-- BrowserAssist for in-game-style resource browsing (optional)
+- [BrowserAssist](https://hub.virtamate.com/resources/browserassist-free.20134/)
+  for in-game-style resource browsing (optional)
 - Proton only if you want VAM-PIP to invoke a Proton launch script
 
 The manager itself has no third-party Python dependencies.
@@ -53,13 +56,23 @@ Run directly from the checkout:
 ```bash
 ./vampip manager configure /path/to/VaM/AddonPackages
 ./vampip manager scan
-./vampip manager catalog import
 ./vampip-manager
 ```
 
 `vampip-manager` opens a browser on a private loopback URL. The URL contains a
 per-install write token in its fragment; keep the terminal running while using
 the interface.
+
+Package management works without BrowserAssist. To add the searchable
+scene/preset/item catalogue, install BrowserAssist, let it build or refresh its
+local data, then run:
+
+```bash
+./vampip manager catalog import
+```
+
+If no supported BrowserAssist data is available, the import command reports
+that explicitly and leaves the package inventory usable.
 
 Alternatively, install both command-line entry points:
 
@@ -79,7 +92,7 @@ export VAMPIP_STATE_DIR=/path/to/vampip-state
 
 ## Recommended first use
 
-1. Scan packages and import the BrowserAssist catalogue.
+1. Scan packages and, if BrowserAssist is installed, import its catalogue.
 2. Review the detected default session plugins in the web app or with
    `./vampip manager session-plugins list`.
 3. Pin any additional package that every session needs but that is not in
@@ -177,8 +190,10 @@ controller. Unmodified Timeline instances support a fixed legacy subset: play,
 pause, stop/reset, frame stepping, animation choice, seek, speed, weight, and
 lock where those storables are present.
 
-The enhanced Timeline fork adds protocol 1 state for exact segment, layer, and
-clip synchronization. Its audited drop-in workflow keeps each original
+The
+[enhanced Timeline interoperability branch](https://github.com/ethanfel/vam-timeline/tree/vampip-interop)
+adds protocol 1 state for exact segment, layer, and clip synchronization. Its
+audited drop-in workflow keeps each original
 `AcidBubbles.Timeline.<version>` filename, script path, plugin class, and scene
 slot, so existing embedded Timeline data loads normally without migration or
 scene rewriting. It publishes bounded catalogues with separate catalog and
@@ -186,6 +201,25 @@ live-state revisions; the browser receives only bridge-minted opaque IDs. Every
 command is checked against the observed revision and a fixed operation
 allowlist. Atom UIDs, plugin IDs, animation labels, and VaM storable/action
 names never cross the browser control boundary.
+
+With VaM and the VAM-PIP manager stopped, install the enhanced adapter from a
+checkout beside VAM-PIP:
+
+```bash
+git clone --branch vampip-interop https://github.com/ethanfel/vam-timeline.git
+cd vam-timeline
+./timeline-dropin.sh status
+./timeline-dropin.sh install
+```
+
+The installer accepts only audited whole-archive hashes, backs up each original
+outside `AddonPackages`, preserves active/hidden filenames, and refuses unknown
+or modified builds. To restore the byte-identical originals while VaM and the
+manager are stopped:
+
+```bash
+./timeline-dropin.sh restore
+```
 
 Timeline state normally refreshes once per second and immediately after a
 control. Clip catalogues share a 1,024-entry global budget, prioritized for

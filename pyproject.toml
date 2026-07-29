@@ -12,6 +12,11 @@ license = { text = "MIT" }
 authors = [{ name = "VAM-PIP contributors" }]
 dependencies = []
 
+[project.urls]
+Homepage = "https://github.com/ethanfel/VAM-PIP"
+Repository = "https://github.com/ethanfel/VAM-PIP"
+Issues = "https://github.com/ethanfel/VAM-PIP/issues"
+
 [project.scripts]
 vampip = "vampip.cli:main"
 vampip-manager = "vampip.manager_cli:main"

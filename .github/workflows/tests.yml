@@ -35,6 +35,12 @@ jobs:
           PYTHONPATH: ${{ github.workspace }}/src
         run: python -m unittest discover -s tests -p "test*.py" -v
 
+      - name: Verify mirrored bridge assets
+        run: |
+          cmp bridge/vam/VAMPipBridge.cs src/vampip/bridge_assets/VAMPipBridge.cs
+          cmp bridge/vam/VAMPipBridge.cslist src/vampip/bridge_assets/VAMPipBridge.cslist
+          cmp bridge/vam/README.md src/vampip/bridge_assets/README.md
+
   javascript:
     name: JavaScript syntax
     runs-on: ubuntu-latest

@@ -18,18 +18,18 @@ capability, not an error.
 
 ## Asset and action map
 
-| Workspace | Catalogue data in this installation | Exact VaM operation | Risk and implementation status |
+| Workspace | Catalogue data | Exact VaM operation | Risk and implementation status |
 | --- | ---: | --- | --- |
-| Scenes | 5,376 `Scene` entries | `SuperController.Load` or `LoadMerge` on a validated `Saves/scene/*.json` reference | Bounded and useful now. Replace needs a strong unsaved-work warning; merge is still a large scene mutation. |
-| SubScenes | 2,549 `SubScenes` entries | Target an existing `SubScene` or create one only while its requested UID remains unused, then set `SubScene.browsePath` | Implemented for existing and newly created targets. Loading requires critical confirmation because a SubScene can contain plugin atoms. Optional placement remains in VaM. |
-| Atom presets | 2,513 `Preset Atom` entries across multiple atom types | Target an existing exact type or create it only while its requested UID remains unused, then use its `Preset` manager with replace/merge | Implemented when the catalogue-derived type is in the shared native allowlist. Other types stay browse-only. All loads require critical confirmation because generic presets can contain `PluginManager` state. |
-| Custom Unity Assets | 4,800 `Custom Unity Assets` entries: 4,767 `.assetbundle` and 33 legacy `.scene` bundles | Target an existing `CustomUnityAsset` or create one while its UID remains unused, force `loadDll=false`, then set the fixed `asset.assetUrl`; single-choice bundles auto-select and multi-choice bundles use bridge-issued numeric choices | Implemented. Every load requires critical confirmation. The browser cannot provide a bundle path, atom type, asset name, storable, or DLL option. Existing code already active in VaM cannot be unloaded. |
-| Plugins | 12,933 indexed files | Merge a synthetic PluginManager preset into a chosen atom, Scene Plugins, or Session Plugins | Next target, but it executes code. The catalogue contains helper `.cs` files as well as entry `.cslist` files, so trusted entry-point classification and explicit confirmation are required first. |
-| Clothing | 9,863 raw female/male items and 30,914 item-style presets | Set the target Person's exact `geometry` clothing boolean to worn or removed; item styles use that item's preset manager | Individual wear/remove and the multi-item character-sheet projection are implemented with exact package-qualified resource identity and revisioned worn/locked/gender state. Conservative related-style links are browse-only; exact item-style application remains future work. |
+| Scenes | `Scene` entries | `SuperController.Load` or `LoadMerge` on a validated `Saves/scene/*.json` reference | Bounded and useful now. Replace needs a strong unsaved-work warning; merge is still a large scene mutation. |
+| SubScenes | `SubScenes` entries | Target an existing `SubScene` or create one only while its requested UID remains unused, then set `SubScene.browsePath` | Implemented for existing and newly created targets. Loading requires critical confirmation because a SubScene can contain plugin atoms. Optional placement remains in VaM. |
+| Atom presets | `Preset Atom` entries across multiple atom types | Target an existing exact type or create it only while its requested UID remains unused, then use its `Preset` manager with replace/merge | Implemented when the catalogue-derived type is in the shared native allowlist. Other types stay browse-only. All loads require critical confirmation because generic presets can contain `PluginManager` state. |
+| Custom Unity Assets | `.assetbundle` and legacy `.scene` bundles | Target an existing `CustomUnityAsset` or create one while its UID remains unused, force `loadDll=false`, then set the fixed `asset.assetUrl`; single-choice bundles auto-select and multi-choice bundles use bridge-issued numeric choices | Implemented. Every load requires critical confirmation. The browser cannot provide a bundle path, atom type, asset name, storable, or DLL option. Existing code already active in VaM cannot be unloaded. |
+| Plugins | Indexed script files | Merge a synthetic PluginManager preset into a chosen atom, Scene Plugins, or Session Plugins | Next target, but it executes code. The catalogue contains helper `.cs` files as well as entry `.cslist` files, so trusted entry-point classification and explicit confirmation are required first. |
+| Clothing | Female/male items and item-style presets | Set the target Person's exact `geometry` clothing boolean to worn or removed; item styles use that item's preset manager | Individual wear/remove and the multi-item character-sheet projection are implemented with exact package-qualified resource identity and revisioned worn/locked/gender state. Conservative related-style links are browse-only; exact item-style application remains future work. |
 | Person presets and controls | Appearance, hair, skin, clothing, morphs, pose, physics, animation, general, and Person-plugin presets | Use static preset-kind to path/storable mappings; later publish typed live controls | The broad preset pipeline is the first Person module. See [PERSON-WORKSPACE.md](PERSON-WORKSPACE.md). |
 
-Counts come from the current last-good BrowserAssist import and are not
-hard-coded product limits.
+Available counts vary with each user's last-good BrowserAssist import and are
+not hard-coded product limits.
 
 ## Safe command families
 
