@@ -12,6 +12,7 @@ import json
 import math
 import os
 from pathlib import Path
+import re
 import sys
 from typing import Any
 
@@ -112,6 +113,66 @@ BODY_LINKS = (
     (69, 5),
     (69, 6),
 )
+
+MODEL_CONFIG_LIMIT = 64 * 1024
+
+
+def _model_config_path(checkpoint: Path) -> Path | None:
+    for candidate in (
+        checkpoint.parent / "model_config.yaml",
+        checkpoint.parent.parent / "model_config.yaml",
+    ):
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def _checkpoint_backbone(config_path: Path) -> str | None:
+    if config_path.stat().st_size > MODEL_CONFIG_LIMIT:
+        raise ValueError("model_config.yaml exceeds the safe size limit")
+    text = config_path.read_text(encoding="utf-8")
+    for match in re.finditer(
+        r"(?mi)^\s*TYPE\s*:\s*['\"]?([a-z0-9_+.-]{1,128})['\"]?\s*(?:#.*)?$",
+        text,
+    ):
+        name = match.group(1).casefold()
+        if name.startswith(("dinov3_", "vit_hmr")):
+            return name
+    return None
+
+
+def _pinned_torch_hub_loader(
+    original_load: Any,
+    dinov3_repo: Path | None,
+) -> Any:
+    def local_only_load(
+        repo_or_dir: object,
+        model: str,
+        *args: Any,
+        **kwargs: Any,
+    ) -> Any:
+        source = kwargs.get("source", "github")
+        if source != "github":
+            return original_load(repo_or_dir, model, *args, **kwargs)
+        if repo_or_dir != "facebookresearch/dinov3":
+            raise RuntimeError(f"unexpected remote Torch Hub repository: {repo_or_dir}")
+        if model != "dinov3_vith16plus":
+            raise RuntimeError(f"unexpected DINOv3 Torch Hub model: {model}")
+        if kwargs.get("pretrained") is not False:
+            raise RuntimeError("DINOv3 pretrained weight downloads are disabled")
+        unexpected = set(kwargs) - {"source", "pretrained", "drop_path"}
+        if unexpected:
+            raise RuntimeError(
+                "unexpected DINOv3 Torch Hub options: " + ", ".join(sorted(unexpected))
+            )
+        if dinov3_repo is None:
+            raise RuntimeError(
+                "the pinned official DINOv3 repository is not configured"
+            )
+        kwargs["source"] = "local"
+        return original_load(str(dinov3_repo), model, *args, **kwargs)
+
+    return local_only_load
 
 
 def _atomic_json(path: Path, document: dict[str, object]) -> None:
@@ -214,6 +275,7 @@ def run(
     repo: Path,
     checkpoint: Path,
     mhr: Path,
+    dinov3_repo: Path | None,
     source: Path,
     request_path: Path,
     output_dir: Path,
@@ -221,6 +283,8 @@ def run(
     repo = repo.resolve()
     checkpoint = checkpoint.resolve()
     mhr = mhr.resolve()
+    if dinov3_repo is not None:
+        dinov3_repo = dinov3_repo.resolve()
     source = source.resolve()
     request_path = request_path.resolve()
     output_dir = output_dir.resolve()
@@ -228,13 +292,28 @@ def run(
         raise ValueError("repo is not a native SAM 3D Body source checkout")
     if not checkpoint.is_file():
         raise ValueError("SAM 3D Body checkpoint is missing")
-    if not (
-        (checkpoint.parent / "model_config.yaml").is_file()
-        or (checkpoint.parent.parent / "model_config.yaml").is_file()
-    ):
+    model_config = _model_config_path(checkpoint)
+    if model_config is None:
         raise ValueError(
             "model_config.yaml is missing beside the checkpoint or in its parent"
         )
+    backbone = _checkpoint_backbone(model_config)
+    if backbone is not None and backbone.startswith("dinov3_"):
+        if backbone != "dinov3_vith16plus":
+            raise ValueError(f"the DINOv3 backbone is unsupported: {backbone}")
+        if dinov3_repo is None:
+            raise ValueError("the pinned official DINOv3 repository is not configured")
+        if any("comfyui" in part.casefold() for part in dinov3_repo.parts):
+            raise ValueError(
+                "the official DINOv3 repository must not be inside ComfyUI"
+            )
+        if not (
+            (dinov3_repo / "hubconf.py").is_file()
+            and (dinov3_repo / "dinov3" / "__init__.py").is_file()
+        ):
+            raise ValueError(
+                "the official DINOv3 repository is not a native source checkout"
+            )
     if not mhr.is_file():
         raise ValueError("MHR TorchScript model is missing")
     if not source.is_file() or not request_path.is_file():
@@ -280,12 +359,17 @@ def run(
     # force PyTorch's restricted tensor-only loader while that call runs.
     # This remains compatible with Meta's plain state-dict checkpoints.
     original_torch_load = torch.load
+    original_torch_hub_load = torch.hub.load
 
     def restricted_torch_load(*args: Any, **kwargs: Any) -> Any:
         kwargs["weights_only"] = True
         return original_torch_load(*args, **kwargs)
 
     torch.load = restricted_torch_load
+    torch.hub.load = _pinned_torch_hub_loader(
+        original_torch_hub_load,
+        dinov3_repo,
+    )
     try:
         model, model_cfg = load_sam_3d_body(
             str(checkpoint),
@@ -294,6 +378,7 @@ def run(
         )
     finally:
         torch.load = original_torch_load
+        torch.hub.load = original_torch_hub_load
     estimator = SAM3DBodyEstimator(
         sam_3d_body_model=model,
         model_cfg=model_cfg,
@@ -400,6 +485,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--repo", required=True, type=Path)
     parser.add_argument("--checkpoint", required=True, type=Path)
     parser.add_argument("--mhr", required=True, type=Path)
+    parser.add_argument("--dinov3-repo", type=Path)
     parser.add_argument("--source", required=True, type=Path)
     parser.add_argument("--request", required=True, type=Path)
     parser.add_argument("--output-dir", required=True, type=Path)
@@ -408,6 +494,7 @@ def main(argv: list[str] | None = None) -> int:
         repo=args.repo,
         checkpoint=args.checkpoint,
         mhr=args.mhr,
+        dinov3_repo=args.dinov3_repo,
         source=args.source,
         request_path=args.request,
         output_dir=args.output_dir,

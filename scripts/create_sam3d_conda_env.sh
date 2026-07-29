@@ -2,6 +2,7 @@
 set -euo pipefail
 
 SAM3D_COMMIT="b5c765a0d89d789985e186d396315e7590887b94"
+DINOV3_COMMIT="5aa7e93ab42ae3526291f6b4e3fcd22637e03326"
 
 if [[ $# -ne 1 ]]; then
   echo "Usage: $0 /absolute/path/to/new/vampip-sam3d-runtime" >&2
@@ -35,12 +36,14 @@ fi
 
 SAM3D_ENV_PREFIX="$(realpath -m -- "$SAM3D_RUNTIME_ROOT/conda")"
 SAM3D_REPO_DIR="$(realpath -m -- "$SAM3D_RUNTIME_ROOT/sam-3d-body")"
-SAM3D_MODEL_DIR="$(realpath -m -- "$SAM3D_RUNTIME_ROOT/models/vith")"
+DINOV3_REPO_DIR="$(realpath -m -- "$SAM3D_RUNTIME_ROOT/dinov3")"
+SAM3D_MODEL_DIR="$(realpath -m -- "$SAM3D_RUNTIME_ROOT/models/dinov3")"
 SAM3D_HF_HOME="$(realpath -m -- "$SAM3D_RUNTIME_ROOT/cache/huggingface")"
 
 for target in \
   "$SAM3D_ENV_PREFIX" \
   "$SAM3D_REPO_DIR" \
+  "$DINOV3_REPO_DIR" \
   "$SAM3D_MODEL_DIR" \
   "$SAM3D_HF_HOME"; do
   if [[ "${target,,}" == *comfyui* ]]; then
@@ -56,7 +59,7 @@ for target in \
   esac
 done
 
-for target in "$SAM3D_ENV_PREFIX" "$SAM3D_REPO_DIR"; do
+for target in "$SAM3D_ENV_PREFIX" "$SAM3D_REPO_DIR" "$DINOV3_REPO_DIR"; do
   if [[ -e "$target" ]]; then
     echo "Refusing to overwrite existing path: $target" >&2
     exit 2
@@ -76,6 +79,8 @@ mkdir -p "$SAM3D_RUNTIME_ROOT" "$SAM3D_MODEL_DIR" "$SAM3D_HF_HOME"
 conda create --prefix "$SAM3D_ENV_PREFIX" python=3.11 pip -y
 git clone https://github.com/facebookresearch/sam-3d-body.git "$SAM3D_REPO_DIR"
 git -C "$SAM3D_REPO_DIR" checkout --detach "$SAM3D_COMMIT"
+git clone https://github.com/facebookresearch/dinov3.git "$DINOV3_REPO_DIR"
+git -C "$DINOV3_REPO_DIR" checkout --detach "$DINOV3_COMMIT"
 
 cat <<EOF
 
@@ -85,12 +90,13 @@ No model, PyTorch build, or Python dependencies were downloaded.
 Next:
   1. Install a current RTX 5090/Blackwell-compatible PyTorch build into:
        $SAM3D_ENV_PREFIX
-  2. Follow docs/SAM3D_SETUP.md for dependencies and gated ViT-H download.
+  2. Follow docs/SAM3D_SETUP.md for dependencies and the gated DINOv3-H+ download.
      Keep its setup commands isolated with:
        HF_HOME=$SAM3D_HF_HOME
   3. Configure VAM-PIP with:
        VAMPIP_SAM3D_PYTHON=$SAM3D_ENV_PREFIX/bin/python
        VAMPIP_SAM3D_REPO=$SAM3D_REPO_DIR
+       VAMPIP_SAM3D_DINOV3_REPO=$DINOV3_REPO_DIR
        VAMPIP_SAM3D_CHECKPOINT=$SAM3D_MODEL_DIR/model.ckpt
        VAMPIP_SAM3D_MHR=$SAM3D_MODEL_DIR/assets/mhr_model.pt
 EOF

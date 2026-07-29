@@ -12,10 +12,22 @@ Choose a new absolute directory outside every ComfyUI tree:
 ```
 
 The script is intentionally conservative: it refuses existing environment and
-repository paths, creates Python 3.11, and checks out official
-`facebookresearch/sam-3d-body` commit
-`b5c765a0d89d789985e186d396315e7590887b94`. It does not install PyTorch or
+repository paths, creates Python 3.11, and checks out these official sources:
+
+- `facebookresearch/sam-3d-body` commit
+  `b5c765a0d89d789985e186d396315e7590887b94`
+- `facebookresearch/dinov3` commit
+  `5aa7e93ab42ae3526291f6b4e3fcd22637e03326`
+
+The DINOv3 source supplies the pinned backbone architecture; trained weights
+come from the SAM 3D Body checkpoint. The script does not install PyTorch or
 download model weights.
+
+For an existing ViT-H runtime, keep that environment and repository. Add the
+official DINOv3 checkout beside `sam-3d-body`, detach it at the commit above,
+download the DINOv3-H+ snapshot into `models/dinov3`, and update only the
+model and DINO environment variables shown in section 4. The creation script
+intentionally refuses to overwrite an existing runtime.
 
 ## 2. Install a current Blackwell-compatible PyTorch build
 
@@ -41,10 +53,10 @@ ComfyUI:
   pycocotools tensorboard huggingface_hub
 ```
 
-## 3. Request access and download ViT-H
+## 3. Request access and download DINOv3-H+
 
 Request access to
-[`facebook/sam-3d-body-vith`](https://huggingface.co/facebook/sam-3d-body-vith)
+[`facebook/sam-3d-body-dinov3`](https://huggingface.co/facebook/sam-3d-body-dinov3)
 and accept its terms in the browser. Authenticate only inside the isolated
 environment, then download the complete snapshot into its model directory.
 The native loader needs `model_config.yaml` as well as
@@ -56,29 +68,22 @@ runtime instead of inheriting a global or ComfyUI cache:
 export HF_HOME=/absolute/path/to/vampip-sam3d-runtime/cache/huggingface
 /absolute/path/to/vampip-sam3d-runtime/conda/bin/hf auth login
 /absolute/path/to/vampip-sam3d-runtime/conda/bin/hf download \
-  facebook/sam-3d-body-vith \
-  --local-dir /absolute/path/to/vampip-sam3d-runtime/models/vith
+  facebook/sam-3d-body-dinov3 \
+  --revision 11aaa346c7204874a1cbafe3d39a979080b2c55a \
+  --local-dir /absolute/path/to/vampip-sam3d-runtime/models/dinov3
 ```
 
 VAM-PIP never bundles or downloads gated weights.
 
-If the official repository has not granted access, these public ViT-H mirrors
-use the same native file layout:
-
-- [`jonntd/sam-3d-body-vith`](https://huggingface.co/jonntd/sam-3d-body-vith)
-- [`jetjodh/sam-3d-body-vith`](https://huggingface.co/jetjodh/sam-3d-body-vith)
-
-The two mirrors were byte-compared during VAM-PIP validation. Before using a
-download, verify the large files:
+Verify the official snapshot before using it:
 
 ```text
-model.ckpt          SHA256 3b1cb897f4bbd977bf81cbb0b30780a9582681ac642ee112865790ceb4d66056
+model.ckpt          SHA256 b5a2f9d305dd02626b967aa2e86021fba07065df66ce7a7e00ffb9664f150abf
 assets/mhr_model.pt SHA256 352e271a6c42729c68554ceaea0c955e866970160c31e35506d782dc0f7377bc
+model_config.yaml   SHA256 1012fc3f39cb5e90e3f8fbadf7bded31604bfafdce0321d17a7c1a2d3f08b88d
 ```
 
-Use the same `hf download ... --local-dir ...` command with the chosen mirror
-repository name. Model access and licensing remain the operator's
-responsibility.
+Model access and licensing remain the operator's responsibility.
 
 ## 4. Configure the manager
 
@@ -87,8 +92,9 @@ Set these variables in the environment that launches `vampip-manager`:
 ```bash
 export VAMPIP_SAM3D_PYTHON=/absolute/path/to/vampip-sam3d-runtime/conda/bin/python
 export VAMPIP_SAM3D_REPO=/absolute/path/to/vampip-sam3d-runtime/sam-3d-body
-export VAMPIP_SAM3D_CHECKPOINT=/absolute/path/to/vampip-sam3d-runtime/models/vith/model.ckpt
-export VAMPIP_SAM3D_MHR=/absolute/path/to/vampip-sam3d-runtime/models/vith/assets/mhr_model.pt
+export VAMPIP_SAM3D_DINOV3_REPO=/absolute/path/to/vampip-sam3d-runtime/dinov3
+export VAMPIP_SAM3D_CHECKPOINT=/absolute/path/to/vampip-sam3d-runtime/models/dinov3/model.ckpt
+export VAMPIP_SAM3D_MHR=/absolute/path/to/vampip-sam3d-runtime/models/dinov3/assets/mhr_model.pt
 ```
 
 Alternatively, create a named Conda environment and set
@@ -96,7 +102,12 @@ Alternatively, create a named Conda environment and set
 The manager status endpoint reports each missing component without starting
 the worker.
 
+The older native ViT-H checkpoint and compatible custom native checkpoints
+remain supported. Their `model.ckpt` and `model_config.yaml` must match. A
+non-DINO checkpoint does not require `VAMPIP_SAM3D_DINOV3_REPO`.
+
 Worker jobs, caches and scratch files live below VAM-PIP's persistent state
 directory under `sam3d/`; they do not use `/tmp`. The worker sets its own
-private `HF_HOME` there, so it does not consume the setup shell's cache or a
-ComfyUI cache during inference.
+private cache paths and offline flags there. DINOv3 is loaded from the pinned
+local checkout, so inference does not fetch Torch Hub source or weights and
+does not consume the setup shell's cache or a ComfyUI cache.

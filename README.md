@@ -256,10 +256,12 @@ runs Meta's native SAM 3D Body code in a dedicated Python 3.11 worker. The
 result can be retargeted onto an existing VaM Person, applied with one-step
 undo, and captured through a compatible VRRenderer camera atom.
 
-The worker is isolated from ComfyUI, and bridge installation includes the fixed
-camera preset and renderer scripts needed by that workflow. See the
-[standalone SAM 3D Body setup](docs/SAM3D_SETUP.md) for environment, model, and
-configuration instructions.
+The recommended model is the official DINOv3-H+ checkpoint, loaded through a
+pinned local DINOv3 source checkout. Native ViT-H and compatible custom native
+checkpoints remain supported. The worker is isolated from ComfyUI, and bridge
+installation includes the fixed camera preset and renderer scripts needed by
+that workflow. See the [standalone SAM 3D Body setup](docs/SAM3D_SETUP.md) for
+environment, model, and configuration instructions.
 
 ## External workspace
 

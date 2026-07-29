@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import hashlib
 import json
 import os
@@ -13,6 +14,7 @@ from unittest import mock
 from vampip.bridge import bridge_directory, install_bridge
 from vampip.database import connect
 from vampip.sam3d import (
+    SAM3D_MODEL_CONFIG_LIMIT,
     Sam3dJobError,
     Sam3dJobManager,
     Sam3dWorkerConfig,
@@ -24,6 +26,7 @@ from vampip.sam3d_vam import (
     VAM_CONTROLLER_IDS,
     build_vam_solution,
 )
+from vampip.sam3d_worker import _pinned_torch_hub_loader
 from vampip.service import ManagerService
 
 
@@ -124,7 +127,7 @@ class Sam3dBackendTests(unittest.TestCase):
         checkpoint.parent.mkdir()
         checkpoint.write_bytes(b"checkpoint")
         (checkpoint.parent / "model_config.yaml").write_text(
-            "MODEL: {}\n",
+            "MODEL:\n  BACKBONE:\n    TYPE: vit_hmr_512_384\n",
             encoding="utf-8",
         )
         mhr = self.base / "models" / "assets" / "mhr_model.pt"
@@ -186,6 +189,109 @@ class Sam3dBackendTests(unittest.TestCase):
         self.assertFalse(status["comfyui_used"])
         self.assertGreaterEqual(len(status["worker"]["errors"]), 4)
 
+    def test_dinov3_checkpoint_requires_a_pinned_native_checkout(self) -> None:
+        assert self.config.checkpoint is not None
+        stale_vit_repo = replace(
+            self.config,
+            dinov3_repo=self.base / "missing-dinov3",
+        )
+        self.assertEqual(stale_vit_repo.errors(), [])
+        self.assertEqual(
+            stale_vit_repo.public_status()["model"],
+            "SAM 3D Body ViT-H",
+        )
+
+        (self.config.checkpoint.parent / "model_config.yaml").write_text(
+            "MODEL:\n  BACKBONE:\n    TYPE: dinov3_vith16plus\n",
+            encoding="utf-8",
+        )
+        missing = replace(self.config, dinov3_repo=None)
+        self.assertIn(
+            "the pinned official DINOv3 repository is not configured",
+            missing.errors(),
+        )
+
+        dinov3_repo = self.base / "dinov3"
+        (dinov3_repo / "dinov3").mkdir(parents=True)
+        (dinov3_repo / "dinov3" / "__init__.py").write_text(
+            "",
+            encoding="utf-8",
+        )
+        (dinov3_repo / "hubconf.py").write_text("", encoding="utf-8")
+        configured = replace(self.config, dinov3_repo=dinov3_repo)
+
+        self.assertEqual(configured.errors(), [])
+        status = configured.public_status()
+        self.assertEqual(status["model"], "SAM 3D Body DINOv3-H+")
+        self.assertEqual(status["backbone"], "dinov3_vith16plus")
+        self.assertTrue(status["dinov3_repository"])
+
+    def test_worker_rejects_unsafe_model_config_files(self) -> None:
+        assert self.config.checkpoint is not None
+        config_path = self.config.checkpoint.parent / "model_config.yaml"
+        cases = {
+            "oversized": b" " * (SAM3D_MODEL_CONFIG_LIMIT + 1),
+            "invalid UTF-8": b"\xff",
+        }
+        for name, payload in cases.items():
+            with self.subTest(name=name):
+                config_path.write_bytes(payload)
+                errors = self.config.errors()
+                self.assertTrue(
+                    any("model_config.yaml" in error for error in errors)
+                )
+                self.assertFalse(self.config.configured)
+                self.assertFalse(self.config.public_status()["model_config"])
+
+    def test_dinov3_torch_hub_is_redirected_to_the_pinned_checkout(self) -> None:
+        dinov3_repo = self.base / "dinov3"
+        original_load = mock.Mock(return_value="model")
+        load = _pinned_torch_hub_loader(original_load, dinov3_repo)
+
+        self.assertEqual(
+            load(
+                "facebookresearch/dinov3",
+                "dinov3_vith16plus",
+                source="github",
+                pretrained=False,
+            ),
+            "model",
+        )
+        original_load.assert_called_once_with(
+            str(dinov3_repo),
+            "dinov3_vith16plus",
+            source="local",
+            pretrained=False,
+        )
+        with self.assertRaisesRegex(RuntimeError, "unexpected remote"):
+            load(
+                "untrusted/example",
+                "model",
+                source="github",
+            )
+        with self.assertRaisesRegex(RuntimeError, "unexpected DINOv3"):
+            load(
+                "facebookresearch/dinov3",
+                "dinov3_vitl16",
+                source="github",
+                pretrained=False,
+            )
+        with self.assertRaisesRegex(RuntimeError, "downloads are disabled"):
+            load(
+                "facebookresearch/dinov3",
+                "dinov3_vith16plus",
+                source="github",
+                pretrained=True,
+            )
+        with self.assertRaisesRegex(RuntimeError, "unexpected DINOv3"):
+            load(
+                "facebookresearch/dinov3",
+                "dinov3_vith16plus",
+                source="github",
+                pretrained=False,
+                force_reload=True,
+            )
+
     def test_subprocess_worker_starts_an_isolated_sanitized_session(self) -> None:
         manager = self.manager()
         created = manager.create(png_header(), "image/png")
@@ -208,6 +314,10 @@ class Sam3dBackendTests(unittest.TestCase):
             "PYTHONNOUSERSITE": "0",
             "COMFYUI_ROOT": "/tmp/ComfyUI",
             "OTHER_MODEL_PATH": "/tmp/ComfyUI/models",
+            "HF_TOKEN": "secret",
+            "HF_TOKEN_PATH": "/tmp/token",
+            "HTTPS_PROXY": "http://proxy.invalid",
+            "WANDB_API_KEY": "secret",
         }
         with (
             mock.patch.dict(os.environ, inherited, clear=True),
@@ -227,6 +337,9 @@ class Sam3dBackendTests(unittest.TestCase):
         environment = options["env"]
         self.assertEqual(environment["SAFE_KEEP"], "yes")
         self.assertEqual(environment["PYTHONNOUSERSITE"], "1")
+        self.assertEqual(environment["HF_HUB_OFFLINE"], "1")
+        self.assertEqual(environment["TRANSFORMERS_OFFLINE"], "1")
+        self.assertEqual(environment["WANDB_MODE"], "disabled")
         self.assertEqual(
             environment["TMPDIR"],
             str(manager.runtime_dir / "tmp"),
@@ -237,6 +350,32 @@ class Sam3dBackendTests(unittest.TestCase):
         process.wait.assert_called_once_with(
             timeout=self.config.timeout_seconds
         )
+
+        assert self.config.checkpoint is not None
+        (self.config.checkpoint.parent / "model_config.yaml").write_text(
+            "MODEL:\n  BACKBONE:\n    TYPE: dinov3_vith16plus\n",
+            encoding="utf-8",
+        )
+        dinov3_repo = self.base / "dinov3"
+        (dinov3_repo / "dinov3").mkdir(parents=True)
+        (dinov3_repo / "dinov3" / "__init__.py").write_text(
+            "",
+            encoding="utf-8",
+        )
+        (dinov3_repo / "hubconf.py").write_text("", encoding="utf-8")
+        config = replace(self.config, dinov3_repo=dinov3_repo)
+        with mock.patch(
+            "vampip.sam3d.subprocess.Popen",
+            return_value=process,
+        ) as dino_popen:
+            SubprocessSam3dWorker()(
+                config,
+                paths,
+                manager.runtime_dir,
+            )
+        command = dino_popen.call_args.args[0]
+        option = command.index("--dinov3-repo")
+        self.assertEqual(command[option + 1], str(dinov3_repo))
 
     def test_subprocess_timeout_terminates_then_kills_process_group(self) -> None:
         manager = self.manager()

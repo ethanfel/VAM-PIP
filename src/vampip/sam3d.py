@@ -28,6 +28,7 @@ SAM3D_UPLOAD_LIMIT = 32 * 1024 * 1024
 SAM3D_MAX_PIXELS = 50_000_000
 SAM3D_MAX_DIMENSION = 32_768
 SAM3D_MANIFEST_LIMIT = 4 * 1024 * 1024
+SAM3D_MODEL_CONFIG_LIMIT = 64 * 1024
 SAM3D_JOB_ID = re.compile(r"^[0-9a-f]{32}$")
 SAM3D_ARTIFACTS = frozenset({"source", "manifest", "overlay"})
 _TERMINAL_STATES = frozenset(
@@ -197,6 +198,64 @@ def _unsafe_comfy_path(path: Path) -> bool:
     return any("comfyui" in part.casefold() for part in path.parts)
 
 
+def _model_config_path(checkpoint: Path | None) -> Path | None:
+    if checkpoint is None or not checkpoint.is_file():
+        return None
+    for candidate in (
+        checkpoint.parent / "model_config.yaml",
+        checkpoint.parent.parent / "model_config.yaml",
+    ):
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def _model_config_validation_error(checkpoint: Path | None) -> str | None:
+    config_path = _model_config_path(checkpoint)
+    if config_path is None:
+        return None
+    try:
+        if config_path.stat().st_size > SAM3D_MODEL_CONFIG_LIMIT:
+            return "model_config.yaml exceeds the safe size limit"
+        config_path.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        return "model_config.yaml is not valid UTF-8"
+    except OSError:
+        return "model_config.yaml cannot be read"
+    return None
+
+
+def _checkpoint_backbone(checkpoint: Path | None) -> str | None:
+    config_path = _model_config_path(checkpoint)
+    if config_path is None:
+        return None
+    try:
+        if config_path.stat().st_size > SAM3D_MODEL_CONFIG_LIMIT:
+            return None
+        text = config_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+    for match in re.finditer(
+        r"(?mi)^\s*TYPE\s*:\s*['\"]?([a-z0-9_+.-]{1,128})['\"]?\s*(?:#.*)?$",
+        text,
+    ):
+        name = match.group(1).casefold()
+        if name.startswith(("dinov3_", "vit_hmr")):
+            return name
+    return None
+
+
+def _checkpoint_model_name(checkpoint: Path | None) -> str:
+    backbone = _checkpoint_backbone(checkpoint)
+    if backbone == "dinov3_vith16plus":
+        return "SAM 3D Body DINOv3-H+"
+    if backbone is not None and backbone.startswith("dinov3_"):
+        return "SAM 3D Body DINOv3"
+    if backbone is not None and backbone.startswith("vit_hmr"):
+        return "SAM 3D Body ViT-H"
+    return "SAM 3D Body"
+
+
 @dataclass(frozen=True)
 class Sam3dWorkerConfig:
     python: Path | None
@@ -206,6 +265,7 @@ class Sam3dWorkerConfig:
     checkpoint: Path | None
     mhr: Path | None
     timeout_seconds: int = 1800
+    dinov3_repo: Path | None = None
 
     @classmethod
     def from_environment(cls) -> "Sam3dWorkerConfig":
@@ -240,6 +300,7 @@ class Sam3dWorkerConfig:
             repo=optional_path("VAMPIP_SAM3D_REPO"),
             checkpoint=optional_path("VAMPIP_SAM3D_CHECKPOINT"),
             mhr=optional_path("VAMPIP_SAM3D_MHR"),
+            dinov3_repo=optional_path("VAMPIP_SAM3D_DINOV3_REPO"),
             timeout_seconds=timeout_seconds,
         )
 
@@ -288,14 +349,32 @@ class Sam3dWorkerConfig:
             elif not value.is_file():
                 errors.append(f"the {label} is missing")
         if self.checkpoint is not None and self.checkpoint.is_file():
-            config_candidates = (
-                self.checkpoint.parent / "model_config.yaml",
-                self.checkpoint.parent.parent / "model_config.yaml",
-            )
-            if not any(candidate.is_file() for candidate in config_candidates):
+            if _model_config_path(self.checkpoint) is None:
                 errors.append(
                     "model_config.yaml is missing beside the checkpoint "
                     "or in its parent directory"
+                )
+            else:
+                config_error = _model_config_validation_error(self.checkpoint)
+                if config_error is not None:
+                    errors.append(config_error)
+        backbone = _checkpoint_backbone(self.checkpoint)
+        uses_dinov3 = bool((backbone or "").startswith("dinov3_"))
+        if uses_dinov3:
+            if backbone != "dinov3_vith16plus":
+                errors.append(f"the DINOv3 backbone is unsupported: {backbone}")
+            elif self.dinov3_repo is None:
+                errors.append("the pinned official DINOv3 repository is not configured")
+            elif _unsafe_comfy_path(self.dinov3_repo):
+                errors.append(
+                    "the official DINOv3 repository must not be inside ComfyUI"
+                )
+            elif not (
+                (self.dinov3_repo / "hubconf.py").is_file()
+                and (self.dinov3_repo / "dinov3" / "__init__.py").is_file()
+            ):
+                errors.append(
+                    "the official DINOv3 repository is not a native source checkout"
                 )
         return errors
 
@@ -322,17 +401,15 @@ class Sam3dWorkerConfig:
 
     def public_status(self) -> dict[str, object]:
         errors = self.errors()
-        model_config = bool(
-            self.checkpoint is not None
-            and (
-                (self.checkpoint.parent / "model_config.yaml").is_file()
-                or (
-                    self.checkpoint.parent.parent / "model_config.yaml"
-                ).is_file()
-            )
+        model_config = (
+            _model_config_path(self.checkpoint) is not None
+            and _model_config_validation_error(self.checkpoint) is None
         )
+        backbone = _checkpoint_backbone(self.checkpoint)
         return {
             "configured": not errors,
+            "model": _checkpoint_model_name(self.checkpoint),
+            "backbone": backbone,
             "launcher": (
                 "dedicated-python"
                 if self.python is not None
@@ -348,6 +425,11 @@ class Sam3dWorkerConfig:
             ),
             "model_config": model_config,
             "mhr": bool(self.mhr is not None and self.mhr.is_file()),
+            "dinov3_repository": bool(
+                self.dinov3_repo is not None
+                and (self.dinov3_repo / "hubconf.py").is_file()
+                and (self.dinov3_repo / "dinov3" / "__init__.py").is_file()
+            ),
             "errors": errors,
         }
 
@@ -376,10 +458,23 @@ class SubprocessSam3dWorker:
         cache_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
         temp_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
         environment: dict[str, str] = {}
+        blocked_environment_keys = {
+            "ALL_PROXY",
+            "GH_TOKEN",
+            "GITHUB_TOKEN",
+            "HF_HUB_TOKEN",
+            "HF_TOKEN",
+            "HF_TOKEN_PATH",
+            "HUGGING_FACE_HUB_TOKEN",
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "WANDB_API_KEY",
+        }
         for key, value in os.environ.items():
             upper_key = key.upper()
             if (
-                upper_key.startswith("LD_")
+                upper_key in blocked_environment_keys
+                or upper_key.startswith("LD_")
                 or upper_key.startswith("CONDA")
                 or upper_key.startswith("_CONDA")
                 or upper_key.startswith("VIRTUAL_ENV")
@@ -395,7 +490,10 @@ class SubprocessSam3dWorker:
                 "PYTHONNOUSERSITE": "1",
                 "MOMENTUM_ENABLED": "0",
                 "HF_HOME": str(cache_dir / "huggingface"),
+                "HF_HUB_OFFLINE": "1",
                 "TORCH_HOME": str(cache_dir / "torch"),
+                "TRANSFORMERS_OFFLINE": "1",
+                "WANDB_MODE": "disabled",
                 "XDG_CACHE_HOME": str(cache_dir / "xdg"),
                 "TMPDIR": str(temp_dir),
             }
@@ -444,13 +542,22 @@ class SubprocessSam3dWorker:
             str(config.checkpoint),
             "--mhr",
             str(config.mhr),
-            "--source",
-            str(paths.source),
-            "--request",
-            str(paths.request),
-            "--output-dir",
-            str(paths.directory),
         ]
+        uses_dinov3 = bool(
+            (_checkpoint_backbone(config.checkpoint) or "").startswith("dinov3_")
+        )
+        if uses_dinov3 and config.dinov3_repo is not None:
+            command.extend(["--dinov3-repo", str(config.dinov3_repo)])
+        command.extend(
+            [
+                "--source",
+                str(paths.source),
+                "--request",
+                str(paths.request),
+                "--output-dir",
+                str(paths.directory),
+            ]
+        )
         environment = self._environment(runtime_dir)
         with paths.log.open("ab") as log:
             with self._process_lock:

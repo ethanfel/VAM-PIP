@@ -2903,6 +2903,10 @@ process.stdout.write(JSON.stringify({{
         self.assertIn("standalone SAM 3D Body environment", self.html)
         self.assertIn("ComfyUI is not used or modified", self.html)
         self.assertIn("VR Video &amp; Funscript camera", self.html)
+        self.assertIn(
+            'worker.model || status?.model || "SAM 3D Body"',
+            self.javascript,
+        )
 
     def test_sam3d_api_contract_is_centralized_and_revision_checked(self) -> None:
         start = self.javascript.index("const Sam3dClient")
