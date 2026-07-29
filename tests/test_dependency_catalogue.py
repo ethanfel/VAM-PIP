@@ -205,6 +205,92 @@ class DependencyConflictServiceTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temporary.cleanup()
 
+    def test_package_resource_filters_are_bounded_before_catalogue_work(
+        self,
+    ) -> None:
+        invalid_cases = (
+            {"query": "x" * 501},
+            {"query": "line\nbreak"},
+            {"resource_types": ["Scene"] * 65},
+            {"resource_types": ["x" * 201]},
+            {"resource_types": ["Scene\nInjected"]},
+        )
+        for arguments in invalid_cases:
+            with self.subTest(arguments=arguments):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "printable|at most 64",
+                ):
+                    self.service.package_resources(
+                        "Fork.Asset.1",
+                        **arguments,
+                    )
+
+        with self.assertRaisesRegex(TypeError, "list of strings"):
+            self.service.package_resources(
+                "Fork.Asset.1",
+                resource_types=("Scene",),  # type: ignore[arg-type]
+            )
+
+    def test_resource_details_preserves_literal_latest_package_identity(
+        self,
+    ) -> None:
+        member = "Saves/scene/Latest.json"
+        package = self.addons / "Pack.Latest.latest.var"
+        make_var(
+            package,
+            creator="Pack",
+            package="Latest",
+        )
+        with zipfile.ZipFile(package, "a") as archive:
+            archive.writestr(member, "{}")
+        self.service.scan_packages()
+        with connect(self.state) as connection:
+            cursor = connection.execute(
+                """
+                INSERT INTO catalog_resources (
+                    root, source, resource_key, creator, package_name,
+                    versions_json, resource_path, resource_type, atom_type,
+                    favorite, hidden, tags_json, imported_utc
+                ) VALUES (?, 'browserassist', 'latest-packaged-scene',
+                          'Pack', 'Latest', '["latest"]', ?, 'Scene', '',
+                          0, 0, '[]', '2026-01-01T00:00:00+00:00')
+                """,
+                (str(self.service.vam_root), member.replace("/", "\\")),
+            )
+            resource_id = int(cursor.lastrowid)
+            connection.execute(
+                """
+                INSERT INTO catalog_resource_versions(
+                    resource_id, version_text
+                ) VALUES (?, 'latest')
+                """,
+                (resource_id,),
+            )
+
+        details = self.service.resource_details(
+            resource_id,
+            package_version="latest",
+        )
+
+        self.assertEqual(details["roots"], ["Pack.Latest.latest"])
+        self.assertEqual(
+            details["resource"]["package_ref"],
+            "Pack.Latest.latest",
+        )
+        self.assertEqual(details["resource"]["selected_version"], "latest")
+        with self.assertRaisesRegex(ValueError, "integer .* or latest"):
+            self.service.resource_details(
+                resource_id,
+                package_version="current",
+            )
+        with self.assertRaisesRegex(ValueError, "integer from"):
+            self.service.lease_resource(
+                resource_id,
+                package_version="latest",  # type: ignore[arg-type]
+                apply=False,
+            )
+
     def test_details_discovers_real_conflict_and_unresolved_load_is_structured(
         self,
     ) -> None:

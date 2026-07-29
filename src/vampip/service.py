@@ -43,6 +43,8 @@ from vampip.catalog import (
     catalog_facets as load_catalog_facets,
     get_resource_thumbnail,
     import_browserassist,
+    package_resource_summaries,
+    package_resources_for_copy,
     resolve_resource_archive,
     search_resources as find_catalog_resources,
 )
@@ -2848,7 +2850,13 @@ class ManagerService:
         with connect(self.state_dir) as connection:
             return load_catalog_facets(connection, self.vam_root)
 
-    def resource_thumbnail(self, resource_id: int) -> tuple[Path, str] | None:
+    def resource_thumbnail(
+        self,
+        resource_id: int,
+        *,
+        package_version: int | str | None = None,
+    ) -> tuple[Path, str] | None:
+        version_text = self._validate_lookup_package_version(package_version)
         with connect(self.state_dir) as connection:
             package_choices = list_package_choices(
                 connection,
@@ -2860,6 +2868,7 @@ class ManagerService:
                 resource_id,
                 self.state_dir / "thumbnails",
                 addon_root=self.addon_dir,
+                version_text=version_text,
                 package_choices=package_choices,
             )
         if result is None:
@@ -2870,7 +2879,7 @@ class ManagerService:
         self,
         resource_id: int,
         *,
-        package_version: int | None = None,
+        package_version: int | str | None = None,
     ) -> dict[str, object]:
         """Return a lazy, bounded dependency catalogue for one resource."""
 
@@ -2880,7 +2889,7 @@ class ManagerService:
             or resource_id < 1
         ):
             raise ValueError("resource_id must be a positive integer")
-        version_text = self._validate_package_version(package_version)
+        version_text = self._validate_lookup_package_version(package_version)
         with manager_lock(self.state_dir), connect(self.state_dir) as connection:
             rows, _ = self._rows(connection, refresh=False)
             resource = connection.execute(
@@ -3522,6 +3531,36 @@ class ManagerService:
             or package_version > 2_147_483_647
         ):
             raise ValueError("package_version must be an integer from 0 to 2147483647")
+        return str(package_version)
+
+    @staticmethod
+    def _validate_lookup_package_version(
+        package_version: object,
+    ) -> str | None:
+        """Validate a read-only exact package lookup version.
+
+        VaM package identities may use the literal ``latest`` suffix.  Live
+        mutations deliberately continue to use ``_validate_package_version``
+        and therefore remain numeric-only.
+        """
+
+        if package_version is None:
+            return None
+        if (
+            isinstance(package_version, str)
+            and package_version.casefold() == "latest"
+        ):
+            return "latest"
+        if (
+            isinstance(package_version, bool)
+            or not isinstance(package_version, int)
+            or package_version < 0
+            or package_version > 2_147_483_647
+        ):
+            raise ValueError(
+                "package_version must be an integer from 0 to 2147483647 "
+                "or latest"
+            )
         return str(package_version)
 
     @staticmethod
@@ -5375,6 +5414,7 @@ class ManagerService:
             grouped.setdefault(package_id(row).casefold(), []).append(row)
 
         items: list[dict[str, object]] = []
+        selected_rows: dict[str, sqlite3.Row] = {}
         for group in grouped.values():
             identity_key = package_id(group[0]).casefold()
             choice = choices.get(identity_key)
@@ -5385,6 +5425,7 @@ class ManagerService:
                 selected = preferred(group)
                 choice_stale = True
             identity = package_id(selected)
+            selected_rows[identity.casefold()] = selected
             active = bool(selected["enabled"])
             if needle and needle not in identity.casefold():
                 continue
@@ -5438,12 +5479,200 @@ class ManagerService:
                 )
         items.sort(key=lambda item: str(item["id"]).casefold())
         total = len(items)
+        paged = items[offset : offset + limit]
+        package_rows = [
+            selected_rows[str(item["id"]).casefold()]
+            for item in paged
+            if bool(item["valid"])
+        ]
+        with connect(self.state_dir) as connection:
+            resource_summaries = package_resource_summaries(
+                connection,
+                self.vam_root,
+                package_rows,
+            )
+        for item in paged:
+            if not bool(item["valid"]):
+                item.update(
+                    {
+                        "resource_count": 0,
+                        "resource_type_count": 0,
+                        "resource_types": [],
+                        "resource_previews": [],
+                    }
+                )
+                continue
+            item.update(
+                resource_summaries.get(
+                    str(item["id"]).casefold(),
+                    {
+                        "resource_count": 0,
+                        "resource_type_count": 0,
+                        "resource_types": [],
+                        "resource_previews": [],
+                    },
+                )
+            )
         return {
-            "items": items[offset : offset + limit],
+            "items": paged,
             "total": total,
             "limit": limit,
             "offset": offset,
         }
+
+    def package_resources(
+        self,
+        package_identity: str,
+        *,
+        query: str = "",
+        resource_types: list[str] | None = None,
+        state: str = "all",
+        limit: int = 100,
+        offset: int = 0,
+    ) -> dict[str, object]:
+        """Browse catalogue entries verified against one selected package copy."""
+
+        if not isinstance(package_identity, str):
+            raise TypeError("package identity must be a string")
+        if (
+            not package_identity
+            or len(package_identity) > 500
+            or any(
+                ord(character) < 32 or ord(character) == 127
+                for character in package_identity
+            )
+        ):
+            raise ValueError(
+                "package identity must contain 1 to 500 printable characters"
+            )
+        reference = parse_dependency_ref(package_identity)
+        if reference is None:
+            raise ValueError(
+                "package identity must be creator.package.version"
+            )
+        if not isinstance(query, str):
+            raise TypeError("q must be a string")
+        if len(query) > 500 or any(
+            not character.isprintable() for character in query
+        ):
+            raise ValueError(
+                "q must contain at most 500 printable characters"
+            )
+        if resource_types is None:
+            resource_types = []
+        if not isinstance(resource_types, list) or not all(
+            isinstance(value, str) for value in resource_types
+        ):
+            raise TypeError("type filters must be a list of strings")
+        if len(resource_types) > 64:
+            raise ValueError("at most 64 type filters may be supplied")
+        if any(
+            len(value) > 200
+            or any(not character.isprintable() for character in value)
+            for value in resource_types
+        ):
+            raise ValueError(
+                "each type filter must contain at most 200 printable characters"
+            )
+        with manager_lock(self.state_dir), connect(self.state_dir) as connection:
+            copies = list(
+                connection.execute(
+                    """
+                    SELECT * FROM package_files
+                    WHERE root = ? AND valid = 1
+                      AND creator = ? COLLATE NOCASE
+                      AND package_name = ? COLLATE NOCASE
+                      AND version_text = ? COLLATE NOCASE
+                    ORDER BY relative_path COLLATE NOCASE
+                    """,
+                    (
+                        str(self.addon_dir),
+                        reference.creator,
+                        reference.package,
+                        reference.version_text,
+                    ),
+                )
+            )
+            if not copies:
+                raise FileNotFoundError(
+                    f"unknown installed package: {package_identity}"
+                )
+            choices = list_package_choices(connection, str(self.addon_dir))
+            choice = choices.get(reference.full_key)
+            rows, conflicts = self._package_conflict_reports(
+                connection,
+                copies,
+                [reference.full_id],
+                choices=choices,
+            )
+            copies = [
+                row
+                for row in rows
+                if (
+                    row["valid"]
+                    and row["version_text"]
+                    and package_id(row).casefold() == reference.full_key
+                )
+            ]
+            unresolved = [
+                conflict
+                for conflict in conflicts
+                if not bool(conflict.get("resolved"))
+            ]
+            if unresolved:
+                stale = any(
+                    bool(conflict.get("choice_stale"))
+                    for conflict in unresolved
+                )
+                raise PackageConflictError(
+                    (
+                        "saved package-copy choice needs attention: "
+                        if stale
+                        else "same-ID packages contain different data: "
+                    )
+                    + reference.full_id,
+                    unresolved,
+                    code=(
+                        "package_copy_choice_stale"
+                        if stale
+                        else "package_copy_conflict"
+                    ),
+                )
+            try:
+                selected = preferred(copies, choice)
+                choice_stale = False
+            except PackageCopyChoiceError as exc:
+                # Hash hydration above must turn every stale selection into a
+                # structured report instead of browsing an arbitrary fallback.
+                raise PackageConflictError(
+                    "saved package-copy choice needs attention: "
+                    + reference.full_id,
+                    conflicts,
+                    code="package_copy_choice_stale",
+                ) from exc
+            result = package_resources_for_copy(
+                connection,
+                self.vam_root,
+                selected,
+                query=query,
+                resource_types=resource_types,
+                package_state=state,
+                limit=limit,
+                offset=offset,
+            )
+        result["package"] = {
+            "id": package_id(selected),
+            "family": family_id(selected),
+            "creator": selected["creator"],
+            "package": selected["package_name"],
+            "version": selected["version_text"],
+            "active": bool(selected["enabled"]),
+            "relative_path": selected["relative_path"],
+            "copies": len(copies),
+            "copy_choice": _choice_digest(choice),
+            "copy_choice_stale": choice_stale,
+        }
+        return result
 
     def pin(
         self,

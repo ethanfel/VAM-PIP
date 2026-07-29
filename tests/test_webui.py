@@ -1421,7 +1421,7 @@ process.stdout.write(JSON.stringify(output));
             "`/api/resources/${encodeURIComponent(resourceId)}/details${versionQuery}`",
             block,
         )
-        self.assertIn("equipmentPackageVersion(item)", block)
+        self.assertIn("resourceDetailsPackageVersion(item)", block)
         self.assertIn("?package_version=", block)
         self.assertIn("new AbortController()", block)
         self.assertIn("generation !== app.resourceDependencyGeneration", block)
@@ -1446,6 +1446,27 @@ process.stdout.write(JSON.stringify(output));
         self.assertIn("elements.searchInput.value = query", block)
         self.assertIn("app.exactPackageId = query", block)
         self.assertNotIn("load-more", block.lower())
+        details_version_start = self.javascript.index(
+            "function resourceDetailsPackageVersion("
+        )
+        details_version_end = self.javascript.index(
+            "function equipmentItemKey(", details_version_start
+        )
+        details_version = self.javascript[
+            details_version_start:details_version_end
+        ]
+        self.assertIn('return "latest";', details_version)
+        self.assertIn("item?.package_ref", details_version)
+        self.assertIn("/\\.latest$/i.test(packageRef)", details_version)
+
+        equipment_version_start = self.javascript.index(
+            "function equipmentPackageVersion("
+        )
+        equipment_version_end = details_version_start
+        equipment_version = self.javascript[
+            equipment_version_start:equipment_version_end
+        ]
+        self.assertNotIn('"latest"', equipment_version)
         for selector in (
             ".dependency-summary",
             ".dependency-conflict-panel",
@@ -1570,6 +1591,308 @@ process.stdout.write(JSON.stringify(output));
             ".resource-return-button",
             self.styles[mobile_start:],
         )
+
+    def test_packages_surface_their_indexed_resources_and_exact_contents(
+        self,
+    ) -> None:
+        package_start = self.javascript.index(
+            "function normalizePackageResourceTypes("
+        )
+        package_end = self.javascript.index(
+            "function renderAccess()", package_start
+        )
+        package = self.javascript[package_start:package_end]
+        for contract_field in (
+            "item?.resource_count",
+            "item?.resource_type_count",
+            "item?.resource_types",
+            "item?.resource_previews",
+            "item?.representative_resources",
+        ):
+            with self.subTest(contract_field=contract_field):
+                self.assertIn(contract_field, package)
+        self.assertIn("MAX_PACKAGE_RESOURCE_PREVIEWS", package)
+        self.assertIn("MAX_PACKAGE_RESOURCE_TYPES", package)
+        self.assertIn("package-preview-grid", package)
+        self.assertIn("package-resource-count", package)
+        self.assertIn('"Browse contents"', package)
+        self.assertIn("browsePackageContents(item)", package)
+        self.assertIn(
+            "const hasResourcePreview = valid && resourceCount !== 0",
+            package,
+        )
+        self.assertIn(
+            'card.classList.add("has-resource-preview")',
+            package,
+        )
+        self.assertIn("if (hasResourcePreview)", package)
+        self.assertIn("if (!hasResourcePreview)", package)
+        self.assertIn("if (preview) card.append(preview)", package)
+        self.assertIn('"No indexed items"', package)
+        self.assertIn("BrowserAssist-indexed ${plural(", package)
+        self.assertIn("verify the exact contents", package)
+        self.assertIn(
+            "model.thumbnail ||\n"
+            "          (model.id !== null ? resourceThumbnailUrl(model.id) : \"\")",
+            package,
+        )
+
+        load_start = self.javascript.index("async function loadLibrary(")
+        load_end = self.javascript.index(
+            "function renderStatus()", load_start
+        )
+        load = self.javascript[load_start:load_end]
+        self.assertIn(
+            "`/api/packages/${encodeURIComponent(packageContentsId)}/resources`",
+            load,
+        )
+        self.assertIn(
+            'app.view === "resources" ? app.packageContentsId : ""',
+            load,
+        )
+        for query_contract in (
+            'params.set("q", app.query)',
+            'params.append("type", resourceType)',
+            'params.set("state", app.packageState)',
+            'limit: String(PAGE_SIZE)',
+            'offset: String(offset)',
+        ):
+            with self.subTest(query_contract=query_contract):
+                self.assertIn(query_contract, load)
+
+        for selector in (
+            ".package-preview",
+            ".package-preview-grid",
+            ".package-preview-cell",
+            ".package-preview-hint",
+            ".package-browse-button",
+            ".package-resource-count",
+            ".package-card.has-resource-preview",
+        ):
+            with self.subTest(selector=selector):
+                self.assertIn(selector, self.styles)
+        compact_start = self.styles.index(".package-card {")
+        compact_end = self.styles.index(".package-preview {", compact_start)
+        compact = self.styles[compact_start:compact_end]
+        self.assertIn("min-height: 190px", compact)
+        self.assertIn(".package-card.has-resource-preview", compact)
+        self.assertIn("min-height: 312px", compact)
+
+    def test_package_scope_copy_conflicts_have_a_truthful_return_state(
+        self,
+    ) -> None:
+        error_start = self.javascript.index(
+            "function packageScopeCopyConflictCode("
+        )
+        error_end = self.javascript.index(
+            "function renderEmptyLibrary()", error_start
+        )
+        error_state = self.javascript[error_start:error_end]
+        self.assertIn('"package_copy_conflict"', error_state)
+        self.assertIn('"package_copy_choice_stale"', error_state)
+        self.assertIn("numberOr(error?.status, 0) !== 409", error_state)
+        self.assertIn('"Review package copy"', error_state)
+        self.assertIn('"Choose package copy"', error_state)
+        self.assertIn('"Back to package"', error_state)
+        self.assertIn(
+            'elements.emptyAction.dataset.action = "return-package"',
+            error_state,
+        )
+        self.assertIn(
+            'if (app.view === "resources" && app.packageContentsId)',
+            error_state,
+        )
+        self.assertIn('"Could not open package contents"', error_state)
+        self.assertLess(
+            error_state.index("if (packageCopyConflict)"),
+            error_state.index(
+                'if (app.view === "resources" && app.packageContentsId)'
+            ),
+        )
+        self.assertNotIn(
+            '"The local manager did not respond"',
+            error_state[
+                error_state.index("if (packageCopyConflict)") :
+                error_state.index(
+                    'elements.emptyTitle.textContent = "The local manager did not respond"'
+                )
+            ],
+        )
+
+        action_start = self.javascript.index("function handleEmptyAction()")
+        action_end = self.javascript.index(
+            "function setConnection(", action_start
+        )
+        action = self.javascript[action_start:action_end]
+        self.assertIn('action === "return-package"', action)
+        self.assertIn("returnToResourceContext();", action)
+        self.assertIn("exitPackageContentsScope();", action)
+
+    def test_package_contents_navigation_is_a_stacked_return_context(self) -> None:
+        navigation_start = self.javascript.index(
+            "function resourceReturnLocationLabel("
+        )
+        navigation_end = self.javascript.index(
+            "function browseDependencyPackage(", navigation_start
+        )
+        navigation = self.javascript[navigation_start:navigation_end]
+        self.assertIn('context.kind === "package"', navigation)
+        self.assertIn("function capturePackageReturnContext(item)", navigation)
+        self.assertIn("function returnToPackageContext(context)", navigation)
+        self.assertIn("function browsePackageContents(item)", navigation)
+        self.assertGreaterEqual(
+            navigation.count("const parentContext = app.resourceReturnContext"),
+            2,
+        )
+        self.assertGreaterEqual(
+            navigation.count(
+                "app.resourceReturnContext = context.parentContext || null"
+            ),
+            2,
+        )
+        self.assertIn("packageContentsId: app.packageContentsId", navigation)
+        self.assertIn(
+            'setView("resources", { preserveResourceReturn: true })',
+            navigation,
+        )
+        self.assertIn(
+            'setView("packages", {\n'
+            "      deferLibraryLoad: true,\n"
+            "      preserveResourceReturn: true,",
+            navigation,
+        )
+        self.assertIn("packageCard.focus({ preventScroll: true })", navigation)
+        self.assertIn("packageCard.tabIndex = -1", navigation)
+        self.assertIn("function exitPackageContentsScope()", navigation)
+        self.assertIn("function dismissResourceReturnContext()", navigation)
+        self.assertIn('app.packageContentsId = "";', navigation)
+
+        exit_start = navigation.index("function exitPackageContentsScope()")
+        exit_end = navigation.index(
+            "function dismissResourceReturnContext()", exit_start
+        )
+        exit_scope = navigation[exit_start:exit_end]
+        self.assertIn("clearResourceReturnContext();", exit_scope)
+        self.assertIn('app.packageContentsId = "";', exit_scope)
+        self.assertIn("configureStateFilter();", exit_scope)
+        self.assertIn("loadLibrary();", exit_scope)
+
+        clear_start = self.javascript.index("function clearFilters()")
+        clear_end = self.javascript.index(
+            "function updateClearFilters()", clear_start
+        )
+        clear = self.javascript[clear_start:clear_end]
+        self.assertNotIn("packageContentsId", clear)
+        self.assertNotIn("clearResourceReturnContext", clear)
+        self.assertIn('app.query = "";', clear)
+        self.assertIn('app.type = "";', clear)
+        self.assertIn('app.packageState = "all";', clear)
+
+        bind_start = self.javascript.index("function bindEvents()")
+        bind_end = self.javascript.index("function anyModalOpen()", bind_start)
+        bind = self.javascript[bind_start:bind_end]
+        self.assertIn(
+            'tab.dataset.view === "resources" &&\n'
+            '        app.view === "resources" &&\n'
+            "        app.packageContentsId",
+            bind,
+        )
+        self.assertIn("exitPackageContentsScope();", bind)
+
+        card_start = self.javascript.index("function createResourceCard(")
+        card_end = self.javascript.index(
+            "function appendResourceActions(", card_start
+        )
+        card = self.javascript[card_start:card_end]
+        self.assertIn(
+            "model.thumbnail ||\n"
+            "    (model.id !== null ? resourceThumbnailUrl(model.id) : \"\")",
+            card,
+        )
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is not installed")
+    def test_package_resource_summary_normalizer_tolerates_contract_aliases(
+        self,
+    ) -> None:
+        start = self.javascript.index(
+            "function normalizePackageResourceTypes("
+        )
+        end = self.javascript.index(
+            "function createPackageCard(", start
+        )
+        helper = self.javascript[start:end]
+        script = f"""
+"use strict";
+const MAX_PACKAGE_RESOURCE_PREVIEWS = 4;
+function asArray(value) {{ return Array.isArray(value) ? value : []; }}
+function numberOr(value, fallback = 0) {{
+  const number = Number(value);
+  return Number.isFinite(number) ? number : fallback;
+}}
+function safePresentationLabel(value, fallback) {{
+  const text = String(value || "").trim().slice(0, 120);
+  return text || fallback;
+}}
+function normalizeResourceCardModel(entry) {{
+  return {{
+    id: Number.isSafeInteger(entry.id) ? entry.id : null,
+    title: entry.display_name || entry.name || "Contained resource",
+    type: entry.resource_type || "Resource",
+    thumbnail: entry.thumbnail_url || "",
+  }};
+}}
+function resourceThumbnailUrl(id) {{ return `/thumb/${{id}}`; }}
+{helper}
+const item = {{
+  resource_count: 9,
+  resource_types: {{
+    "Preset Appearance": 7,
+    "Preset Clothing": 2,
+  }},
+  representative_resources: [
+    {{ id: 1, display_name: "Alana Red", resource_type: "Preset Appearance" }},
+    {{ id: 2, display_name: "Alana Blue", resource_type: "Preset Appearance" }},
+  ],
+}};
+process.stdout.write(JSON.stringify({{
+  types: normalizePackageResourceTypes({{
+    ...item,
+    resource_types: [
+      {{ value: "Preset Appearance", count: 7 }},
+      {{ value: "Preset Clothing", count: 2 }},
+    ],
+  }}),
+  previews: normalizePackageResourcePreviews(item),
+  count: packageResourceCount(item),
+  typeCount: packageResourceTypeCount({{
+    resource_type_count: 8,
+  }}, 2),
+  missingCount: packageResourceCount({{
+    resource_previews: [{{ id: 3 }}],
+  }}),
+}}));
+"""
+        completed = subprocess.run(
+            ["node", "-"],
+            input=script,
+            text=True,
+            capture_output=True,
+            check=True,
+            timeout=10,
+        )
+        result = json.loads(completed.stdout)
+        self.assertEqual(
+            result["types"],
+            [
+                {"type": "Preset Appearance", "count": 7},
+                {"type": "Preset Clothing", "count": 2},
+            ],
+        )
+        self.assertEqual(len(result["previews"]), 2)
+        self.assertEqual(result["previews"][0]["thumbnail"], "/thumb/1")
+        self.assertEqual(result["count"], 9)
+        self.assertEqual(result["typeCount"], 8)
+        self.assertIsNone(result["missingCount"])
 
     @unittest.skipUnless(shutil.which("node"), "Node.js is not installed")
     def test_dependency_package_navigation_filters_to_the_exact_identity(
@@ -2549,8 +2872,8 @@ process.stdout.write(JSON.stringify({{
         self.assertIn("body.timeline-popout .timeline-transport", self.styles)
 
     def test_static_assets_use_the_current_cache_version(self) -> None:
-        self.assertIn("/styles.css?v=0.12.2", self.html)
-        self.assertIn("/app.js?v=0.12.2", self.html)
+        self.assertIn("/styles.css?v=0.13.0", self.html)
+        self.assertIn("/app.js?v=0.13.0", self.html)
 
 
 if __name__ == "__main__":

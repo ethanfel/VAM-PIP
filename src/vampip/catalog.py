@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections import Counter
+from collections import Counter, OrderedDict
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
@@ -10,6 +10,7 @@ from pathlib import Path, PurePosixPath
 import re
 import sqlite3
 import tempfile
+import threading
 from typing import Any, Iterable, Mapping
 import uuid
 import zipfile
@@ -22,7 +23,10 @@ _SUPPORTED_STORE_FORMAT = 3
 _MAX_MANIFEST_BYTES = 64 * 1024 * 1024
 DEFAULT_MAX_THUMBNAIL_BYTES = 16 * 1024 * 1024
 MAX_RELATED_RESOURCE_VARIANTS = 12
+MAX_PACKAGE_RESOURCE_PREVIEWS = 4
+MAX_PACKAGE_RESOURCE_TYPES = 12
 _MAX_RELATED_QUERY_KEYS = 200
+_MAX_ARCHIVE_MEMBER_INDEX_CACHE_ENTRIES = 32
 _GENERIC_VARIANT_RESOURCE_TYPES = frozenset(
     {
         "clothing item presets",
@@ -104,6 +108,7 @@ class ResourceLocation:
     archive_path: Path | None
     archive_member: str | None
     local_path: Path | None
+    archive_identity: tuple[int, int, int, int, int] | None = None
 
     @property
     def packaged(self) -> bool:
@@ -930,6 +935,417 @@ def _catalog_version_identities(value: object) -> frozenset[str]:
     return frozenset(identities)
 
 
+def _resource_matches_package_version(
+    row: sqlite3.Row,
+    version_text: str,
+) -> bool:
+    """Mirror resolver version adoption without resolving another package copy."""
+
+    allowed = _catalog_version_identities(row["versions_json"])
+    wanted = version_text.strip().casefold()
+    if not wanted or not allowed:
+        return False
+    if wanted in allowed:
+        return True
+    if not wanted.isdecimal():
+        return False
+    numeric_allowed = [int(value) for value in allowed if value.isdecimal()]
+    return bool(numeric_allowed) and int(wanted) > max(numeric_allowed)
+
+
+def _package_preview_sort_key(row: sqlite3.Row) -> tuple[object, ...]:
+    """Prefer visual/loadable catalogue entries while remaining deterministic."""
+
+    resource_type = str(row["resource_type"]).casefold()
+    if resource_type == "preset appearance":
+        type_rank = 0
+    elif resource_type in {"scene", "subscene"}:
+        type_rank = 1
+    elif resource_type in {
+        "clothing (female)",
+        "clothing (male)",
+        "hair (female)",
+        "hair (male)",
+        "preset clothing",
+        "preset hair",
+    }:
+        type_rank = 2
+    elif resource_type.startswith("preset "):
+        type_rank = 3
+    else:
+        type_rank = 4
+    return (
+        0 if row["favorite"] else 1,
+        type_rank,
+        str(row["resource_type"]).casefold(),
+        str(row["resource_path"]).casefold(),
+        int(row["id"]),
+    )
+
+
+def package_resource_summaries(
+    connection: sqlite3.Connection,
+    vam_root: Path | str,
+    package_rows: Iterable[sqlite3.Row],
+    *,
+    preview_limit: int = MAX_PACKAGE_RESOURCE_PREVIEWS,
+    type_limit: int = MAX_PACKAGE_RESOURCE_TYPES,
+    source: str = BROWSERASSIST_SOURCE,
+) -> dict[str, dict[str, object]]:
+    """Return bounded catalogue summaries for exact, already-selected packages.
+
+    Families are fetched in indexed batches and version eligibility is evaluated
+    with the same exact/newer-version rule as live resource resolution.  This
+    deliberately does not open every archive just to render a package page;
+    :func:`package_resources_for_copy` performs physical-copy verification when
+    a package is opened.
+    """
+
+    preview_limit = max(0, min(int(preview_limit), MAX_PACKAGE_RESOURCE_PREVIEWS))
+    type_limit = max(0, min(int(type_limit), MAX_PACKAGE_RESOURCE_TYPES))
+    selected: dict[str, sqlite3.Row] = {}
+    for row in package_rows:
+        if not row["valid"] or row["version_text"] is None:
+            continue
+        selected.setdefault(package_id(row).casefold(), row)
+    summaries: dict[str, dict[str, object]] = {
+        identity: {
+            "resource_count": 0,
+            "resource_type_count": 0,
+            "resource_types": [],
+            "resource_previews": [],
+        }
+        for identity in selected
+    }
+    if not selected:
+        return summaries
+
+    grouped: dict[str, list[sqlite3.Row]] = {identity: [] for identity in selected}
+    wanted = [
+        (
+            identity,
+            str(row["creator"]),
+            str(row["package_name"]),
+        )
+        for identity, row in selected.items()
+    ]
+    root_text = _root_text(vam_root)
+    for start in range(0, len(wanted), _MAX_RELATED_QUERY_KEYS):
+        batch = wanted[start : start + _MAX_RELATED_QUERY_KEYS]
+        values_sql = ", ".join("(?, ?, ?)" for _ in batch)
+        parameters: list[object] = []
+        for identity, creator, package_name in batch:
+            parameters.extend((identity, creator, package_name))
+        parameters.extend((root_text, source))
+        rows = connection.execute(
+            f"""
+            WITH wanted(package_id, creator, package_name) AS (
+                VALUES {values_sql}
+            )
+            SELECT wanted.package_id AS wanted_package_id, resource.*
+            FROM wanted
+            CROSS JOIN catalog_resources AS resource
+                INDEXED BY idx_catalog_root_source_family_nocase
+            WHERE resource.root = ?
+              AND resource.source = ?
+              AND resource.creator = wanted.creator COLLATE NOCASE
+              AND resource.package_name =
+                  wanted.package_name COLLATE NOCASE
+            """,
+            parameters,
+        )
+        for resource in rows:
+            identity = str(resource["wanted_package_id"])
+            package_row = selected.get(identity)
+            if package_row is None or not _resource_matches_package_version(
+                resource,
+                str(package_row["version_text"]),
+            ):
+                continue
+            grouped[identity].append(resource)
+
+    for identity, resources_for_package in grouped.items():
+        type_counts: Counter[str] = Counter()
+        type_labels: dict[str, str] = {}
+        for row in resources_for_package:
+            label = str(row["resource_type"])
+            key = label.casefold()
+            type_counts[key] += 1
+            previous = type_labels.get(key)
+            if previous is None or (label.casefold(), label) < (
+                previous.casefold(),
+                previous,
+            ):
+                type_labels[key] = label
+        types = Counter(
+            {
+                type_labels[key]: count
+                for key, count in type_counts.items()
+            }
+        )
+        previews: list[dict[str, object]] = []
+        package_row = selected[identity]
+        exact_id = package_id(package_row)
+        for row in sorted(resources_for_package, key=_package_preview_sort_key)[
+            :preview_limit
+        ]:
+            document = _resource_document(row)
+            previews.append(
+                {
+                    key: document[key]
+                    for key in (
+                        "id",
+                        "display_name",
+                        "resource_type",
+                        "atom_type",
+                        "path",
+                        "favorite",
+                    )
+                }
+                | {
+                    "package_ref": exact_id,
+                    "selected_version": str(package_row["version_text"]),
+                }
+            )
+        summaries[identity] = {
+            "resource_count": len(resources_for_package),
+            "resource_type_count": len(type_counts),
+            "resource_types": _facet_rows(types)[:type_limit],
+            "resource_previews": previews,
+        }
+    return summaries
+
+
+def package_resources_for_copy(
+    connection: sqlite3.Connection,
+    vam_root: Path | str,
+    package_row: sqlite3.Row,
+    *,
+    query: str = "",
+    resource_types: Iterable[str] | None = None,
+    package_state: str = "all",
+    limit: int = 100,
+    offset: int = 0,
+    source: str = BROWSERASSIST_SOURCE,
+) -> dict[str, object]:
+    """Browse catalogue resources against one exact physical package copy."""
+
+    if package_state not in {"all", "active", "hidden", "missing"}:
+        raise ValueError(
+            "package resource state must be all, active, hidden, or missing"
+        )
+    if not package_row["valid"] or package_row["version_text"] is None:
+        raise ValueError("package copy must have a valid exact identity")
+    limit = max(1, min(int(limit), 500))
+    offset = max(0, int(offset))
+    selected_types = sorted(
+        {
+            value.strip()
+            for value in (resource_types or ())
+            if isinstance(value, str) and value.strip()
+        },
+        key=str.casefold,
+    )
+    where = [
+        "root = ?",
+        "source = ?",
+        "creator = ? COLLATE NOCASE",
+        "package_name = ? COLLATE NOCASE",
+    ]
+    parameters: list[object] = [
+        _root_text(vam_root),
+        source,
+        str(package_row["creator"]),
+        str(package_row["package_name"]),
+    ]
+    if selected_types:
+        where.append(
+            "("
+            + " OR ".join(
+                "resource_type = ? COLLATE NOCASE" for _ in selected_types
+            )
+            + ")"
+        )
+        parameters.extend(selected_types)
+    if query.strip():
+        pattern = f"%{_escape_like(query.strip())}%"
+        fields = (
+            "creator",
+            "package_name",
+            "resource_path",
+            "resource_type",
+            "atom_type",
+        )
+        json_fields = ("tags_json", "clothing_versions_json")
+        where.append(
+            "("
+            + " OR ".join(
+                f"{field} COLLATE NOCASE LIKE ? ESCAPE '\\'"
+                for field in fields
+            )
+            + " OR "
+            + " OR ".join(_json_scalar_search(field) for field in json_fields)
+            + ")"
+        )
+        parameters.extend(pattern for _ in (*fields, *json_fields))
+
+    candidates = [
+        row
+        for row in connection.execute(
+            f"""
+            SELECT * FROM catalog_resources
+            WHERE {" AND ".join(where)}
+            ORDER BY favorite DESC,
+                     resource_type COLLATE NOCASE,
+                     resource_path COLLATE NOCASE,
+                     id
+            """,
+            parameters,
+        )
+        if _resource_matches_package_version(
+            row,
+            str(package_row["version_text"]),
+        )
+    ]
+
+    archive_path = Path(package_row["path"])
+    scanned_identity = _package_row_archive_identity(package_row)
+    if scanned_identity is None:
+        raise ValueError(
+            "selected package archive no longer matches the scanned "
+            f"inventory; rescan required: {archive_path}"
+        )
+    archive_index = _ARCHIVE_MEMBER_INDEX_CACHE.get(archive_path)
+    if archive_index is None:
+        raise ValueError(
+            "selected package archive is unreadable or changed while "
+            f"being indexed; rescan required: {archive_path}"
+        )
+    if archive_index.identity != scanned_identity:
+        raise ValueError(
+            "selected package archive changed after its inventory identity "
+            f"was checked; rescan required: {archive_path}"
+        )
+    exact, folded = archive_index.indexes
+    active = bool(package_row["enabled"])
+    exact_id = package_id(package_row)
+    matched: list[tuple[sqlite3.Row, bool]] = []
+    present_ids = {
+        int(row["id"])
+        for row in connection.execute(
+            """
+            SELECT id, versions_json, resource_path
+            FROM catalog_resources
+                INDEXED BY idx_catalog_root_source_family_nocase
+            WHERE root = ? AND source = ?
+              AND creator = ? COLLATE NOCASE
+              AND package_name = ? COLLATE NOCASE
+            """,
+            (
+                _root_text(vam_root),
+                source,
+                str(package_row["creator"]),
+                str(package_row["package_name"]),
+            ),
+        )
+        if _resource_matches_package_version(
+            row,
+            str(package_row["version_text"]),
+        )
+        and _find_member(
+            exact,
+            folded,
+            (str(row["resource_path"]),),
+        )
+        is not None
+    }
+    for row in candidates:
+        present = int(row["id"]) in present_ids
+        state = "active" if present and active else "hidden" if present else "missing"
+        # "all" is the exact physical contents catalogue.  Missing rows are
+        # available only through the explicit diagnostic state so a resource
+        # declared for another same-ID fork never leaks into normal browsing.
+        if package_state == "all" and not present:
+            continue
+        if package_state != "all" and state != package_state:
+            continue
+        matched.append((row, present))
+
+    total = len(matched)
+    items: list[dict[str, object]] = []
+    page = matched[offset : offset + limit]
+    for row, present in page:
+        document = _resource_document(row)
+        state = "active" if present and active else "hidden" if present else "missing"
+        document.update(
+            {
+                "package_ref": exact_id,
+                "selected_version": str(package_row["version_text"]),
+                "enabled": bool(present and active),
+                "missing": not present,
+                "missing_reason": None if present else "resource",
+                "local": False,
+                "state": state,
+                "active": bool(present and active),
+            }
+        )
+        clothing = _select_clothing_metadata(document)
+        if clothing is not None:
+            document["clothing"] = clothing
+        document.pop("clothing_versions", None)
+        items.append(document)
+    if page:
+        _attach_resource_variants(
+            connection,
+            [row for row, _ in page],
+            items,
+            resolver=None,
+            include_package_state=False,
+            allowed_resource_ids=present_ids,
+        )
+        for item in items:
+            variants = item.get("variants")
+            if not isinstance(variants, list):
+                continue
+            exact_variants: list[dict[str, object]] = []
+            for variant in variants:
+                if not isinstance(variant, dict):
+                    continue
+                variant_id = variant.get("id")
+                if (
+                    isinstance(variant_id, bool)
+                    or not isinstance(variant_id, int)
+                    or variant_id not in present_ids
+                ):
+                    continue
+                variant.update(
+                    {
+                        "package_ref": exact_id,
+                        "selected_version": str(package_row["version_text"]),
+                        "enabled": active,
+                        "missing": False,
+                        "missing_reason": None,
+                        "local": False,
+                        "state": "active" if active else "hidden",
+                        "active": active,
+                    }
+                )
+                exact_variants.append(variant)
+            item["variants"] = exact_variants
+            item["variant_count"] = len(exact_variants)
+    if _archive_identity_at(archive_index.path) != archive_index.identity:
+        raise ValueError(
+            "selected package archive changed while its resources were "
+            f"being read; rescan required: {archive_path}"
+        )
+    return {
+        "items": items,
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+    }
+
+
 def _attach_resource_variants(
     connection: sqlite3.Connection,
     rows: list[sqlite3.Row],
@@ -937,6 +1353,7 @@ def _attach_resource_variants(
     *,
     resolver: _ResourceResolver | None,
     include_package_state: bool,
+    allowed_resource_ids: set[int] | None = None,
 ) -> None:
     """Attach bounded, presentational resource relationships.
 
@@ -1145,6 +1562,12 @@ def _attach_resource_variants(
 
     for _, owner_row, item in returned_owners.values():
         variants = list(related.get(id(item), {}).values())
+        if allowed_resource_ids is not None:
+            variants = [
+                variant
+                for variant in variants
+                if int(variant["id"]) in allowed_resource_ids
+            ]
         if not variants:
             continue
         variants.sort(
@@ -1574,12 +1997,77 @@ def _normalized_member(name: str) -> str:
     return normalized
 
 
+_ArchiveStatIdentity = tuple[int, int, int, int, int]
+_ArchiveMemberIndexes = tuple[
+    dict[str, list[zipfile.ZipInfo]],
+    dict[str, list[zipfile.ZipInfo]],
+]
+
+
+@dataclass(frozen=True)
+class _ArchiveMemberIndex:
+    path: Path
+    identity: _ArchiveStatIdentity
+    indexes: _ArchiveMemberIndexes
+
+
+def _archive_stat_identity(stat: os.stat_result) -> _ArchiveStatIdentity:
+    return (
+        int(stat.st_dev),
+        int(stat.st_ino),
+        int(stat.st_size),
+        int(stat.st_mtime_ns),
+        int(stat.st_ctime_ns),
+    )
+
+
+def _absolute_archive_path(path: Path | str) -> Path:
+    # Do not resolve symlinks: re-pointing the selected logical path must
+    # invalidate the cache just like replacing the target file in place.
+    return Path(os.path.abspath(Path(path).expanduser()))
+
+
+def _archive_identity_at(path: Path) -> _ArchiveStatIdentity | None:
+    try:
+        return _archive_stat_identity(path.stat())
+    except OSError:
+        return None
+
+
+def _package_row_archive_identity(
+    package_row: sqlite3.Row,
+) -> _ArchiveStatIdentity | None:
+    path = _absolute_archive_path(str(package_row["path"]))
+    actual = _archive_identity_at(path)
+    try:
+        expected = (
+            int(package_row["device"]),
+            int(package_row["inode"]),
+            int(package_row["size"]),
+            int(package_row["mtime_ns"]),
+        )
+    except (IndexError, KeyError, TypeError, ValueError):
+        return None
+    if actual is None or actual[:4] != expected:
+        return None
+    return actual
+
+
+def _opened_archive_identity(
+    archive: zipfile.ZipFile,
+) -> _ArchiveStatIdentity | None:
+    handle = archive.fp
+    if handle is None:
+        return None
+    try:
+        return _archive_stat_identity(os.fstat(handle.fileno()))
+    except (AttributeError, OSError):
+        return None
+
+
 def _member_indexes(
     archive: zipfile.ZipFile,
-) -> tuple[
-    dict[str, list[zipfile.ZipInfo]],
-    dict[str, list[zipfile.ZipInfo]],
-]:
+) -> _ArchiveMemberIndexes:
     exact: dict[str, list[zipfile.ZipInfo]] = {}
     folded: dict[str, list[zipfile.ZipInfo]] = {}
     for info in archive.infolist():
@@ -1592,6 +2080,86 @@ def _member_indexes(
         exact.setdefault(normalized, []).append(info)
         folded.setdefault(normalized.casefold(), []).append(info)
     return exact, folded
+
+
+class _ArchiveMemberIndexCache:
+    """Bounded shared member index keyed by one stable archive stat identity."""
+
+    def __init__(
+        self,
+        max_entries: int = _MAX_ARCHIVE_MEMBER_INDEX_CACHE_ENTRIES,
+    ) -> None:
+        if max_entries < 1:
+            raise ValueError("archive member-index cache size must be positive")
+        self.max_entries = int(max_entries)
+        self._entries: OrderedDict[
+            tuple[str, _ArchiveStatIdentity],
+            _ArchiveMemberIndex,
+        ] = OrderedDict()
+        self._lock = threading.Lock()
+
+    def clear(self) -> None:
+        with self._lock:
+            self._entries.clear()
+
+    def _discard_path_locked(
+        self,
+        path_text: str,
+        *,
+        keep: tuple[str, _ArchiveStatIdentity] | None = None,
+    ) -> None:
+        for key in tuple(self._entries):
+            if key[0] == path_text and key != keep:
+                del self._entries[key]
+
+    def get(self, archive_path: Path | str) -> _ArchiveMemberIndex | None:
+        path = _absolute_archive_path(archive_path)
+        identity = _archive_identity_at(path)
+        if identity is None:
+            return None
+        path_text = str(path)
+        key = (path_text, identity)
+        with self._lock:
+            # The path may have changed while this thread waited for another
+            # archive to be indexed. Never return metadata for that old file.
+            if _archive_identity_at(path) != identity:
+                self._discard_path_locked(path_text)
+                return None
+            self._discard_path_locked(path_text, keep=key)
+            cached = self._entries.get(key)
+            if cached is not None:
+                self._entries.move_to_end(key)
+                return cached
+            try:
+                with zipfile.ZipFile(path) as archive:
+                    if _opened_archive_identity(archive) != identity:
+                        return None
+                    indexes = _member_indexes(archive)
+                    if _opened_archive_identity(archive) != identity:
+                        return None
+            except (
+                OSError,
+                RuntimeError,
+                NotImplementedError,
+                zipfile.BadZipFile,
+                zipfile.LargeZipFile,
+            ):
+                return None
+            if _archive_identity_at(path) != identity:
+                return None
+            indexed = _ArchiveMemberIndex(
+                path=path,
+                identity=identity,
+                indexes=indexes,
+            )
+            self._entries[key] = indexed
+            self._entries.move_to_end(key)
+            while len(self._entries) > self.max_entries:
+                self._entries.popitem(last=False)
+            return indexed
+
+
+_ARCHIVE_MEMBER_INDEX_CACHE = _ArchiveMemberIndexCache()
 
 
 def _find_member(
@@ -1668,14 +2236,6 @@ class _ResourceResolver:
             else (vam_root / "AddonPackages").resolve()
         )
         self.packages: dict[tuple[str, str], list[sqlite3.Row]] = {}
-        self.archive_indexes: dict[
-            Path,
-            tuple[
-                dict[str, list[zipfile.ZipInfo]],
-                dict[str, list[zipfile.ZipInfo]],
-            ]
-            | None,
-        ] = {}
 
     def _family_packages(
         self,
@@ -1745,27 +2305,16 @@ class _ResourceResolver:
         return sorted(selected, key=_copy_sort_key)
 
     def _archive_index(
-        self, archive_path: Path
-    ) -> (
-        tuple[
-            dict[str, list[zipfile.ZipInfo]],
-            dict[str, list[zipfile.ZipInfo]],
-        ]
-        | None
-    ):
-        if archive_path not in self.archive_indexes:
-            try:
-                with zipfile.ZipFile(archive_path) as archive:
-                    self.archive_indexes[archive_path] = _member_indexes(archive)
-            except (
-                OSError,
-                RuntimeError,
-                NotImplementedError,
-                zipfile.BadZipFile,
-                zipfile.LargeZipFile,
-            ):
-                self.archive_indexes[archive_path] = None
-        return self.archive_indexes[archive_path]
+        self,
+        package_row: sqlite3.Row,
+    ) -> _ArchiveMemberIndex | None:
+        scanned_identity = _package_row_archive_identity(package_row)
+        if scanned_identity is None:
+            return None
+        indexed = _ARCHIVE_MEMBER_INDEX_CACHE.get(Path(package_row["path"]))
+        if indexed is None or indexed.identity != scanned_identity:
+            return None
+        return indexed
 
     def resolve_row(
         self,
@@ -1808,10 +2357,10 @@ class _ResourceResolver:
             ):
                 continue
             archive_path = Path(package_row["path"])
-            indexes = self._archive_index(archive_path)
-            if indexes is None:
+            archive_index = self._archive_index(package_row)
+            if archive_index is None:
                 continue
-            exact, folded = indexes
+            exact, folded = archive_index.indexes
             member = _find_member(exact, folded, (wanted,))
             if member is None:
                 continue
@@ -1830,6 +2379,7 @@ class _ResourceResolver:
                 archive_path=archive_path,
                 archive_member=member.filename,
                 local_path=None,
+                archive_identity=archive_index.identity,
             )
         return None
 
@@ -2069,6 +2619,7 @@ def get_resource_thumbnail(
     cache_dir: Path | str,
     *,
     addon_root: Path | str | None = None,
+    version_text: str | None = None,
     package_choices: Mapping[str, object] | None = None,
     max_bytes: int = DEFAULT_MAX_THUMBNAIL_BYTES,
 ) -> ThumbnailResult | None:
@@ -2082,6 +2633,7 @@ def get_resource_thumbnail(
         vam_root,
         resource_id,
         addon_root=addon_root,
+        version_text=version_text,
         package_choices=package_choices,
     )
     if location is None:
@@ -2140,53 +2692,86 @@ def get_resource_thumbnail(
     else:
         assert location.archive_path is not None
         assert location.archive_member is not None
+        archive_index = _ARCHIVE_MEMBER_INDEX_CACHE.get(location.archive_path)
+        if (
+            archive_index is None
+            or location.archive_identity is None
+            or archive_index.identity != location.archive_identity
+        ):
+            return None
+        exact, folded = archive_index.indexes
+        resource_info = _find_member(
+            exact,
+            folded,
+            (location.archive_member,),
+        )
+        if resource_info is None:
+            return None
+        info = _find_member(
+            exact,
+            folded,
+            _sibling_jpg_names(resource_info.filename),
+        )
+        if info is None or info.file_size > max_bytes:
+            return None
+        identity = json.dumps(
+            [
+                "archive",
+                *archive_index.identity,
+                _normalized_member(info.filename),
+                info.CRC,
+                info.file_size,
+                info.compress_size,
+            ],
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        cached, cache_path, etag = _cached_thumbnail(
+            cache_root,
+            identity,
+            expected_size=info.file_size,
+            max_bytes=max_bytes,
+            version_text=location.version_text,
+        )
+        if cached is not None:
+            if (
+                _archive_identity_at(archive_index.path)
+                != archive_index.identity
+            ):
+                return None
+            return cached
         try:
-            archive_stat = location.archive_path.stat()
-            with zipfile.ZipFile(location.archive_path) as archive:
-                exact, folded = _member_indexes(archive)
-                info = _find_member(
-                    exact,
-                    folded,
-                    _sibling_jpg_names(location.archive_member),
-                )
-                if info is None or info.file_size > max_bytes:
+            with zipfile.ZipFile(archive_index.path) as archive:
+                if (
+                    _opened_archive_identity(archive)
+                    != archive_index.identity
+                ):
                     return None
-                identity = json.dumps(
-                    [
-                        "archive",
-                        archive_stat.st_dev,
-                        archive_stat.st_ino,
-                        archive_stat.st_size,
-                        archive_stat.st_mtime_ns,
-                        _normalized_member(info.filename),
-                        info.CRC,
-                        info.file_size,
-                        info.compress_size,
-                    ],
-                    ensure_ascii=False,
-                    separators=(",", ":"),
-                ).encode("utf-8")
-                cached, cache_path, etag = _cached_thumbnail(
-                    cache_root,
-                    identity,
-                    expected_size=info.file_size,
-                    max_bytes=max_bytes,
-                    version_text=location.version_text,
-                )
-                if cached is not None:
-                    return cached
                 with archive.open(info) as handle:
                     data = handle.read(max_bytes + 1)
+                if (
+                    _opened_archive_identity(archive)
+                    != archive_index.identity
+                ):
+                    return None
         except (
             OSError,
             RuntimeError,
+            NotImplementedError,
             zipfile.BadZipFile,
             zipfile.LargeZipFile,
         ):
             return None
+        if _archive_identity_at(archive_index.path) != archive_index.identity:
+            return None
         if len(data) > max_bytes or len(data) != info.file_size:
             return None
     _write_cache(cache_path, data)
+    if (
+        location.archive_path is not None
+        and _archive_identity_at(archive_index.path) != archive_index.identity
+    ):
+        return None
     return _cache_result(
         cache_path,
         etag=etag,

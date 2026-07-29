@@ -23,7 +23,7 @@ leaving managed mode restores that baseline.
 
 ## Current status
 
-Version 0.12.2 is functional but should still be treated as an early release.
+Version 0.13.0 is functional but should still be treated as an early release.
 Package switching is deliberately conservative:
 
 - entering managed mode requires explicit confirmation;
@@ -73,6 +73,12 @@ local data, then run:
 
 If no supported BrowserAssist data is available, the import command reports
 that explicitly and leaves the package inventory usable.
+
+Package cards use BrowserAssist's indexed resource associations for their
+preview collage, count, and type summary. Opening **Browse contents** then
+checks those entries against the selected physical `.var`, so stale catalogue
+rows and resources belonging only to another same-ID copy are not presented as
+installed contents.
 
 Alternatively, install both command-line entry points:
 

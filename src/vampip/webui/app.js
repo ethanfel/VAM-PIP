@@ -3,6 +3,8 @@
 const PAGE_SIZE = 24;
 const MAX_VARIANT_MATCH_COUNT = 1_000_000;
 const MAX_RENDERED_RESOURCE_VARIANTS = 12;
+const MAX_PACKAGE_RESOURCE_PREVIEWS = 4;
+const MAX_PACKAGE_RESOURCE_TYPES = 3;
 const DEPENDENCY_PAGE_SIZE = 8;
 const MAX_RENDERED_DEPENDENCIES = 2_048;
 const MAX_TIMELINE_TRACKS = 80;
@@ -670,6 +672,7 @@ const app = {
   type: "",
   packageState: "all",
   exactPackageId: "",
+  packageContentsId: "",
   loading: false,
   requestController: null,
   searchTimer: null,
@@ -1081,7 +1084,7 @@ function bindEvents() {
   );
   elements.resourceReturnDismiss.addEventListener(
     "click",
-    clearResourceReturnContext,
+    dismissResourceReturnContext,
   );
   elements.timelineInstance.addEventListener(
     "change",
@@ -1267,7 +1270,17 @@ function bindEvents() {
   });
 
   for (const tab of elements.viewTabs) {
-    tab.addEventListener("click", () => setView(tab.dataset.view));
+    tab.addEventListener("click", () => {
+      if (
+        tab.dataset.view === "resources" &&
+        app.view === "resources" &&
+        app.packageContentsId
+      ) {
+        exitPackageContentsScope();
+        return;
+      }
+      setView(tab.dataset.view);
+    });
   }
 
   elements.mobileToolsButton.addEventListener("click", () => {
@@ -3848,6 +3861,7 @@ function dependencyStateLabel(state) {
 }
 
 function resourceReturnLocationLabel(context) {
+  if (context.kind === "package") return "Packages";
   if (context.view === "workspace") {
     return context.workspaceCategoryLabel || "Workspace";
   }
@@ -3908,6 +3922,29 @@ function clearResourceReturnContext() {
   }
 }
 
+function exitPackageContentsScope() {
+  if (app.view !== "resources" || !app.packageContentsId) return false;
+  clearResourceReturnContext();
+  window.clearTimeout(app.searchTimer);
+  app.packageContentsId = "";
+  app.query = "";
+  app.type = "";
+  app.packageState = "all";
+  elements.searchInput.value = "";
+  elements.typeFilter.value = "";
+  elements.stateFilter.value = "all";
+  configureStateFilter();
+  updateWorkspaceSearchPlaceholder();
+  updateClearFilters();
+  loadLibrary();
+  return true;
+}
+
+function dismissResourceReturnContext() {
+  if (exitPackageContentsScope()) return;
+  clearResourceReturnContext();
+}
+
 function captureResourceReturnContext() {
   const item = app.resourceDetailItem;
   const resourceId = normalizedResourceId(
@@ -3922,9 +3959,12 @@ function captureResourceReturnContext() {
   const model = normalizeResourceCardModel(item, { assumeHidden: true });
   const category =
     app.view === "workspace" ? currentWorkspaceCategory() : null;
+  const parentContext = app.resourceReturnContext;
   app.resourceReturnGeneration += 1;
   app.resourceReturnInFlight = false;
   app.resourceReturnContext = {
+    kind: "resource",
+    parentContext,
     resourceId,
     title: model.title,
     view: app.view,
@@ -3932,6 +3972,7 @@ function captureResourceReturnContext() {
     type: app.type,
     packageState: app.packageState,
     exactPackageId: app.exactPackageId,
+    packageContentsId: app.packageContentsId,
     page: libraryPaginationState(app.total, app.page).page,
     selectedWorkspaceCategoryId: app.selectedWorkspaceCategoryId,
     workspaceCategoryLabel: category?.label || "",
@@ -3952,6 +3993,7 @@ function resourceReturnStateMatches(context) {
     app.type === context.type &&
     app.packageState === context.packageState &&
     app.exactPackageId === context.exactPackageId &&
+    app.packageContentsId === (context.packageContentsId || "") &&
     elements.searchInput.value.trim() === context.query &&
     (context.view !== "workspace" ||
       app.selectedWorkspaceCategoryId ===
@@ -3962,6 +4004,10 @@ function resourceReturnStateMatches(context) {
 async function returnToResourceContext() {
   const context = app.resourceReturnContext;
   if (!context || app.resourceReturnInFlight) return;
+  if (context.kind === "package") {
+    await returnToPackageContext(context);
+    return;
+  }
   const generation = ++app.resourceReturnGeneration;
   app.resourceReturnInFlight = true;
   setButtonBusy(elements.resourceReturnButton, true, "Restoring resource…");
@@ -3973,6 +4019,7 @@ async function returnToResourceContext() {
     app.type = context.type;
     app.packageState = context.packageState;
     app.exactPackageId = context.exactPackageId;
+    app.packageContentsId = context.packageContentsId || "";
     setView(context.view, {
       deferLibraryLoad: true,
       preserveResourceReturn: true,
@@ -4017,7 +4064,7 @@ async function returnToResourceContext() {
       scrollTop: context.detailScrollTop,
     };
     openResourceDetailDialog(freshItem, freshOpener);
-    app.resourceReturnContext = null;
+    app.resourceReturnContext = context.parentContext || null;
     renderResourceReturnContext();
   } finally {
     if (generation === app.resourceReturnGeneration) {
@@ -4025,6 +4072,121 @@ async function returnToResourceContext() {
       setButtonBusy(elements.resourceReturnButton, false);
     }
   }
+}
+
+function capturePackageReturnContext(item) {
+  if (app.view !== "packages") return false;
+  const packageId = packageItemIdentity(item);
+  if (!packageId) return false;
+  const parentContext = app.resourceReturnContext;
+  app.resourceReturnGeneration += 1;
+  app.resourceReturnInFlight = false;
+  app.resourceReturnContext = {
+    kind: "package",
+    parentContext,
+    packageId,
+    title: packageId,
+    view: "packages",
+    query: app.query,
+    type: app.type,
+    packageState: app.packageState,
+    exactPackageId: app.exactPackageId,
+    packageContentsId: "",
+    page: libraryPaginationState(app.total, app.page).page,
+    selectedWorkspaceCategoryId: app.selectedWorkspaceCategoryId,
+    workspaceCategoryLabel: "",
+  };
+  setButtonBusy(elements.resourceReturnButton, false);
+  renderResourceReturnContext();
+  return true;
+}
+
+async function returnToPackageContext(context) {
+  if (
+    !context ||
+    context.kind !== "package" ||
+    app.resourceReturnInFlight
+  ) {
+    return;
+  }
+  const generation = ++app.resourceReturnGeneration;
+  app.resourceReturnInFlight = true;
+  setButtonBusy(elements.resourceReturnButton, true, "Restoring package…");
+
+  try {
+    app.query = context.query;
+    app.type = context.type;
+    app.packageState = context.packageState;
+    app.exactPackageId = context.exactPackageId;
+    app.packageContentsId = "";
+    setView("packages", {
+      deferLibraryLoad: true,
+      preserveResourceReturn: true,
+    });
+    configureStateFilter();
+    updateWorkspaceSearchPlaceholder();
+    elements.searchInput.value = context.query;
+    elements.typeFilter.value = context.type;
+    elements.stateFilter.value = context.packageState;
+    updateClearFilters();
+
+    const restored = await loadLibrary({ page: context.page });
+    if (
+      restored !== true ||
+      generation !== app.resourceReturnGeneration ||
+      app.resourceReturnContext !== context ||
+      !resourceReturnStateMatches(context)
+    ) {
+      return;
+    }
+
+    const packageCard = packageCardOpener(context.packageId);
+    if (!packageCard) {
+      clearResourceReturnContext();
+      toast(
+        "Could not return to package",
+        "The previous package view was restored, but that exact package is no longer on the catalogue page.",
+        "error",
+      );
+      return;
+    }
+    app.resourceReturnContext = context.parentContext || null;
+    renderResourceReturnContext();
+    packageCard.tabIndex = -1;
+    packageCard.focus({ preventScroll: true });
+    packageCard.scrollIntoView({ block: "nearest" });
+  } finally {
+    if (generation === app.resourceReturnGeneration) {
+      app.resourceReturnInFlight = false;
+      setButtonBusy(elements.resourceReturnButton, false);
+    }
+  }
+}
+
+function browsePackageContents(item) {
+  const packageId = packageItemIdentity(item);
+  if (!packageId) {
+    toast(
+      "Package identity unavailable",
+      "This package does not contain a safe exact identity.",
+      "error",
+    );
+    return;
+  }
+  if (!capturePackageReturnContext(item)) return;
+
+  window.clearTimeout(app.searchTimer);
+  app.packageContentsId = packageId;
+  app.exactPackageId = "";
+  app.query = "";
+  app.type = "";
+  app.packageState = "all";
+  elements.searchInput.value = "";
+  elements.typeFilter.value = "";
+  elements.stateFilter.value = "all";
+  setView("resources", { preserveResourceReturn: true });
+  updateWorkspaceSearchPlaceholder();
+  elements.searchInput.focus({ preventScroll: true });
 }
 
 function browseDependencyPackage(packageId) {
@@ -4556,7 +4718,7 @@ async function loadResourceDependencyDetails(
     renderResourceDependencyLoading(section);
   }
   try {
-    const packageVersion = equipmentPackageVersion(item);
+    const packageVersion = resourceDetailsPackageVersion(item);
     const versionQuery =
       packageVersion === null
         ? ""
@@ -4772,9 +4934,8 @@ function openResourceDetailDialog(item, opener) {
   fallback.setAttribute("aria-hidden", "true");
   preview.append(fallback);
   const thumbnail =
-    model.id !== null
-      ? resourceThumbnailUrl(model.id)
-      : model.thumbnail;
+    model.thumbnail ||
+    (model.id !== null ? resourceThumbnailUrl(model.id) : "");
   if (thumbnail) {
     const image = document.createElement("img");
     image.alt = `Preview of ${model.title}`;
@@ -4999,6 +5160,22 @@ function equipmentPackageVersion(item) {
     if (Number.isSafeInteger(parsed) && parsed <= 2_147_483_647) return parsed;
   }
   return null;
+}
+
+function resourceDetailsPackageVersion(item) {
+  const numericVersion = equipmentPackageVersion(item);
+  if (numericVersion !== null) return numericVersion;
+  const value = item?.package_version ?? item?.selected_version;
+  if (
+    typeof value === "string" &&
+    value.trim().toLowerCase() === "latest"
+  ) {
+    return "latest";
+  }
+  const packageRef = String(
+    item?.package_ref ?? item?.packageRef ?? "",
+  ).trim();
+  return /\.latest$/i.test(packageRef) ? "latest" : null;
 }
 
 function equipmentItemKey(item) {
@@ -8462,8 +8639,14 @@ async function loadLibrary({
   }
 
   try {
+    const packageContentsId =
+      app.view === "resources" ? app.packageContentsId : "";
     const endpoint =
-      app.view === "packages" ? "/api/packages" : "/api/resources";
+      app.view === "packages"
+        ? "/api/packages"
+        : packageContentsId
+          ? `/api/packages/${encodeURIComponent(packageContentsId)}/resources`
+          : "/api/resources";
     const exactPackageId =
       app.view === "packages" ? app.exactPackageId : "";
     let incoming;
@@ -8489,6 +8672,12 @@ async function loadLibrary({
       let result = await api(`${endpoint}?${params.toString()}`, {
         signal: controller.signal,
       });
+      if (
+        app.view === "resources" &&
+        app.packageContentsId !== packageContentsId
+      ) {
+        return false;
+      }
       incoming = Array.isArray(result) ? result : result.items || [];
       total = Math.max(
         0,
@@ -8503,6 +8692,12 @@ async function loadLibrary({
         result = await api(`${endpoint}?${params.toString()}`, {
           signal: controller.signal,
         });
+        if (
+          app.view === "resources" &&
+          app.packageContentsId !== packageContentsId
+        ) {
+          return false;
+        }
         incoming = Array.isArray(result) ? result : result.items || [];
         total = Math.max(
           0,
@@ -8790,6 +8985,20 @@ function resourceCardOpener(resourceId) {
   );
 }
 
+function packageCardOpener(packageId) {
+  const normalizedId = String(packageId || "").trim().toLowerCase();
+  if (!normalizedId) return null;
+  return (
+    Array.from(
+      elements.cardGrid.querySelectorAll(".package-card[data-package-id]"),
+    ).find(
+      (candidate) =>
+        String(candidate.dataset.packageId || "").trim().toLowerCase() ===
+        normalizedId,
+    ) || null
+  );
+}
+
 function renderLibrary() {
   const detailWasOpen = Boolean(elements.resourceDetailDialog?.open);
   const detailResourceId = detailWasOpen
@@ -8872,6 +9081,12 @@ function renderLibrary() {
       : `Showing ${formatNumber(rangeStart)}–${formatNumber(
           rangeEnd,
         )} of ${formatNumber(app.total)} ${plural(noun, app.total)}`;
+  if (app.view === "resources" && app.packageContentsId) {
+    elements.resultCount.textContent += ` in “${safePresentationLabel(
+      app.packageContentsId,
+      "package",
+    )}”`;
+  }
   renderLibraryPagination();
   updateClearFilters();
 }
@@ -8892,10 +9107,64 @@ function showLoadingState() {
         : "Loading packages…";
 }
 
+function packageScopeCopyConflictCode(error) {
+  if (
+    app.view !== "resources" ||
+    !app.packageContentsId ||
+    numberOr(error?.status, 0) !== 409
+  ) {
+    return "";
+  }
+  const payload =
+    error?.payload &&
+    typeof error.payload === "object" &&
+    !Array.isArray(error.payload)
+      ? error.payload
+      : {};
+  const code = String(
+    error?.code || payload.code || payload.error_code || "",
+  )
+    .trim()
+    .toLowerCase();
+  return [
+    "package_copy_conflict",
+    "package_copy_choice_stale",
+  ].includes(code)
+    ? code
+    : "";
+}
+
 function showErrorState(error) {
   elements.loadingState.hidden = true;
   elements.cardGrid.hidden = true;
   elements.emptyState.hidden = false;
+  const packageCopyConflict = packageScopeCopyConflictCode(error);
+  if (packageCopyConflict) {
+    elements.emptyTitle.textContent =
+      packageCopyConflict === "package_copy_choice_stale"
+        ? "Review package copy"
+        : "Choose package copy";
+    elements.emptyMessage.textContent =
+      `${errorMessage(error)} Choose the copy from a resource’s Dependencies panel, then retry. Use the return bar to go back through the package to the originating resource.`;
+    elements.emptyAction.textContent = "Back to package";
+    elements.emptyAction.dataset.action = "return-package";
+    elements.resultCount.textContent = "Package copy needs attention";
+    elements.libraryPagination.hidden = true;
+    elements.pagePrevious.disabled = true;
+    elements.pageNext.disabled = true;
+    return;
+  }
+  if (app.view === "resources" && app.packageContentsId) {
+    elements.emptyTitle.textContent = "Could not open package contents";
+    elements.emptyMessage.textContent = errorMessage(error);
+    elements.emptyAction.textContent = "Back to package";
+    elements.emptyAction.dataset.action = "return-package";
+    elements.resultCount.textContent = "Could not open package contents";
+    elements.libraryPagination.hidden = true;
+    elements.pagePrevious.disabled = true;
+    elements.pageNext.disabled = true;
+    return;
+  }
   elements.emptyTitle.textContent = "The local manager did not respond";
   elements.emptyMessage.textContent = errorMessage(error);
   elements.emptyAction.textContent = "Try again";
@@ -8909,6 +9178,7 @@ function showErrorState(error) {
 function renderEmptyLibrary() {
   const noCatalogue =
     (app.view === "resources" || app.view === "workspace") &&
+    !app.packageContentsId &&
     numberOr(app.status && app.status.catalog_resources, 0) === 0 &&
     !hasFilters();
 
@@ -8918,6 +9188,19 @@ function renderEmptyLibrary() {
       "VAM-PIP can browse BrowserAssist’s index while the containing VARs remain hidden.";
     elements.emptyAction.textContent = "Import catalogue";
     elements.emptyAction.dataset.action = "import";
+  } else if (
+    app.view === "resources" &&
+    app.packageContentsId &&
+    !hasFilters()
+  ) {
+    elements.emptyTitle.textContent = "No indexed resources in this package";
+    elements.emptyMessage.textContent =
+      `The package “${safePresentationLabel(
+        app.packageContentsId,
+        "package",
+      )}” is installed, but its contents did not match any imported catalogue rows.`;
+    elements.emptyAction.textContent = "Back to package";
+    elements.emptyAction.dataset.action = "return-package";
   } else {
     elements.emptyTitle.textContent = "Nothing found";
     elements.emptyMessage.textContent = hasFilters()
@@ -8962,9 +9245,8 @@ function createResourceCard(item) {
   preview.append(fallback);
 
   const thumbnail =
-    model.id !== null
-      ? resourceThumbnailUrl(model.id)
-      : model.thumbnail;
+    model.thumbnail ||
+    (model.id !== null ? resourceThumbnailUrl(model.id) : "");
   if (thumbnail) {
     const image = document.createElement("img");
     image.alt = "";
@@ -9052,7 +9334,8 @@ function createResourceCard(item) {
   appendResourceActions(actions, item, model);
   if (actions.children.length) body.append(actions);
 
-  card.append(preview, body);
+  if (preview) card.append(preview);
+  card.append(body);
   return card;
 }
 
@@ -10177,6 +10460,104 @@ async function applyWorkspaceResource(
   }
 }
 
+function normalizePackageResourceTypes(item) {
+  const raw =
+    item?.resource_types ??
+    item?.resourceTypes ??
+    item?.resource_type_counts ??
+    [];
+  const values =
+    raw && typeof raw === "object" && !Array.isArray(raw)
+      ? Object.entries(raw).map(([type, count]) => ({ type, count }))
+      : asArray(raw);
+  const seen = new Set();
+  const normalized = [];
+  for (const entry of values) {
+    const type = safePresentationLabel(
+      typeof entry === "string"
+        ? entry
+        : entry?.resource_type ??
+            entry?.type ??
+            entry?.value ??
+            entry?.name,
+      "",
+    );
+    const key = type.toLowerCase();
+    if (!type || seen.has(key)) continue;
+    seen.add(key);
+    const rawCount =
+      typeof entry === "object" && entry !== null
+        ? entry.count ?? entry.resource_count
+        : null;
+    const count =
+      rawCount === null || rawCount === undefined
+        ? null
+        : Math.max(0, Math.trunc(numberOr(rawCount, 0)));
+    normalized.push({ type, count });
+  }
+  return normalized;
+}
+
+function normalizePackageResourcePreviews(item) {
+  const raw =
+    item?.resource_previews ??
+    item?.representative_resources ??
+    item?.representativeResources ??
+    item?.preview_resources ??
+    [];
+  return asArray(raw)
+    .filter(
+      (entry) =>
+        entry &&
+        typeof entry === "object" &&
+        !Array.isArray(entry),
+    )
+    .slice(0, MAX_PACKAGE_RESOURCE_PREVIEWS)
+    .map((entry) => {
+      const model = normalizeResourceCardModel(entry, {
+        assumeHidden: true,
+        fallbackTitle: "Contained resource",
+      });
+      return {
+        id: model.id,
+        title: model.title,
+        type: model.type,
+        thumbnail:
+          model.thumbnail ||
+          (model.id !== null ? resourceThumbnailUrl(model.id) : ""),
+      };
+    });
+}
+
+function packageResourceCount(item) {
+  const value =
+    item?.resource_count ??
+    item?.resourceCount ??
+    item?.resources_count;
+  if (value === null || value === undefined || value === "") return null;
+  const count = Number(value);
+  if (!Number.isFinite(count)) return null;
+  return Math.max(0, Math.trunc(count));
+}
+
+function packageResourceTypeCount(item, loadedCount = 0) {
+  const value =
+    item?.resource_type_count ??
+    item?.resourceTypeCount ??
+    item?.resources_type_count;
+  const safeLoadedCount = Math.max(
+    0,
+    Math.trunc(numberOr(loadedCount, 0)),
+  );
+  if (value === null || value === undefined || value === "") {
+    return safeLoadedCount;
+  }
+  return Math.max(
+    safeLoadedCount,
+    Math.max(0, Math.trunc(numberOr(value, safeLoadedCount))),
+  );
+}
+
 function createPackageCard(item) {
   const card = createElement(
     "article",
@@ -10188,20 +10569,97 @@ function createPackageCard(item) {
   const active = itemIsActive(item);
   const valid = itemIsValid(item);
   const pinned = isPinned(root);
-  const body = createElement("div", "card-body");
-
-  const symbol = createElement("span", "package-symbol");
-  symbol.setAttribute("aria-hidden", "true");
-  symbol.textContent = valid ? "VAR" : "!";
-  body.append(symbol);
-
+  const resourcePreviews = normalizePackageResourcePreviews(item);
+  const resourceTypes = normalizePackageResourceTypes(item);
+  const resourceCount = packageResourceCount(item);
+  const resourceTypeCount = packageResourceTypeCount(
+    item,
+    resourceTypes.length,
+  );
+  const hasResourcePreview = valid && resourceCount !== 0;
+  if (hasResourcePreview) card.classList.add("has-resource-preview");
   const state = badge(
     valid ? (active ? "Active" : "Hidden") : "Invalid",
     `package-state state-badge ${
       valid ? (active ? "is-active" : "is-hidden") : ""
     }`,
   );
-  body.append(state);
+
+  let preview = null;
+  if (hasResourcePreview) {
+    preview = button("", "package-preview");
+    preview.setAttribute(
+      "aria-label",
+      resourceCount === null
+        ? `Verify and browse the exact contents of ${id}`
+        : `Browse ${formatNumber(resourceCount)} BrowserAssist-indexed ${plural(
+            "item",
+            resourceCount,
+          )} in ${id}; exact package contents are verified when opened`,
+    );
+    preview.title =
+      `Browse BrowserAssist’s index, then verify the exact contents of ${id}`;
+    preview.disabled = !root;
+    if (root) {
+      preview.addEventListener("click", () => browsePackageContents(item));
+    }
+
+    const previewGrid = createElement(
+      "span",
+      `package-preview-grid package-preview-count-${Math.max(
+        1,
+        resourcePreviews.length,
+      )}`,
+    );
+    if (resourcePreviews.length) {
+      for (const resource of resourcePreviews) {
+        const visual = createElement("span", "package-preview-cell");
+        visual.title = `${resource.title} · ${prettyType(resource.type)}`;
+        const fallback = createElement("span", "package-preview-initials");
+        fallback.setAttribute("aria-hidden", "true");
+        fallback.textContent = initials(resource.title);
+        visual.append(fallback);
+        if (resource.thumbnail) {
+          const image = document.createElement("img");
+          image.alt = "";
+          image.loading = "lazy";
+          image.decoding = "async";
+          image.addEventListener("load", () =>
+            image.classList.add("is-loaded"),
+          );
+          image.addEventListener("error", () => image.remove());
+          image.src = resource.thumbnail;
+          visual.append(image);
+        }
+        previewGrid.append(visual);
+      }
+    } else {
+      const empty = createElement("span", "package-preview-empty");
+      const symbol = createElement("strong", "package-symbol");
+      symbol.setAttribute("aria-hidden", "true");
+      symbol.textContent = "VAR";
+      const message = createElement("span", "package-preview-empty-copy");
+      message.textContent = "Indexed candidate previews unavailable";
+      empty.append(symbol, message);
+      previewGrid.append(empty);
+    }
+    preview.append(previewGrid, state);
+
+    const previewHint = createElement("span", "package-preview-hint");
+    previewHint.textContent =
+      resourceCount === null
+        ? "Browse exact contents"
+        : `${formatNumber(resourceCount)} indexed`;
+    preview.append(previewHint);
+  }
+
+  const body = createElement("div", "card-body");
+  if (!hasResourcePreview) {
+    const symbol = createElement("span", "package-symbol");
+    symbol.setAttribute("aria-hidden", "true");
+    symbol.textContent = valid ? "VAR" : "!";
+    body.append(symbol, state);
+  }
 
   const heading = createElement("h3", "card-title");
   heading.textContent = id;
@@ -10217,6 +10675,41 @@ function createPackageCard(item) {
 
   const metadata = createElement("div", "card-meta");
   metadata.append(badge(formatBytes(item.size), "meta-pill"));
+  if (resourceCount !== null) {
+    metadata.append(
+      badge(
+        resourceCount === 0
+          ? "No indexed items"
+          : `${formatNumber(resourceCount)} indexed`,
+        "meta-pill package-resource-count",
+      ),
+    );
+  }
+  for (const resourceType of resourceTypes.slice(
+    0,
+    MAX_PACKAGE_RESOURCE_TYPES,
+  )) {
+    metadata.append(
+      badge(
+        `${
+          resourceType.count === null
+            ? ""
+            : `${formatNumber(resourceType.count)} `
+        }${prettyType(resourceType.type)}`,
+        "meta-pill package-resource-type",
+      ),
+    );
+  }
+  if (resourceTypeCount > MAX_PACKAGE_RESOURCE_TYPES) {
+    metadata.append(
+      badge(
+        `+${formatNumber(
+          resourceTypeCount - MAX_PACKAGE_RESOURCE_TYPES,
+        )} indexed types`,
+        "meta-pill package-resource-type",
+      ),
+    );
+  }
   const dependencyCount = asArray(item.dependencies).length;
   if (dependencyCount) {
     metadata.append(
@@ -10229,6 +10722,20 @@ function createPackageCard(item) {
   body.append(metadata);
 
   const actions = createElement("div", "card-actions");
+  actions.classList.add("package-actions");
+  if (hasResourcePreview) {
+    const browseButton = button(
+      "Browse contents",
+      "secondary-button package-browse-button",
+    );
+    browseButton.disabled = !valid || !root;
+    browseButton.title =
+      `Browse BrowserAssist’s index, then verify the exact contents of ${id}`;
+    browseButton.addEventListener("click", () =>
+      browsePackageContents(item),
+    );
+    actions.append(browseButton);
+  }
   const leaseButton = button(
     active ? "Keep for 3 days" : "Enable for 3 days",
     active ? "secondary-button" : "primary-button",
@@ -10253,6 +10760,7 @@ function createPackageCard(item) {
   actions.append(pinButton);
   body.append(actions);
 
+  if (preview) card.append(preview);
   card.append(body);
   return card;
 }
@@ -10996,6 +11504,7 @@ function setView(
   }
   if (!preserveResourceReturn) clearResourceReturnContext();
   if (view !== "packages") app.exactPackageId = "";
+  if (view !== "resources") app.packageContentsId = "";
   if (elements.resourceDetailDialog?.open) {
     elements.resourceDetailDialog.close("view-change");
   }
@@ -11052,8 +11561,12 @@ function updateWorkspaceSearchPlaceholder() {
     const category = currentWorkspaceCategory();
     elements.searchInput.placeholder = `Search ${category?.label.toLowerCase() || "assets"}, creators, tags…`;
   } else if (app.view === "resources") {
-    elements.searchInput.placeholder =
-      "Search scenes, looks, clothing, creators…";
+    elements.searchInput.placeholder = app.packageContentsId
+      ? `Search inside ${safePresentationLabel(
+          app.packageContentsId,
+          "package",
+        )}…`
+      : "Search scenes, looks, clothing, creators…";
   } else {
     elements.searchInput.placeholder = "Search package or creator…";
   }
@@ -11065,8 +11578,10 @@ function configureStateFilter() {
     ["Active", "active"],
     ["Available", "hidden"],
     ["Missing", "missing"],
-    ["Local files", "local"],
   ];
+  if (!app.packageContentsId) {
+    resourceOptions.push(["Local files", "local"]);
+  }
   const packageOptions = [
     ["Any state", "all"],
     ["Active", "active"],
@@ -11114,6 +11629,12 @@ function handleEmptyAction() {
   const action = elements.emptyAction.dataset.action;
   if (action === "import") {
     importCatalogue();
+  } else if (action === "return-package") {
+    if (app.resourceReturnContext) {
+      returnToResourceContext();
+    } else {
+      exitPackageContentsScope();
+    }
   } else if (action === "clear") {
     clearFilters();
   } else {

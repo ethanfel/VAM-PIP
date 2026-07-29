@@ -249,8 +249,8 @@ class WebSecurityTests(unittest.TestCase):
             "frame-ancestors 'none'", response.getheader("Content-Security-Policy")
         )
         document = response.read().decode("utf-8")
-        self.assertIn("/styles.css?v=0.12.2", document)
-        self.assertIn("/app.js?v=0.12.2", document)
+        self.assertIn("/styles.css?v=0.13.0", document)
+        self.assertIn("/app.js?v=0.13.0", document)
 
     def test_session_plugin_endpoints_report_and_import_defaults(self) -> None:
         preset_path = write_web_session_defaults(self.vam_root)
@@ -824,6 +824,140 @@ class WebSecurityTests(unittest.TestCase):
             document["items"][4]["variants"][0],
         )
 
+    def test_package_list_and_exact_contents_add_versioned_thumbnail_urls(
+        self,
+    ) -> None:
+        headers = {"X-VAMPIP-Token": self.token}
+        self.server.service.list_packages = mock.Mock(
+            return_value={
+                "items": [
+                    {
+                        "id": "Creator.Look Set.4",
+                        "version": "4",
+                        "resource_previews": [
+                            {"id": 42, "display_name": "Alana"},
+                        ],
+                    }
+                ],
+                "total": 1,
+                "limit": 20,
+                "offset": 0,
+            }
+        )
+        self.connection.request(
+            "GET",
+            "/api/packages?limit=20",
+            headers=headers,
+        )
+        response = self.connection.getresponse()
+        self.assertEqual(response.status, 200)
+        listed = self.response_json(response)
+        self.assertEqual(
+            listed["items"][0]["resource_previews"][0]["thumbnail_url"],
+            "/api/resources/42/thumbnail"
+            "?package_version=4&token=test-token-that-is-long-enough-for-the-manager",
+        )
+
+        package_result = {
+            "package": {
+                "id": "Creator.Look Set.4",
+                "version": "4",
+            },
+            "items": [
+                {
+                    "id": 42,
+                    "display_name": "Alana",
+                    "variants": [{"id": 43, "label": "Red"}],
+                }
+            ],
+            "total": 1,
+            "limit": 12,
+            "offset": 0,
+        }
+        self.server.service.package_resources = mock.Mock(
+            return_value=package_result
+        )
+        self.connection.request(
+            "GET",
+            "/api/packages/Creator.Look%20Set.4/resources"
+            "?q=ala&type=Preset%20Appearance&type=Scene"
+            "&state=active&limit=12&offset=3",
+            headers=headers,
+        )
+        response = self.connection.getresponse()
+        self.assertEqual(response.status, 200)
+        contents = self.response_json(response)
+        self.assertEqual(
+            contents["items"][0]["thumbnail_url"],
+            "/api/resources/42/thumbnail"
+            "?package_version=4&token=test-token-that-is-long-enough-for-the-manager",
+        )
+        self.assertEqual(
+            contents["items"][0]["variants"][0]["thumbnail_url"],
+            "/api/resources/43/thumbnail"
+            "?package_version=4&token=test-token-that-is-long-enough-for-the-manager",
+        )
+        self.server.service.package_resources.assert_called_once_with(
+            "Creator.Look Set.4",
+            query="ala",
+            resource_types=["Preset Appearance", "Scene"],
+            state="active",
+            limit=12,
+            offset=3,
+        )
+
+    def test_package_contents_reject_unbounded_search_and_type_filters(
+        self,
+    ) -> None:
+        headers = {"X-VAMPIP-Token": self.token}
+        paths = (
+            "/api/packages/Creator.Package.1/resources?q=" + ("x" * 501),
+            "/api/packages/Creator.Package.1/resources?"
+            + "&".join("type=Scene" for _ in range(65)),
+            "/api/packages/Creator.Package.1/resources?type="
+            + ("x" * 201),
+            "/api/packages/Creator.Package.1/resources?q=bad%0Aquery",
+        )
+        for path in paths:
+            with self.subTest(path=path[:100]):
+                self.connection.request("GET", path, headers=headers)
+                response = self.connection.getresponse()
+                self.assertEqual(response.status, 400)
+                response.read()
+
+    def test_thumbnail_route_forwards_exact_numeric_or_latest_version(
+        self,
+    ) -> None:
+        headers = {"X-VAMPIP-Token": self.token}
+        self.server.service.resource_thumbnail = mock.Mock(return_value=None)
+
+        self.connection.request(
+            "GET",
+            "/api/resources/42/thumbnail?package_version=4",
+            headers=headers,
+        )
+        response = self.connection.getresponse()
+        self.assertEqual(response.status, 404)
+        response.read()
+        self.server.service.resource_thumbnail.assert_called_once_with(
+            42,
+            package_version=4,
+        )
+
+        self.server.service.resource_thumbnail.reset_mock()
+        self.connection.request(
+            "GET",
+            "/api/resources/42/thumbnail?package_version=latest",
+            headers=headers,
+        )
+        response = self.connection.getresponse()
+        self.assertEqual(response.status, 404)
+        response.read()
+        self.server.service.resource_thumbnail.assert_called_once_with(
+            42,
+            package_version="latest",
+        )
+
     def test_workspace_scene_and_generic_live_action_routes(self) -> None:
         scene = {
             "available": True,
@@ -914,6 +1048,19 @@ class WebSecurityTests(unittest.TestCase):
         self.server.service.resource_details.assert_called_once_with(
             42,
             package_version=4,
+        )
+        self.server.service.resource_details.reset_mock()
+        self.connection.request(
+            "GET",
+            "/api/resources/42/details?package_version=latest",
+            headers={"X-VAMPIP-Token": self.token},
+        )
+        response = self.connection.getresponse()
+        self.assertEqual(response.status, 200)
+        self.assertEqual(self.response_json(response), details_result)
+        self.server.service.resource_details.assert_called_once_with(
+            42,
+            package_version="latest",
         )
 
         lease_result = {
@@ -1027,6 +1174,21 @@ class WebSecurityTests(unittest.TestCase):
                         payload["error"],
                     )
                     operation.assert_not_called()
+
+    def test_resource_details_rejects_non_version_literals(self) -> None:
+        self.server.service.resource_details = mock.Mock(return_value={})
+        self.connection.request(
+            "GET",
+            "/api/resources/42/details?package_version=current",
+            headers={"X-VAMPIP-Token": self.token},
+        )
+        response = self.connection.getresponse()
+        self.assertEqual(response.status, 400)
+        self.assertIn(
+            "package_version must be an integer or latest",
+            self.response_json(response)["error"],
+        )
+        self.server.service.resource_details.assert_not_called()
 
     def test_custom_unity_asset_choice_route_is_strict_and_opaque(self) -> None:
         token = "a" * 32

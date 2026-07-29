@@ -147,6 +147,13 @@ CREATE INDEX IF NOT EXISTS idx_catalog_root_creator
     ON catalog_resources(root, creator);
 CREATE INDEX IF NOT EXISTS idx_catalog_root_family
     ON catalog_resources(root, creator, package_name);
+CREATE INDEX IF NOT EXISTS idx_catalog_root_source_family_nocase
+    ON catalog_resources(
+        root,
+        source,
+        creator COLLATE NOCASE,
+        package_name COLLATE NOCASE
+    );
 
 CREATE TABLE IF NOT EXISTS catalog_resource_versions (
     resource_id INTEGER NOT NULL

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 import json
+import os
 from pathlib import Path
 import sqlite3
 import tempfile
@@ -9,18 +11,22 @@ from unittest import mock
 import warnings
 import zipfile
 
+import vampip.catalog as catalog_module
 from vampip.catalog import (
     CatalogImportError,
     _ResourceResolver,
     catalog_facets,
     get_resource_thumbnail,
     import_browserassist,
+    package_resource_summaries,
+    package_resources_for_copy,
     resolve_resource_archive,
     search_resources,
 )
 from vampip.database import SCHEMA_VERSION, connect
 from vampip.inventory import scan
-from vampip.service import ManagerService
+from vampip.manager_state import set_package_choice
+from vampip.service import ManagerService, PackageConflictError
 
 
 def write_json(path: Path, document: object) -> None:
@@ -228,6 +234,636 @@ class CatalogTests(unittest.TestCase):
             import_browserassist(database, self.vam_root)
             refreshed = search_resources(database, self.vam_root, query="demo")
             self.assertEqual(refreshed["items"][0]["id"], first_id)
+
+    def test_package_resource_summary_and_browse_are_exact_to_selected_copy(
+        self,
+    ) -> None:
+        appearance_a = (
+            "Custom\\Atom\\Person\\Appearance\\Preset_Alana.vap"
+        )
+        appearance_b = (
+            "Custom\\Atom\\Person\\Appearance\\Preset_Beatrice.vap"
+        )
+        self.write_catalogue(
+            [
+                {
+                    "creatorName": "Creator",
+                    "packageName": "Looks",
+                    "resourceFullFileName": appearance_a,
+                    "resourceType": "preset appearance",
+                    "presetAtomType": "Person",
+                    "varVersions": ["1"],
+                },
+                {
+                    "creatorName": "Creator",
+                    "packageName": "Looks",
+                    "resourceFullFileName": appearance_b,
+                    "resourceType": "Preset Appearance",
+                    "presetAtomType": "Person",
+                    "varVersions": ["1"],
+                },
+                {
+                    "creatorName": "Creator",
+                    "packageName": "Looks",
+                    "resourceFullFileName": (
+                        "Custom\\Atom\\Person\\Appearance\\Preset_V2.vap"
+                    ),
+                    "resourceType": "Preset Appearance",
+                    "presetAtomType": "Person",
+                    "varVersions": ["2"],
+                },
+                {
+                    "creatorName": "Creator",
+                    "packageName": "LooksExtra",
+                    "resourceFullFileName": (
+                        "Custom\\Atom\\Person\\Appearance\\Preset_Extra.vap"
+                    ),
+                    "resourceType": "Preset Appearance",
+                    "presetAtomType": "Person",
+                    "varVersions": ["1"],
+                },
+            ]
+        )
+        make_var(
+            self.addons / "Creator.Looks.1.var",
+            creator="Creator",
+            package="Looks",
+            members={appearance_a: b"{}"},
+        )
+        make_var(
+            self.addons / "Copies" / "Creator.Looks.1.var",
+            creator="Creator",
+            package="Looks",
+            members={appearance_b: b"{}"},
+        )
+
+        with connect(self.state) as database:
+            scan(self.addons, database)
+            import_browserassist(database, self.vam_root)
+            copies = list(
+                database.execute(
+                    """
+                    SELECT * FROM package_files
+                    WHERE creator = 'Creator' AND package_name = 'Looks'
+                      AND version_text = '1'
+                    ORDER BY relative_path
+                    """
+                )
+            )
+            self.assertEqual(len(copies), 2)
+            alana_copy = next(
+                row
+                for row in copies
+                if str(row["relative_path"]) == "Creator.Looks.1.var"
+            )
+            beatrice_copy = next(
+                row for row in copies if row is not alana_copy
+            )
+
+            summaries = package_resource_summaries(
+                database,
+                self.vam_root,
+                [alana_copy],
+            )
+            summary = summaries["creator.looks.1"]
+            self.assertEqual(summary["resource_count"], 2)
+            self.assertEqual(
+                summary["resource_types"],
+                [{"value": "Preset Appearance", "count": 2}],
+            )
+            self.assertEqual(len(summary["resource_previews"]), 2)
+            plan = list(
+                database.execute(
+                    """
+                    EXPLAIN QUERY PLAN
+                    WITH wanted(package_id, creator, package_name) AS (
+                        VALUES (?, ?, ?)
+                    )
+                    SELECT resource.id
+                    FROM wanted
+                    CROSS JOIN catalog_resources AS resource
+                        INDEXED BY idx_catalog_root_source_family_nocase
+                    WHERE resource.root = ?
+                      AND resource.source = ?
+                      AND resource.creator = wanted.creator COLLATE NOCASE
+                      AND resource.package_name =
+                          wanted.package_name COLLATE NOCASE
+                    """,
+                    (
+                        "creator.looks.1",
+                        "Creator",
+                        "Looks",
+                        str(self.vam_root.resolve()),
+                        "browserassist",
+                    ),
+                )
+            )
+            plan_text = " ".join(str(row[3]) for row in plan)
+            self.assertIn(
+                "idx_catalog_root_source_family_nocase",
+                plan_text,
+            )
+            self.assertIn(
+                "root=? AND source=? AND creator=? AND package_name=?",
+                plan_text,
+            )
+
+            first = package_resources_for_copy(
+                database,
+                self.vam_root,
+                alana_copy,
+            )
+            second = package_resources_for_copy(
+                database,
+                self.vam_root,
+                beatrice_copy,
+            )
+            self.assertEqual(first["total"], 1)
+            self.assertEqual(second["total"], 1)
+            first_states = {
+                item["display_name"]: item["state"] for item in first["items"]
+            }
+            second_states = {
+                item["display_name"]: item["state"] for item in second["items"]
+            }
+            self.assertEqual(
+                first_states,
+                {"Alana": "active"},
+            )
+            self.assertEqual(
+                second_states,
+                {"Beatrice": "active"},
+            )
+            only_missing = package_resources_for_copy(
+                database,
+                self.vam_root,
+                alana_copy,
+                query="Beatrice",
+                resource_types=["preset appearance"],
+                package_state="missing",
+                limit=1,
+            )
+            self.assertEqual(only_missing["total"], 1)
+            self.assertEqual(
+                only_missing["items"][0]["display_name"],
+                "Beatrice",
+            )
+
+        service = ManagerService(
+            self.addons,
+            self.state,
+            vam_root=self.vam_root,
+            process_probe=lambda: [],
+        )
+        with self.assertRaises(PackageConflictError) as unresolved:
+            service.package_resources("Creator.Looks.1")
+        self.assertEqual(unresolved.exception.code, "package_copy_conflict")
+        self.assertEqual(len(unresolved.exception.conflicts), 1)
+        self.assertFalse(unresolved.exception.conflicts[0]["resolved"])
+
+        with connect(self.state) as database:
+            set_package_choice(
+                database,
+                self.addons,
+                "Creator.Looks.1",
+                "1:" + ("0" * 64),
+            )
+        with self.assertRaises(PackageConflictError) as stale:
+            service.package_resources("Creator.Looks.1")
+        self.assertEqual(stale.exception.code, "package_copy_choice_stale")
+        self.assertTrue(stale.exception.conflicts[0]["choice_stale"])
+
+        with connect(self.state) as database:
+            selected = database.execute(
+                """
+                SELECT content_sha256, relative_path
+                FROM package_files
+                WHERE relative_path = 'Copies/Creator.Looks.1.var'
+                """
+            ).fetchone()
+            assert selected is not None
+            set_package_choice(
+                database,
+                self.addons,
+                "Creator.Looks.1",
+                str(selected["content_sha256"]),
+                preferred_logical_path=str(selected["relative_path"]),
+            )
+        chosen = service.package_resources("creator.looks.1")
+        self.assertEqual(chosen["package"]["id"], "Creator.Looks.1")
+        self.assertEqual(
+            [item["display_name"] for item in chosen["items"]],
+            ["Beatrice"],
+        )
+
+    def test_archive_member_index_cache_is_thread_safe_and_bounded(self) -> None:
+        first = self.addons / "Creator.First.1.var"
+        second = self.addons / "Creator.Second.1.var"
+        make_var(
+            first,
+            creator="Creator",
+            package="First",
+            members={"Saves/scene/First.json": b"{}"},
+        )
+        make_var(
+            second,
+            creator="Creator",
+            package="Second",
+            members={"Saves/scene/Second.json": b"{}"},
+        )
+        cache = catalog_module._ArchiveMemberIndexCache(max_entries=1)
+        real_zip_file = zipfile.ZipFile
+        opened: list[Path] = []
+
+        def counted_zip_file(
+            path: Path,
+            *args: object,
+            **kwargs: object,
+        ) -> zipfile.ZipFile:
+            opened.append(Path(path))
+            return real_zip_file(path, *args, **kwargs)
+
+        with mock.patch(
+            "vampip.catalog.zipfile.ZipFile",
+            side_effect=counted_zip_file,
+        ):
+            with ThreadPoolExecutor(max_workers=8) as executor:
+                indexed = list(executor.map(lambda _: cache.get(first), range(8)))
+            self.assertIsNotNone(indexed[0])
+            self.assertTrue(all(result is indexed[0] for result in indexed))
+            self.assertEqual(opened, [first])
+
+            self.assertIsNotNone(cache.get(second))
+            self.assertIsNotNone(cache.get(first))
+
+        self.assertEqual(opened, [first, second, first])
+
+    def test_package_browse_and_thumbnails_share_archive_member_index(
+        self,
+    ) -> None:
+        resource_path = "Saves\\scene\\Shared.json"
+        thumbnail = b"\xff\xd8\xff\xe0shared-thumbnail"
+        self.write_catalogue(
+            [
+                {
+                    "creatorName": "Creator",
+                    "packageName": "Shared",
+                    "resourceFullFileName": resource_path,
+                    "resourceType": "Scene",
+                    "presetAtomType": "",
+                    "varVersions": ["1"],
+                }
+            ]
+        )
+        archive_path = self.addons / "Creator.Shared.1.var"
+        make_var(
+            archive_path,
+            creator="Creator",
+            package="Shared",
+            members={
+                resource_path: b"{}",
+                "Saves\\scene\\Shared.jpg": thumbnail,
+            },
+        )
+        catalog_module._ARCHIVE_MEMBER_INDEX_CACHE.clear()
+        self.addCleanup(catalog_module._ARCHIVE_MEMBER_INDEX_CACHE.clear)
+
+        with connect(self.state) as database:
+            scan(self.addons, database)
+            import_browserassist(database, self.vam_root)
+            package_row = database.execute(
+                """
+                SELECT * FROM package_files
+                WHERE creator = 'Creator' AND package_name = 'Shared'
+                """
+            ).fetchone()
+            resource_id = database.execute(
+                """
+                SELECT id FROM catalog_resources
+                WHERE creator = 'Creator' AND package_name = 'Shared'
+                """
+            ).fetchone()[0]
+            assert package_row is not None
+            real_zip_file = zipfile.ZipFile
+            opened: list[Path] = []
+
+            def counted_zip_file(
+                path: Path,
+                *args: object,
+                **kwargs: object,
+            ) -> zipfile.ZipFile:
+                opened.append(Path(path))
+                return real_zip_file(path, *args, **kwargs)
+
+            with mock.patch(
+                "vampip.catalog.zipfile.ZipFile",
+                side_effect=counted_zip_file,
+            ):
+                browsed = package_resources_for_copy(
+                    database,
+                    self.vam_root,
+                    package_row,
+                )
+                resolved = resolve_resource_archive(
+                    database,
+                    self.vam_root,
+                    int(resource_id),
+                )
+                first = get_resource_thumbnail(
+                    database,
+                    self.vam_root,
+                    int(resource_id),
+                    self.cache,
+                )
+                second = get_resource_thumbnail(
+                    database,
+                    self.vam_root,
+                    int(resource_id),
+                    self.cache,
+                )
+
+        self.assertEqual(browsed["total"], 1)
+        self.assertIsNotNone(resolved)
+        assert first is not None
+        assert second is not None
+        self.assertFalse(first.cache_hit)
+        self.assertTrue(second.cache_hit)
+        self.assertEqual(first.path.read_bytes(), thumbnail)
+        # One open builds the shared index; one bounded payload read populates
+        # the thumbnail cache. Resolution and the second request open no ZIP.
+        self.assertEqual(opened, [archive_path, archive_path])
+
+    def test_archive_member_index_invalidates_after_package_replacement(
+        self,
+    ) -> None:
+        first_path = "Saves\\scene\\First.json"
+        second_path = "Saves\\scene\\Second.json"
+        second_thumbnail = b"\xff\xd8\xff\xe0replacement-thumbnail"
+        self.write_catalogue(
+            [
+                {
+                    "creatorName": "Creator",
+                    "packageName": "Replaceable",
+                    "resourceFullFileName": first_path,
+                    "resourceType": "Scene",
+                    "presetAtomType": "",
+                    "varVersions": ["1"],
+                },
+                {
+                    "creatorName": "Creator",
+                    "packageName": "Replaceable",
+                    "resourceFullFileName": second_path,
+                    "resourceType": "Scene",
+                    "presetAtomType": "",
+                    "varVersions": ["1"],
+                },
+            ]
+        )
+        archive_path = self.addons / "Creator.Replaceable.1.var"
+        make_var(
+            archive_path,
+            creator="Creator",
+            package="Replaceable",
+            members={first_path: b"{}"},
+        )
+        replacement = self.state / "replacement.var"
+        make_var(
+            replacement,
+            creator="Creator",
+            package="Replaceable",
+            members={
+                second_path: b"{}",
+                "Saves\\scene\\Second.jpg": second_thumbnail,
+            },
+        )
+        catalog_module._ARCHIVE_MEMBER_INDEX_CACHE.clear()
+        self.addCleanup(catalog_module._ARCHIVE_MEMBER_INDEX_CACHE.clear)
+
+        with connect(self.state) as database:
+            scan(self.addons, database)
+            import_browserassist(database, self.vam_root)
+            package_row = database.execute(
+                """
+                SELECT * FROM package_files
+                WHERE creator = 'Creator' AND package_name = 'Replaceable'
+                """
+            ).fetchone()
+            second_id = database.execute(
+                """
+                SELECT id FROM catalog_resources
+                WHERE resource_path = ?
+                """,
+                (second_path,),
+            ).fetchone()[0]
+            assert package_row is not None
+            real_zip_file = zipfile.ZipFile
+            opened_before_rescan: list[Path] = []
+
+            def counted_zip_file(
+                path: Path,
+                *args: object,
+                **kwargs: object,
+            ) -> zipfile.ZipFile:
+                opened_before_rescan.append(Path(path))
+                return real_zip_file(path, *args, **kwargs)
+
+            with mock.patch(
+                "vampip.catalog.zipfile.ZipFile",
+                side_effect=counted_zip_file,
+            ):
+                before = package_resources_for_copy(
+                    database,
+                    self.vam_root,
+                    package_row,
+                )
+                replacement.replace(archive_path)
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "no longer matches the scanned inventory; rescan required",
+                ):
+                    package_resources_for_copy(
+                        database,
+                        self.vam_root,
+                        package_row,
+                    )
+                self.assertIsNone(
+                    get_resource_thumbnail(
+                        database,
+                        self.vam_root,
+                        int(second_id),
+                        self.cache,
+                    )
+                )
+
+            scan(self.addons, database)
+            package_row = database.execute(
+                """
+                SELECT * FROM package_files
+                WHERE creator = 'Creator' AND package_name = 'Replaceable'
+                """
+            ).fetchone()
+            assert package_row is not None
+            opened_after_rescan: list[Path] = []
+
+            def counted_after_rescan(
+                path: Path,
+                *args: object,
+                **kwargs: object,
+            ) -> zipfile.ZipFile:
+                opened_after_rescan.append(Path(path))
+                return real_zip_file(path, *args, **kwargs)
+
+            with mock.patch(
+                "vampip.catalog.zipfile.ZipFile",
+                side_effect=counted_after_rescan,
+            ):
+                after = package_resources_for_copy(
+                    database,
+                    self.vam_root,
+                    package_row,
+                )
+                thumbnail = get_resource_thumbnail(
+                    database,
+                    self.vam_root,
+                    int(second_id),
+                    self.cache,
+                )
+
+        self.assertEqual(
+            [item["display_name"] for item in before["items"]],
+            ["First"],
+        )
+        self.assertEqual(
+            [item["display_name"] for item in after["items"]],
+            ["Second"],
+        )
+        assert thumbnail is not None
+        self.assertEqual(thumbnail.path.read_bytes(), second_thumbnail)
+        self.assertEqual(opened_before_rescan, [archive_path])
+        self.assertEqual(opened_after_rescan, [archive_path, archive_path])
+
+    def test_package_browse_rejects_corrupt_or_changing_selected_archive(
+        self,
+    ) -> None:
+        resource_path = "Saves\\scene\\Demo.json"
+        self.write_catalogue(
+            [
+                {
+                    "creatorName": "Creator",
+                    "packageName": "Unstable",
+                    "resourceFullFileName": resource_path,
+                    "resourceType": "Scene",
+                    "presetAtomType": "",
+                    "varVersions": ["1"],
+                }
+            ]
+        )
+        archive_path = self.addons / "Creator.Unstable.1.var"
+        make_var(
+            archive_path,
+            creator="Creator",
+            package="Unstable",
+            members={resource_path: b"{}"},
+        )
+        catalog_module._ARCHIVE_MEMBER_INDEX_CACHE.clear()
+        self.addCleanup(catalog_module._ARCHIVE_MEMBER_INDEX_CACHE.clear)
+
+        with connect(self.state) as database:
+            scan(self.addons, database)
+            import_browserassist(database, self.vam_root)
+            package_row = database.execute(
+                """
+                SELECT * FROM package_files
+                WHERE creator = 'Creator' AND package_name = 'Unstable'
+                """
+            ).fetchone()
+            assert package_row is not None
+
+            recorded_stat = archive_path.stat()
+            archive_path.write_bytes(b"x" * recorded_stat.st_size)
+            os.utime(
+                archive_path,
+                ns=(recorded_stat.st_atime_ns, recorded_stat.st_mtime_ns),
+            )
+            with self.assertRaisesRegex(
+                ValueError,
+                "selected package archive is unreadable or changed",
+            ):
+                package_resources_for_copy(
+                    database,
+                    self.vam_root,
+                    package_row,
+                )
+
+            make_var(
+                archive_path,
+                creator="Creator",
+                package="Unstable",
+                members={resource_path: b"{}"},
+            )
+            scan(self.addons, database)
+            package_row = database.execute(
+                """
+                SELECT * FROM package_files
+                WHERE creator = 'Creator' AND package_name = 'Unstable'
+                """
+            ).fetchone()
+            assert package_row is not None
+            replacement = self.state / "changed-during-index.var"
+            make_var(
+                replacement,
+                creator="Creator",
+                package="Unstable",
+                members={resource_path: b'{"replacement":true}'},
+            )
+            real_member_indexes = catalog_module._member_indexes
+
+            def replace_during_index(
+                archive: zipfile.ZipFile,
+            ) -> catalog_module._ArchiveMemberIndexes:
+                indexes = real_member_indexes(archive)
+                replacement.replace(archive_path)
+                return indexes
+
+            with (
+                mock.patch(
+                    "vampip.catalog._member_indexes",
+                    side_effect=replace_during_index,
+                ),
+                self.assertRaisesRegex(
+                    ValueError,
+                    "selected package archive is unreadable or changed",
+                ),
+            ):
+                package_resources_for_copy(
+                    database,
+                    self.vam_root,
+                    package_row,
+                )
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "no longer matches the scanned inventory; rescan required",
+            ):
+                package_resources_for_copy(
+                    database,
+                    self.vam_root,
+                    package_row,
+                )
+            scan(self.addons, database)
+            refreshed_row = database.execute(
+                """
+                SELECT * FROM package_files
+                WHERE creator = 'Creator' AND package_name = 'Unstable'
+                """
+            ).fetchone()
+            assert refreshed_row is not None
+            recovered = package_resources_for_copy(
+                database,
+                self.vam_root,
+                refreshed_row,
+            )
+            self.assertEqual(recovered["total"], 1)
 
     def test_failed_refresh_preserves_last_good_generation(self) -> None:
         self.write_catalogue(
@@ -731,6 +1367,94 @@ class CatalogTests(unittest.TestCase):
                 ).fetchone()[0]
             )
             self.assertEqual(stored[0]["uid"], "Creator:Jacket v1")
+
+    def test_package_copy_browse_keeps_clothing_metadata_and_exact_variants(
+        self,
+    ) -> None:
+        parent = "Custom\\Clothing\\Female\\Creator\\Dress"
+        clothing_path = f"{parent}\\Dress.vam"
+        red_path = f"{parent}\\Dress_Red.vap"
+        blue_path = f"{parent}\\Dress_Blue.vap"
+        common = {
+            "creatorName": "Creator",
+            "packageName": "Wardrobe",
+            "presetAtomType": "Person",
+            "varVersions": ["1"],
+        }
+        self.write_catalogue(
+            [
+                {
+                    **common,
+                    "resourceFullFileName": clothing_path,
+                    "resourceType": "Clothing (Female)",
+                    "clothingVersions": [
+                        {
+                            "varVersion": "1",
+                            "clothing": {
+                                "itemType": "ClothingFemale",
+                                "uid": "Creator:Dress",
+                                "displayName": "Dress",
+                                "creatorName": "Creator",
+                                "tags": "formal",
+                                "isRealItem": True,
+                            },
+                        }
+                    ],
+                },
+                {
+                    **common,
+                    "resourceFullFileName": red_path,
+                    "resourceType": "Clothing Item Presets",
+                },
+                {
+                    **common,
+                    "resourceFullFileName": blue_path,
+                    "resourceType": "Clothing Item Presets",
+                },
+            ]
+        )
+        make_var(
+            self.addons / "Creator.Wardrobe.1.var",
+            creator="Creator",
+            package="Wardrobe",
+            members={
+                clothing_path: b"{}",
+                red_path: b"{}",
+            },
+        )
+
+        with connect(self.state) as database:
+            scan(self.addons, database)
+            import_browserassist(database, self.vam_root)
+            package_row = database.execute(
+                """
+                SELECT * FROM package_files
+                WHERE creator = 'Creator' AND package_name = 'Wardrobe'
+                  AND version_text = '1'
+                """
+            ).fetchone()
+            assert package_row is not None
+            result = package_resources_for_copy(
+                database,
+                self.vam_root,
+                package_row,
+                resource_types=["Clothing (Female)"],
+            )
+
+        self.assertEqual(result["total"], 1)
+        item = result["items"][0]
+        self.assertEqual(item["clothing"]["uid"], "Creator:Dress")
+        self.assertNotIn("clothing_versions", item)
+        self.assertEqual(
+            [variant["label"] for variant in item["variants"]],
+            ["Red"],
+        )
+        self.assertEqual(item["variant_count"], 1)
+        self.assertEqual(
+            item["variants"][0]["package_ref"],
+            "Creator.Wardrobe.1",
+        )
+        self.assertFalse(item["variants"][0]["missing"])
 
     def test_clothing_cards_include_bounded_related_style_choices(self) -> None:
         parent = "Custom\\Clothing\\Female\\Creator\\Shared"
@@ -1794,6 +2518,66 @@ class CatalogTests(unittest.TestCase):
                 max_bytes=4,
             )
             self.assertIsNone(rejected)
+
+    def test_thumbnail_can_be_pinned_to_one_exact_installed_version(self) -> None:
+        resource_path = "Custom\\Atom\\Person\\Appearance\\Preset_Ada.vap"
+        self.write_catalogue(
+            [
+                {
+                    "creatorName": "Creator",
+                    "packageName": "Looks",
+                    "resourceFullFileName": resource_path,
+                    "resourceType": "Preset Appearance",
+                    "presetAtomType": "Person",
+                    "varVersions": ["1", "2"],
+                }
+            ]
+        )
+        thumbnails = {
+            "1": b"\xff\xd8\xff\xe0version-one",
+            "2": b"\xff\xd8\xff\xe0version-two",
+        }
+        for version, thumbnail in thumbnails.items():
+            make_var(
+                self.addons / f"Creator.Looks.{version}.var",
+                creator="Creator",
+                package="Looks",
+                members={
+                    resource_path: b"{}",
+                    resource_path.rsplit(".", 1)[0] + ".jpg": thumbnail,
+                },
+            )
+
+        with connect(self.state) as database:
+            scan(self.addons, database)
+            import_browserassist(database, self.vam_root)
+            resource_id = int(
+                search_resources(database, self.vam_root)["items"][0]["id"]
+            )
+            version_one = get_resource_thumbnail(
+                database,
+                self.vam_root,
+                resource_id,
+                self.cache,
+                addon_root=self.addons,
+                version_text="1",
+            )
+            version_two = get_resource_thumbnail(
+                database,
+                self.vam_root,
+                resource_id,
+                self.cache,
+                addon_root=self.addons,
+                version_text="2",
+            )
+
+        assert version_one is not None
+        assert version_two is not None
+        self.assertEqual(version_one.version_text, "1")
+        self.assertEqual(version_two.version_text, "2")
+        self.assertEqual(version_one.path.read_bytes(), thumbnails["1"])
+        self.assertEqual(version_two.path.read_bytes(), thumbnails["2"])
+        self.assertNotEqual(version_one.etag, version_two.etag)
 
     def test_resolver_adopts_newer_inventory_version_with_exact_member(
         self,

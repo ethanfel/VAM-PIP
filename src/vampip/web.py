@@ -28,6 +28,7 @@ _LEASE_ITEM = re.compile(r"^/api/leases/([A-Fa-f0-9]{32})$")
 _RESOURCE_THUMBNAIL = re.compile(r"^/api/resources/([0-9]+)/thumbnail$")
 _RESOURCE_LEASE = re.compile(r"^/api/resources/([0-9]+)/lease$")
 _RESOURCE_DETAILS = re.compile(r"^/api/resources/([0-9]+)/details$")
+_PACKAGE_RESOURCES = re.compile(r"^/api/packages/([^/]+)/resources$")
 _TOKEN_IN_LOG = re.compile(r"([?&]token=)[^&\s\"]+")
 
 
@@ -307,15 +308,103 @@ class ManagerRequestHandler(BaseHTTPRequestHandler):
                 )
                 return
             if parsed.path == "/api/packages":
+                result = self.server.service.list_packages(
+                    query=query.get("q", [""])[0],
+                    state=query.get("state", ["all"])[0],
+                    limit=int(query.get("limit", ["100"])[0]),
+                    offset=int(query.get("offset", ["0"])[0]),
+                )
+                thumbnail_token = quote(self.server.api_token, safe="")
+                for package in result.get("items", []):
+                    if not isinstance(package, dict):
+                        continue
+                    version = package.get("version")
+                    previews = package.get("resource_previews")
+                    if not isinstance(previews, list):
+                        continue
+                    for preview in previews:
+                        if not isinstance(preview, dict):
+                            continue
+                        resource_id = preview.get("id")
+                        if (
+                            not isinstance(resource_id, int)
+                            or isinstance(resource_id, bool)
+                            or resource_id < 1
+                            or not isinstance(version, str)
+                            or not version
+                        ):
+                            continue
+                        preview["thumbnail_url"] = (
+                            f"/api/resources/{resource_id}/thumbnail"
+                            f"?package_version={quote(version, safe='')}"
+                            f"&token={thumbnail_token}"
+                        )
                 self._json(
                     HTTPStatus.OK,
-                    self.server.service.list_packages(
-                        query=query.get("q", [""])[0],
-                        state=query.get("state", ["all"])[0],
-                        limit=int(query.get("limit", ["100"])[0]),
-                        offset=int(query.get("offset", ["0"])[0]),
-                    ),
+                    result,
                 )
+                return
+            package_resources = _PACKAGE_RESOURCES.fullmatch(parsed.path)
+            if package_resources:
+                unexpected_fields = sorted(
+                    set(query) - {"q", "type", "state", "limit", "offset", "token"}
+                )
+                if unexpected_fields:
+                    raise ValueError(
+                        "unsupported package-resources query field(s): "
+                        + ", ".join(unexpected_fields)
+                    )
+                result = self.server.service.package_resources(
+                    unquote(package_resources.group(1)),
+                    query=query.get("q", [""])[0],
+                    resource_types=query.get("type", []),
+                    state=query.get("state", ["all"])[0],
+                    limit=int(query.get("limit", ["100"])[0]),
+                    offset=int(query.get("offset", ["0"])[0]),
+                )
+                package = result.get("package")
+                version = (
+                    package.get("version")
+                    if isinstance(package, dict)
+                    else None
+                )
+                thumbnail_token = quote(self.server.api_token, safe="")
+                for item in result.get("items", []):
+                    if not isinstance(item, dict):
+                        continue
+                    resource_id = item.get("id")
+                    if (
+                        not isinstance(resource_id, int)
+                        or isinstance(resource_id, bool)
+                        or resource_id < 1
+                        or not isinstance(version, str)
+                        or not version
+                    ):
+                        continue
+                    item["thumbnail_url"] = (
+                        f"/api/resources/{resource_id}/thumbnail"
+                        f"?package_version={quote(version, safe='')}"
+                        f"&token={thumbnail_token}"
+                    )
+                    variants = item.get("variants")
+                    if not isinstance(variants, list):
+                        continue
+                    for variant in variants:
+                        if not isinstance(variant, dict):
+                            continue
+                        variant_id = variant.get("id")
+                        if (
+                            not isinstance(variant_id, int)
+                            or isinstance(variant_id, bool)
+                            or variant_id < 1
+                        ):
+                            continue
+                        variant["thumbnail_url"] = (
+                            f"/api/resources/{variant_id}/thumbnail"
+                            f"?package_version={quote(version, safe='')}"
+                            f"&token={thumbnail_token}"
+                        )
+                self._json(HTTPStatus.OK, result)
                 return
             if parsed.path == "/api/resources":
                 result = self.server.service.search_resources(
@@ -377,18 +466,22 @@ class ManagerRequestHandler(BaseHTTPRequestHandler):
                         + ", ".join(unexpected_fields)
                     )
                 raw_versions = query.get("package_version", [])
-                package_version = None
+                package_version: int | str | None = None
                 if raw_versions:
                     if len(raw_versions) != 1:
                         raise ValueError(
                             "package_version must be supplied at most once"
                         )
-                    try:
-                        package_version = int(raw_versions[0])
-                    except ValueError as exc:
-                        raise ValueError(
-                            "package_version must be an integer"
-                        ) from exc
+                    raw_version = raw_versions[0]
+                    if raw_version.casefold() == "latest":
+                        package_version = "latest"
+                    else:
+                        try:
+                            package_version = int(raw_version)
+                        except ValueError as exc:
+                            raise ValueError(
+                                "package_version must be an integer or latest"
+                            ) from exc
                 self._json(
                     HTTPStatus.OK,
                     self.server.service.resource_details(
@@ -399,7 +492,35 @@ class ManagerRequestHandler(BaseHTTPRequestHandler):
                 return
             thumbnail = _RESOURCE_THUMBNAIL.fullmatch(parsed.path)
             if thumbnail:
-                result = self.server.service.resource_thumbnail(int(thumbnail.group(1)))
+                unexpected_fields = sorted(
+                    set(query) - {"package_version", "token"}
+                )
+                if unexpected_fields:
+                    raise ValueError(
+                        "unsupported resource-thumbnail query field(s): "
+                        + ", ".join(unexpected_fields)
+                    )
+                raw_versions = query.get("package_version", [])
+                package_version: int | str | None = None
+                if raw_versions:
+                    if len(raw_versions) != 1:
+                        raise ValueError(
+                            "package_version must be supplied at most once"
+                        )
+                    raw_version = raw_versions[0]
+                    if raw_version.casefold() == "latest":
+                        package_version = "latest"
+                    else:
+                        try:
+                            package_version = int(raw_version)
+                        except ValueError as exc:
+                            raise ValueError(
+                                "package_version must be an integer or latest"
+                            ) from exc
+                result = self.server.service.resource_thumbnail(
+                    int(thumbnail.group(1)),
+                    package_version=package_version,
+                )
                 if result is None:
                     self._error(HTTPStatus.NOT_FOUND, "thumbnail not found")
                     return
