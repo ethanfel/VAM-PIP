@@ -2,6 +2,7 @@
 
 const PAGE_SIZE = 60;
 const MAX_VARIANT_MATCH_COUNT = 1_000_000;
+const MAX_RENDERED_RESOURCE_VARIANTS = 12;
 const TOKEN_KEY = "vampip-token";
 const WORKSPACE_ACTION_STALL_MS = 5 * 60 * 1000;
 const PERSON_BRIDGE_BUSY_STATES = new Set([
@@ -688,8 +689,7 @@ const app = {
   personEquipmentRequestGeneration: 0,
   personEquipmentRequestController: null,
   equipmentExpandedSlots: new Set(),
-  expandedVariantDrawers: new Set(),
-  variantDrawerDomSequence: 0,
+  resourceDetailOpener: null,
   personHair: null,
   personHairError: null,
   personHairLoading: false,
@@ -866,6 +866,11 @@ function cacheElements() {
     "leases-list",
     "deactivate-button",
     "toast-region",
+    "resource-detail-dialog",
+    "resource-detail-close",
+    "resource-detail-eyebrow",
+    "resource-detail-title",
+    "resource-detail-content",
     "confirm-dialog",
     "dialog-close",
     "confirm-icon",
@@ -927,6 +932,17 @@ function bindEvents() {
   elements.addPinButton.addEventListener("click", promptForPin);
   elements.dialogClose.addEventListener("click", () =>
     elements.confirmDialog.close("cancel"),
+  );
+  elements.resourceDetailClose.addEventListener("click", () =>
+    elements.resourceDetailDialog.close("close"),
+  );
+  elements.resourceDetailDialog.addEventListener(
+    "click",
+    handleResourceDetailBackdrop,
+  );
+  elements.resourceDetailDialog.addEventListener(
+    "close",
+    handleResourceDetailClose,
   );
   elements.autoReconcile.addEventListener("change", updateAutoReconcile);
   elements.loadMore.addEventListener("click", () => loadLibrary({ append: true }));
@@ -1069,7 +1085,7 @@ function bindEvents() {
       !event.metaKey &&
       !event.altKey &&
       !isEditing(event.target) &&
-      !elements.confirmDialog.open &&
+      !anyModalOpen() &&
       app.view !== "access"
     ) {
       event.preventDefault();
@@ -1079,6 +1095,13 @@ function bindEvents() {
       closeMobileTools();
     }
   });
+}
+
+function anyModalOpen() {
+  return Boolean(
+    elements.confirmDialog?.open ||
+      elements.resourceDetailDialog?.open,
+  );
 }
 
 function isEditing(target) {
@@ -1833,6 +1856,9 @@ function setWorkspaceCategory(categoryId) {
     (candidate) => candidate.id === categoryId,
   );
   if (!category || category.id === app.selectedWorkspaceCategoryId) return;
+  if (elements.resourceDetailDialog?.open) {
+    elements.resourceDetailDialog.close("category-change");
+  }
   app.selectedWorkspaceCategoryId = category.id;
   app.items = [];
   app.total = 0;
@@ -3039,6 +3065,7 @@ function normalizeRelatedResourceVariants(item) {
   const legacyClothingStyles = group === "related-clothing-styles";
   const seenIds = new Set();
   return asArray(item?.variants)
+    .slice(0, MAX_RENDERED_RESOURCE_VARIANTS)
     .filter(
       (rawVariant) =>
         rawVariant &&
@@ -3100,6 +3127,9 @@ function browseRelatedResource(model, fallbackQuery = "") {
     return;
   }
 
+  if (elements.resourceDetailDialog?.open) {
+    elements.resourceDetailDialog.close("browse");
+  }
   const category = workspaceCategoryForResourceType(model?.type);
   app.query = query;
   app.packageState = "all";
@@ -3139,20 +3169,6 @@ function browseRelatedClothingStyles(query) {
   );
 }
 
-function resourceVariantDrawerKey(item) {
-  const id = normalizedResourceId(item?.id ?? item?.resource_id);
-  if (id !== null) return `resource:${id}`;
-  const presentation = safePresentationLabel(
-    `${packageRoot(item || {})} ${resourceTitle(item || {})}`,
-    "",
-  )
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, 96);
-  return presentation ? `presentation:${presentation}` : "";
-}
-
 function relatedResourceKindLabel(model) {
   if (model.relationshipKind === "item-style") return "Item style name match";
   if (model.relationshipKind === "preset-variant") {
@@ -3173,8 +3189,8 @@ function relatedResourceStateLabel(model) {
   );
 }
 
-function createRelatedResourceRow(model, ownerSearch) {
-  const row = createElement("article", "resource-variant-row");
+function createRelatedResourceTile(model, ownerSearch) {
+  const row = createElement("article", "resource-variant-tile");
   const visual = createElement("span", "resource-variant-visual");
   const fallback = createElement("span", "resource-variant-fallback");
   fallback.textContent = initials(model.label);
@@ -3186,7 +3202,7 @@ function createRelatedResourceRow(model, ownerSearch) {
     image.loading = "lazy";
     image.decoding = "async";
     image.addEventListener("error", () => image.remove());
-    image.src = model.thumbnail || resourceThumbnailUrl(model.id);
+    image.src = resourceThumbnailUrl(model.id);
     visual.append(image);
   }
 
@@ -3269,93 +3285,300 @@ function createRelatedResourceRow(model, ownerSearch) {
   return row;
 }
 
-function appendResourceVariantDrawer(body, item) {
+function renderResourceDetailVariants(container, item) {
   const variants = normalizeRelatedResourceVariants(item);
   const variantCount = normalizedVariantCount(
     item?.variant_count,
     variants.length,
   );
-  if (!variantCount) return;
-
-  const ownerTitle = safePresentationLabel(
-    resourceTitle(item),
-    "Resource",
-  );
-  const ownerSearch = safePresentationLabel(
-    item?.variant_search,
-    ownerTitle,
-  );
-  const drawerKey = resourceVariantDrawerKey(item);
-  const details = createElement("details", "resource-variant-drawer");
-  app.variantDrawerDomSequence += 1;
-  const panelId = `resource-variants-${(
-    drawerKey || "card"
-  ).replace(/[^a-z0-9_-]+/gi, "-")}-${app.variantDrawerDomSequence}`;
-  const summary = createElement("summary", "resource-variant-summary");
-  summary.setAttribute("aria-controls", panelId);
-  const summaryCopy = createElement("span", "resource-variant-summary-copy");
-  const summaryTitle = createElement("strong");
-  summaryTitle.textContent = "Styles & variants";
-  const summaryReason = createElement("span");
-  summaryReason.textContent = "Name match · Same package/folder";
-  summaryCopy.append(summaryTitle, summaryReason);
-  const count = createElement("span", "resource-variant-count");
+  const section = createElement("section", "resource-detail-variants");
+  section.setAttribute("aria-labelledby", "resource-detail-variants-title");
+  const header = createElement("div", "resource-detail-section-heading");
+  const headingCopy = document.createElement("div");
+  const kicker = createElement("p", "eyebrow");
+  kicker.textContent = "Browse-only name matches";
+  const heading = document.createElement("h3");
+  heading.id = "resource-detail-variants-title";
+  heading.textContent = "Styles & variants";
+  const explanation = document.createElement("p");
+  explanation.textContent =
+    "Matched by package, folder, and name. These are catalogue suggestions, not verified semantic variants.";
+  headingCopy.append(kicker, heading, explanation);
+  const count = createElement("span", "resource-detail-variant-count");
   count.textContent = formatNumber(variantCount);
   count.setAttribute(
     "aria-label",
     `${formatNumber(variantCount)} name ${plural("match", variantCount)}`,
   );
-  summary.append(summaryCopy, count);
+  header.append(headingCopy, count);
+  section.append(header);
 
-  const panel = createElement("div", "resource-variant-panel");
-  panel.id = panelId;
-  const displayedVariants = variants.slice(0, 12);
-  let populated = false;
-  const populate = () => {
-    if (populated) return;
-    populated = true;
-    const rows = createElement("div", "resource-variant-list");
-    for (const variant of displayedVariants) {
-      rows.append(createRelatedResourceRow(variant, ownerSearch));
+  if (!variantCount) {
+    const empty = createElement("div", "resource-detail-variant-empty");
+    const emptyTitle = document.createElement("strong");
+    emptyTitle.textContent = "No name-matched variants";
+    const emptyCopy = document.createElement("p");
+    emptyCopy.textContent =
+      "This resource remains fully usable; VAM-PIP did not find related presets in the same package and folder.";
+    empty.append(emptyTitle, emptyCopy);
+    section.append(empty);
+    container.append(section);
+    return;
+  }
+
+  const ownerTitle = safePresentationLabel(resourceTitle(item), "Resource");
+  const ownerSearch = safePresentationLabel(
+    item?.variant_search,
+    ownerTitle,
+  );
+  const displayedVariants = variants.slice(
+    0,
+    MAX_RENDERED_RESOURCE_VARIANTS,
+  );
+  const gallery = createElement("div", "resource-variant-gallery");
+  for (const variant of displayedVariants) {
+    gallery.append(createRelatedResourceTile(variant, ownerSearch));
+  }
+  if (displayedVariants.length) {
+    section.append(gallery);
+  } else {
+    const unavailable = createElement(
+      "div",
+      "resource-detail-variant-empty",
+    );
+    const unavailableTitle = document.createElement("strong");
+    unavailableTitle.textContent = "Variant details unavailable";
+    const unavailableCopy = document.createElement("p");
+    unavailableCopy.textContent =
+      "The catalogue reports name matches, but none included safe display metadata. Search the owner name to inspect the raw results.";
+    const searchMatches = button(
+      "Search name matches",
+      "secondary-button resource-variant-search-owner",
+    );
+    const ownerType = String(resourceType(item) || "");
+    const browseType = ["clothing female", "clothing male"].includes(
+      ownerType.trim().toLowerCase(),
+    )
+      ? "Clothing Item Presets"
+      : ownerType;
+    searchMatches.addEventListener("click", () =>
+      browseRelatedResource(
+        { browseQuery: ownerSearch, type: browseType },
+        ownerSearch,
+      ),
+    );
+    unavailable.append(
+      unavailableTitle,
+      unavailableCopy,
+      searchMatches,
+    );
+    section.append(unavailable);
+  }
+  if (variantCount > displayedVariants.length) {
+    const footer = createElement("div", "resource-variant-footer");
+    const showing = createElement("span");
+    showing.textContent = `Showing ${formatNumber(
+      displayedVariants.length,
+    )} of ${formatNumber(variantCount)}`;
+    const viewAll = button(
+      "View all name matches",
+      "quiet-button resource-variant-view-all",
+    );
+    viewAll.addEventListener("click", () =>
+      browseRelatedResource(
+        { ...(variants[0] || {}), browseQuery: ownerSearch },
+        ownerSearch,
+      ),
+    );
+    footer.append(showing, viewAll);
+    section.append(footer);
+  }
+  container.append(section);
+}
+
+function appendResourceDetailFact(list, label, value) {
+  const safeValue = safePresentationLabel(value, "");
+  if (!safeValue) return;
+  const term = document.createElement("dt");
+  term.textContent = label;
+  const detail = document.createElement("dd");
+  detail.textContent = safeValue;
+  detail.title = safeValue;
+  list.append(term, detail);
+}
+
+function openResourceDetailDialog(item, opener) {
+  const dialog = elements.resourceDetailDialog;
+  const isNewOpen = !dialog.open;
+  const model = normalizeResourceCardModel(item, { assumeHidden: true });
+  dialog.dataset.resourceId =
+    model.id === null ? "" : String(model.id);
+  app.resourceDetailOpener =
+    opener instanceof HTMLElement ? opener : document.activeElement;
+  elements.resourceDetailEyebrow.textContent = prettyType(model.type);
+  elements.resourceDetailTitle.textContent = model.title;
+
+  const layout = createElement("div", "resource-detail-layout");
+  const overview = createElement("section", "resource-detail-overview");
+  overview.setAttribute("aria-label", "Resource overview");
+  const preview = createElement("div", "resource-detail-preview");
+  const fallback = createElement("span", "resource-detail-preview-fallback");
+  fallback.textContent = initials(model.title);
+  fallback.setAttribute("aria-hidden", "true");
+  preview.append(fallback);
+  const thumbnail =
+    model.id !== null
+      ? resourceThumbnailUrl(model.id)
+      : model.thumbnail;
+  if (thumbnail) {
+    const image = document.createElement("img");
+    image.alt = `Preview of ${model.title}`;
+    image.decoding = "async";
+    image.addEventListener("load", () => image.classList.add("is-loaded"));
+    image.addEventListener("error", () => image.remove());
+    image.src = thumbnail;
+    preview.append(image);
+  }
+  const previewBadges = createElement("div", "resource-detail-preview-badges");
+  previewBadges.append(
+    badge(
+      model.stateLabel,
+      `state-badge ${
+        model.state === "active" || model.state === "local"
+          ? "is-active"
+          : "is-hidden"
+      }`,
+    ),
+  );
+  if (model.favorite) {
+    previewBadges.append(badge("★ Favorite", "type-badge is-favorite"));
+  }
+  preview.append(previewBadges);
+  overview.append(preview);
+
+  const summary = createElement("div", "resource-detail-summary");
+  const subtitle = document.createElement("p");
+  subtitle.textContent = [model.creator, model.packageLabel]
+    .filter(Boolean)
+    .join(" · ");
+  summary.append(subtitle);
+  const metadata = createElement("div", "resource-detail-meta");
+  metadata.append(badge(prettyType(model.type), "meta-pill"));
+  if (model.updateVersion !== null) {
+    metadata.append(
+      badge(
+        `v${model.selectedVersionLabel} → v${model.updateVersion} available`,
+        "meta-pill version-update",
+      ),
+    );
+  } else if (
+    model.selectedVersion !== null ||
+    model.selectedVersionLabel !== "?"
+  ) {
+    metadata.append(badge(`v${model.selectedVersionLabel}`, "meta-pill"));
+  }
+  if (item.atom_type || item.atomType) {
+    metadata.append(
+      badge(
+        safePresentationLabel(item.atom_type || item.atomType, "Atom"),
+        "meta-pill",
+      ),
+    );
+  }
+  summary.append(metadata);
+  if (model.missingDetail) {
+    const missing = createElement("p", "resource-detail-missing");
+    missing.textContent = model.missingDetail;
+    summary.append(missing);
+  }
+
+  const facts = createElement("dl", "resource-detail-facts");
+  appendResourceDetailFact(facts, "Creator", model.creator);
+  appendResourceDetailFact(facts, "Package", model.packageLabel);
+  appendResourceDetailFact(facts, "Resource type", prettyType(model.type));
+  appendResourceDetailFact(
+    facts,
+    "Selected version",
+    model.selectedVersionLabel === "?"
+      ? ""
+      : `v${model.selectedVersionLabel}`,
+  );
+  appendResourceDetailFact(
+    facts,
+    "Package state",
+    model.stateLabel,
+  );
+  summary.append(facts);
+
+  if (model.tags.length) {
+    const tagGroup = createElement("div", "resource-detail-tags");
+    const tagTitle = document.createElement("strong");
+    tagTitle.textContent = "Tags";
+    const tags = document.createElement("div");
+    for (const tag of model.tags.slice(0, 12)) {
+      tags.append(badge(tag, "meta-pill"));
     }
-    panel.append(rows);
-    if (variantCount > displayedVariants.length) {
-      const footer = createElement("div", "resource-variant-footer");
-      const showing = createElement("span");
-      showing.textContent = `Showing ${formatNumber(
-        displayedVariants.length,
-      )} of ${formatNumber(variantCount)}`;
-      const viewAll = button(
-        "View all name matches",
-        "quiet-button resource-variant-view-all",
-      );
-      viewAll.addEventListener("click", () =>
-        browseRelatedResource(
-          { ...(variants[0] || {}), browseQuery: ownerSearch },
-          ownerSearch,
+    if (model.tags.length > 12) {
+      tags.append(
+        badge(
+          `+${formatNumber(model.tags.length - 12)} more`,
+          "meta-pill",
         ),
       );
-      footer.append(showing, viewAll);
-      panel.append(footer);
     }
-  };
+    tagGroup.append(tagTitle, tags);
+    summary.append(tagGroup);
+  }
 
-  details.addEventListener("toggle", () => {
-    summary.setAttribute("aria-expanded", String(details.open));
-    if (drawerKey) {
-      if (details.open) app.expandedVariantDrawers.add(drawerKey);
-      else app.expandedVariantDrawers.delete(drawerKey);
-    }
-    if (details.open) populate();
-  });
-  const expanded = Boolean(
-    drawerKey && app.expandedVariantDrawers.has(drawerKey),
+  const actions = createElement(
+    "div",
+    "resource-detail-actions card-actions",
   );
-  details.open = expanded;
-  summary.setAttribute("aria-expanded", String(expanded));
-  if (expanded) populate();
-  details.append(summary, panel);
-  body.append(details);
+  appendResourceActions(actions, item, model);
+  if (actions.children.length) summary.append(actions);
+  overview.append(summary);
+  layout.append(overview);
+  renderResourceDetailVariants(layout, item);
+  elements.resourceDetailContent.replaceChildren(layout);
+
+  if (isNewOpen) {
+    dialog.returnValue = "";
+    dialog.showModal();
+  }
+  document.body.classList.add("resource-detail-open");
+  if (isNewOpen) {
+    window.setTimeout(() => elements.resourceDetailClose.focus(), 0);
+  }
+}
+
+function handleResourceDetailBackdrop(event) {
+  if (
+    event.target === elements.resourceDetailDialog &&
+    elements.resourceDetailDialog.open
+  ) {
+    elements.resourceDetailDialog.close("backdrop");
+  }
+}
+
+function handleResourceDetailClose() {
+  document.body.classList.remove("resource-detail-open");
+  elements.resourceDetailContent.replaceChildren();
+  const opener = app.resourceDetailOpener;
+  app.resourceDetailOpener = null;
+  delete elements.resourceDetailDialog.dataset.resourceId;
+  const suppressRestore = [
+    "browse",
+    "category-change",
+    "library-render",
+    "view-change",
+  ].includes(elements.resourceDetailDialog.returnValue);
+  if (
+    !suppressRestore &&
+    opener instanceof HTMLElement &&
+    opener.isConnected
+  ) {
+    opener.focus({ preventScroll: true });
+  }
 }
 
 function normalizedVariantCount(value, loadedCount) {
@@ -5358,6 +5581,12 @@ function normalizeFacetTypes(facets) {
 }
 
 function renderLibrary() {
+  const detailWasOpen = Boolean(elements.resourceDetailDialog?.open);
+  const detailResourceId = detailWasOpen
+    ? normalizedResourceId(
+        Number(elements.resourceDetailDialog.dataset.resourceId),
+      )
+    : null;
   elements.loadingState.hidden = true;
   elements.cardGrid.replaceChildren();
   elements.cardGrid.hidden = app.items.length === 0;
@@ -5373,6 +5602,37 @@ function renderLibrary() {
       );
     }
     elements.cardGrid.append(fragment);
+  }
+
+  if (detailWasOpen) {
+    const refreshedItem =
+      detailResourceId === null
+        ? null
+        : app.items.find(
+            (item) =>
+              normalizedResourceId(item?.id ?? item?.resource_id) ===
+              detailResourceId,
+          );
+    const refreshedOpener =
+      detailResourceId === null
+        ? null
+        : Array.from(
+            elements.cardGrid.querySelectorAll(
+              ".resource-card-preview-button[data-resource-id]",
+            ),
+          ).find(
+            (candidate) =>
+              Number(candidate.dataset.resourceId) === detailResourceId,
+          );
+    if (refreshedItem && refreshedOpener && app.view !== "packages") {
+      openResourceDetailDialog(refreshedItem, refreshedOpener);
+    } else {
+      elements.resourceDetailDialog.close("library-render");
+      window.setTimeout(
+        () => elements.searchInput.focus({ preventScroll: true }),
+        0,
+      );
+    }
   }
 
   const noun =
@@ -5454,13 +5714,30 @@ function createResourceCard(item) {
   const state = model.state;
   const pinned = isPinned(root);
 
-  const preview = createElement("div", "card-preview");
+  const preview = createElement(
+    "button",
+    "card-preview resource-card-preview-button",
+  );
+  preview.type = "button";
+  preview.setAttribute("aria-label", `Open details for ${title}`);
+  preview.setAttribute("aria-haspopup", "dialog");
+  preview.setAttribute("aria-controls", "resource-detail-dialog");
+  if (model.id !== null) {
+    preview.dataset.resourceId = String(model.id);
+  }
+  preview.title = `Preview ${title}`;
+  preview.addEventListener("click", () =>
+    openResourceDetailDialog(item, preview),
+  );
   const fallback = createElement("span", "preview-fallback");
   fallback.setAttribute("aria-hidden", "true");
   fallback.textContent = initials(title);
   preview.append(fallback);
 
-  const thumbnail = model.thumbnail;
+  const thumbnail =
+    model.id !== null
+      ? resourceThumbnailUrl(model.id)
+      : model.thumbnail;
   if (thumbnail) {
     const image = document.createElement("img");
     image.alt = "";
@@ -5472,7 +5749,7 @@ function createResourceCard(item) {
     preview.append(image);
   }
 
-  const badges = createElement("div", "card-badges");
+  const badges = createElement("span", "card-badges");
   badges.append(badge(prettyType(model.type), "type-badge"));
   const stateLabel = model.stateLabel;
   badges.append(
@@ -5494,6 +5771,9 @@ function createResourceCard(item) {
     );
   }
   preview.append(badges);
+  const openHint = createElement("span", "resource-card-open-hint");
+  openHint.textContent = "Preview & details";
+  preview.append(openHint);
 
   const body = createElement("div", "card-body");
   const heading = createElement("h3", "card-title");
@@ -5540,9 +5820,25 @@ function createResourceCard(item) {
     metadata.append(badge(fileExtension(item.resource_path || item.path), "meta-pill"));
   }
   body.append(metadata);
-  appendResourceVariantDrawer(body, item);
 
   const actions = createElement("div", "card-actions");
+  appendResourceActions(actions, item, model);
+  if (actions.children.length) body.append(actions);
+
+  card.append(preview, body);
+  return card;
+}
+
+function appendResourceActions(
+  actions,
+  item,
+  model = normalizeResourceCardModel(item, { assumeHidden: true }),
+) {
+  const title = model.title;
+  const root = model.packageRef;
+  const active = model.active;
+  const state = model.state;
+  const pinned = isPinned(root);
   const workspaceCategory =
     app.view === "workspace" ? currentWorkspaceCategory() : null;
   if (
@@ -5582,9 +5878,7 @@ function createResourceCard(item) {
         includeUpdate: !workspaceCategory.liveAction,
       });
     }
-    body.append(actions);
-    card.append(preview, body);
-    return card;
+    return;
   }
   if (workspaceCategory && workspaceCategory.liveAction) {
     const availability = workspaceApplyAvailability(item, workspaceCategory);
@@ -5609,9 +5903,7 @@ function createResourceCard(item) {
           packageVersion,
         ),
     });
-    body.append(actions);
-    card.append(preview, body);
-    return card;
+    return;
   }
 
   appendPackageAccessActions(actions, item, {
@@ -5621,10 +5913,6 @@ function createResourceCard(item) {
     title,
     pinned,
   });
-  body.append(actions);
-
-  card.append(preview, body);
-  return card;
 }
 
 function appendPackageAccessActions(
@@ -7392,6 +7680,9 @@ function setView(view) {
     app.view === view
   ) {
     return;
+  }
+  if (elements.resourceDetailDialog?.open) {
+    elements.resourceDetailDialog.close("view-change");
   }
   app.view = view;
 

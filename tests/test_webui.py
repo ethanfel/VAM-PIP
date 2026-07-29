@@ -1113,7 +1113,9 @@ class WorkspaceWebUITests(unittest.TestCase):
         self.assertIn("requestBody.package_version = packageVersion", action)
         self.assertIn("revision: availability.revision", action)
 
-    def test_name_matched_variant_drawer_is_lazy_and_browse_only(self) -> None:
+    def test_resource_detail_overlay_is_centered_and_variants_are_browse_only(
+        self,
+    ) -> None:
         start = self.javascript.index("function normalizedResourceState(")
         end = self.javascript.index("function clothingCategoryForItem(", start)
         block = self.javascript[start:end]
@@ -1134,17 +1136,50 @@ class WorkspaceWebUITests(unittest.TestCase):
         ):
             with self.subTest(field=field):
                 self.assertIn(field, block)
-        self.assertIn('createElement("details", "resource-variant-drawer")', block)
-        self.assertIn('createElement("summary", "resource-variant-summary")', block)
+        self.assertIn('id="resource-detail-dialog"', self.html)
+        self.assertIn('id="resource-detail-content"', self.html)
+        self.assertIn('aria-labelledby="resource-detail-title"', self.html)
+        self.assertIn("function openResourceDetailDialog(item, opener)", block)
+        self.assertIn("const isNewOpen = !dialog.open", block)
+        self.assertIn("dialog.showModal()", block)
+        self.assertIn(
+            "if (isNewOpen) {\n"
+            "    window.setTimeout(() => elements.resourceDetailClose.focus(), 0);",
+            block,
+        )
+        self.assertIn(
+            'elements.resourceDetailDialog.close("backdrop")',
+            block,
+        )
+        self.assertIn(
+            'elements.resourceDetailDialog.close("browse")',
+            block,
+        )
+        self.assertIn("app.resourceDetailOpener", block)
+        self.assertIn('createElement("div", "resource-detail-preview")', block)
+        self.assertIn('createElement("dl", "resource-detail-facts")', block)
+        self.assertIn("appendResourceActions(actions, item, model)", block)
+        self.assertIn("renderResourceDetailVariants(layout, item)", block)
+        self.assertIn(
+            'createElement("div", "resource-variant-gallery")',
+            block,
+        )
+        self.assertIn(
+            'createElement("article", "resource-variant-tile")',
+            block,
+        )
         self.assertIn('"Styles & variants"', block)
-        self.assertIn('"Name match · Same package/folder"', block)
+        self.assertIn('"Browse-only name matches"', block)
+        self.assertIn(
+            '"Matched by package, folder, and name. These are catalogue suggestions, not verified semantic variants."',
+            block,
+        )
         self.assertIn('"Same package/folder/name match; not semantic identity"', block)
-        self.assertIn('details.addEventListener("toggle"', block)
-        self.assertIn("app.expandedVariantDrawers.add(drawerKey)", block)
-        self.assertIn("app.expandedVariantDrawers.delete(drawerKey)", block)
-        self.assertIn("if (details.open) populate();", block)
-        self.assertIn("if (expanded) populate();", block)
         self.assertIn("resourceThumbnailUrl(model.id)", block)
+        self.assertIn(
+            ".slice(0, MAX_RENDERED_RESOURCE_VARIANTS)",
+            block,
+        )
         self.assertIn("const seenIds = new Set();", block)
         self.assertIn("if (seenIds.has(model.id)) return null;", block)
         self.assertIn(
@@ -1183,6 +1218,13 @@ class WorkspaceWebUITests(unittest.TestCase):
             block,
         )
         self.assertNotIn('"Applied"', block)
+        tile_start = self.javascript.index(
+            "function createRelatedResourceTile("
+        )
+        tile_end = self.javascript.index(
+            "function renderResourceDetailVariants(", tile_start
+        )
+        tile = self.javascript[tile_start:tile_end]
         for forbidden in (
             '"/api/vam',
             "setPersonClothing(",
@@ -1191,31 +1233,84 @@ class WorkspaceWebUITests(unittest.TestCase):
             "addPin(",
         ):
             with self.subTest(forbidden=forbidden):
-                self.assertNotIn(forbidden, block)
-        self.assertIn("appendResourceVariantDrawer(body, item)", self.javascript)
+                self.assertNotIn(forbidden, tile)
+        self.assertNotIn("appendResourceVariantDrawer(", self.javascript)
+        self.assertNotIn("resource-variant-drawer", self.styles)
         for selector in (
-            ".resource-variant-drawer",
-            ".resource-variant-summary",
-            ".resource-variant-row",
+            ".resource-detail-dialog",
+            ".resource-detail-layout",
+            ".resource-detail-preview",
+            ".resource-detail-facts",
+            ".resource-variant-gallery",
+            ".resource-variant-tile",
             ".resource-variant-visual",
             ".resource-variant-browse",
         ):
             with self.subTest(selector=selector):
                 self.assertIn(selector, self.styles)
-        summary_start = self.styles.index(".resource-variant-summary {")
-        summary_end = self.styles.index(
-            ".resource-variant-summary::-webkit-details-marker",
-            summary_start,
+        dialog_start = self.styles.index(".resource-detail-dialog {")
+        dialog_end = self.styles.index(
+            ".resource-detail-dialog::backdrop", dialog_start
         )
-        self.assertIn("min-height: 44px", self.styles[summary_start:summary_end])
-        browse_start = self.styles.index(".resource-variant-browse {")
-        browse_end = self.styles.index(
-            ".resource-variant-footer {",
-            browse_start,
+        dialog = self.styles[dialog_start:dialog_end]
+        self.assertIn("width: min(1680px, 88vw)", dialog)
+        self.assertIn("height: min(900px, 88dvh)", dialog)
+        self.assertIn("@media (max-width: 900px)", self.styles)
+        self.assertIn("@media (max-width: 600px)", self.styles)
+        self.assertIn("@media (max-width: 360px)", self.styles)
+        self.assertIn("width: 100vw", self.styles)
+        self.assertIn("body.resource-detail-open", self.styles)
+        render_start = self.javascript.index("function renderLibrary()")
+        render_end = self.javascript.index(
+            "function showLoadingState()", render_start
         )
-        browse = self.styles[browse_start:browse_end]
-        self.assertIn("min-height: 40px", browse)
-        self.assertIn("grid-column: 1 / -1", browse)
+        render = self.javascript[render_start:render_end]
+        self.assertIn("const detailResourceId = detailWasOpen", render)
+        self.assertIn("app.items.find(", render)
+        self.assertIn(
+            "openResourceDetailDialog(refreshedItem, refreshedOpener)",
+            render,
+        )
+        self.assertIn(
+            'elements.resourceDetailDialog.close("library-render")',
+            render,
+        )
+        self.assertIn(
+            "elements.searchInput.focus({ preventScroll: true })",
+            render,
+        )
+
+    def test_compact_resource_card_opens_details_with_an_explicit_button(
+        self,
+    ) -> None:
+        start = self.javascript.index("function createResourceCard(")
+        end = self.javascript.index("function appendResourceActions(", start)
+        card = self.javascript[start:end]
+        self.assertIn(
+            '"button",\n    "card-preview resource-card-preview-button"',
+            card,
+        )
+        self.assertIn(
+            'preview.setAttribute("aria-label", `Open details for ${title}`)',
+            card,
+        )
+        self.assertIn(
+            'preview.setAttribute("aria-haspopup", "dialog")',
+            card,
+        )
+        self.assertIn(
+            'preview.setAttribute("aria-controls", "resource-detail-dialog")',
+            card,
+        )
+        self.assertIn("openResourceDetailDialog(item, preview)", card)
+        self.assertIn('"Preview & details"', card)
+        self.assertNotIn("appendResourceVariantDrawer(", card)
+
+    def test_slash_shortcut_is_blocked_by_either_modal(self) -> None:
+        self.assertIn("function anyModalOpen()", self.javascript)
+        self.assertIn("elements.confirmDialog?.open", self.javascript)
+        self.assertIn("elements.resourceDetailDialog?.open", self.javascript)
+        self.assertIn("!anyModalOpen()", self.javascript)
 
     def test_generic_card_model_does_not_dedupe_top_level_results(self) -> None:
         model_start = self.javascript.index("function normalizeResourceCardModel(")
@@ -1345,6 +1440,7 @@ class WorkspaceWebUITests(unittest.TestCase):
         script = (
             '"use strict";\n'
             "const MAX_VARIANT_MATCH_COUNT = 1_000_000;\n"
+            "const MAX_RENDERED_RESOURCE_VARIANTS = 12;\n"
             "function ensureWorkspaceCategories() {"
             ' return [{ id: "hair", resourceTypes: ["Preset Hair"] }];'
             " }\n"
@@ -1552,8 +1648,8 @@ process.stdout.write(JSON.stringify(output));
         self.assertIn('aria-hidden="true"', self.html)
 
     def test_static_assets_use_the_current_cache_version(self) -> None:
-        self.assertIn("/styles.css?v=0.9.0", self.html)
-        self.assertIn("/app.js?v=0.9.0", self.html)
+        self.assertIn("/styles.css?v=0.10.0", self.html)
+        self.assertIn("/app.js?v=0.10.0", self.html)
 
 
 if __name__ == "__main__":

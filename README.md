@@ -21,7 +21,7 @@ leaving managed mode restores that baseline.
 
 ## Current status
 
-Version 0.9.0 is functional but should still be treated as an early release.
+Version 0.10.0 is functional but should still be treated as an early release.
 Package switching is deliberately conservative:
 
 - entering managed mode requires explicit confirmation;
@@ -246,21 +246,23 @@ incompatible wear requests, and locked changes. If bounded publication is
 truncated, the workspace treats an unpublished item's state as unknown and
 disables its action.
 
-Resource cards can also show a bounded **Name-matched styles & variants**
-drawer. The first release covers clothing items with same-package `Clothing
-Item Presets`, plus same-type `Preset Hair`, `Preset Clothing`, and `Clothing
-Item Presets` families. A relationship requires the exact creator, package,
-case-sensitive folder, overlapping declared versions, and an actual base
-filename followed by a clear separator. Same-type families require that
-separator and an exact atom type. Clothing-to-item-preset matching
-deliberately also accepts an exact stem and ignores atom type because the
-different resource types establish the roles while BrowserAssist normally
-leaves the preset atom type empty. The longest matching base owns each option.
-Numeric IDs and case-insensitive logical paths are deduplicated before the
-card reports its full option count and returns at most twelve rows. These are
-explicitly filename-based browsing hints, not semantic or action identities.
-Child rows show their own version and package state, but are browse-only until
-VAM-PIP can resolve a safe target-specific action.
+Selecting a resource card preview opens a centered inspector with a larger
+preview, package and version details, the same owner actions as the compact
+card, and a bounded **Styles & variants** gallery. The first release covers
+clothing items with same-package `Clothing Item Presets`, plus same-type
+`Preset Hair`, `Preset Clothing`, and `Clothing Item Presets` families. A
+relationship requires the exact creator, package, case-sensitive folder,
+overlapping declared versions, and an actual base filename followed by a clear
+separator. Same-type families require that separator and an exact atom type.
+Clothing-to-item-preset matching deliberately also accepts an exact stem and
+ignores atom type because the different resource types establish the roles
+while BrowserAssist normally leaves the preset atom type empty. The longest
+matching base owns each option. Numeric IDs and case-insensitive logical paths
+are deduplicated before the inspector reports the full option count and
+returns at most twelve previews. These are explicitly filename-based browsing
+hints, not semantic or action identities. Child tiles show their own version
+and package state, but remain browse-only until VAM-PIP can resolve a safe
+target-specific action.
 
 Raw plugins remain browseable but action-disabled. They execute code, and the
 BrowserAssist catalogue mixes entry scripts with helper source files. Trusted

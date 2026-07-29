@@ -6,8 +6,8 @@
     <meta name="color-scheme" content="dark">
     <meta name="theme-color" content="#111316">
     <title>VAM-PIP Manager</title>
-    <link rel="stylesheet" href="/styles.css?v=0.9.0">
-    <script src="/app.js?v=0.9.0" defer></script>
+    <link rel="stylesheet" href="/styles.css?v=0.10.0">
+    <script src="/app.js?v=0.10.0" defer></script>
   </head>
   <body>
     <a class="skip-link" href="#main-content">Skip to library</a>
@@ -627,6 +627,19 @@
     </div>
 
     <div class="toast-region" id="toast-region" aria-live="polite" aria-atomic="true"></div>
+
+    <dialog class="resource-detail-dialog" id="resource-detail-dialog" aria-labelledby="resource-detail-title">
+      <div class="resource-detail-shell">
+        <header class="resource-detail-header">
+          <div>
+            <p class="eyebrow" id="resource-detail-eyebrow">Resource details</p>
+            <h2 id="resource-detail-title">Resource details</h2>
+          </div>
+          <button class="resource-detail-close" id="resource-detail-close" aria-label="Close resource details" type="button">×</button>
+        </header>
+        <div class="resource-detail-content" id="resource-detail-content"></div>
+      </div>
+    </dialog>
 
     <dialog class="dialog" id="confirm-dialog" aria-labelledby="confirm-title">
       <form method="dialog">
