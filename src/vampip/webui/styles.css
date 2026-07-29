@@ -2474,10 +2474,60 @@ button svg,
   line-height: 1.5;
 }
 
-.load-more-row {
+.library-pagination {
   display: flex;
+  min-height: 74px;
+  align-items: center;
   justify-content: center;
-  padding: 23px 0;
+  gap: 10px;
+  padding: 18px 0 4px;
+}
+
+.library-page-button {
+  display: grid;
+  width: 42px;
+  height: 42px;
+  padding: 0;
+  place-items: center;
+  color: var(--text-soft);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 13px;
+  transition:
+    color 120ms ease,
+    background 120ms ease,
+    border-color 120ms ease,
+    transform 120ms ease;
+}
+
+.library-page-button:hover:not(:disabled) {
+  color: var(--text);
+  background: var(--surface-raised);
+  border-color: #3a424d;
+  transform: translateY(-1px);
+}
+
+.library-page-button svg {
+  width: 19px;
+  height: 19px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.8;
+}
+
+.library-page-status {
+  min-width: 118px;
+  padding: 9px 14px;
+  color: var(--text-soft);
+  background: var(--surface-soft);
+  border: 1px solid var(--border-soft);
+  border-radius: 999px;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+  text-align: center;
 }
 
 #access-view {

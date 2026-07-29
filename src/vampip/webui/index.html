@@ -6,8 +6,8 @@
     <meta name="color-scheme" content="dark">
     <meta name="theme-color" content="#111316">
     <title>VAM-PIP Manager</title>
-    <link rel="stylesheet" href="/styles.css?v=0.11.0">
-    <script src="/app.js?v=0.11.0" defer></script>
+    <link rel="stylesheet" href="/styles.css?v=0.11.1">
+    <script src="/app.js?v=0.11.1" defer></script>
   </head>
   <body>
     <a class="skip-link" href="#main-content">Skip to library</a>
@@ -581,9 +581,43 @@
           </div>
 
           <div id="card-grid" class="card-grid" hidden></div>
-          <div class="load-more-row">
-            <button class="secondary-button" id="load-more" type="button" hidden>Load more</button>
-          </div>
+          <nav
+            class="library-pagination"
+            id="library-pagination"
+            aria-label="Library pages"
+            hidden
+          >
+            <button
+              class="library-page-button"
+              id="page-previous"
+              type="button"
+              aria-label="Previous page"
+              aria-controls="card-grid"
+              title="Previous page"
+            >
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="m14.5 6-6 6 6 6"></path>
+              </svg>
+            </button>
+            <span
+              class="library-page-status"
+              id="page-status"
+              role="status"
+              aria-live="polite"
+            >Page 1 of 1</span>
+            <button
+              class="library-page-button"
+              id="page-next"
+              type="button"
+              aria-label="Next page"
+              aria-controls="card-grid"
+              title="Next page"
+            >
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="m9.5 6 6 6-6 6"></path>
+              </svg>
+            </button>
+          </nav>
         </section>
 
         <section id="timeline-view" class="timeline-view" hidden aria-labelledby="timeline-title">

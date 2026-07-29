@@ -1,6 +1,6 @@
 "use strict";
 
-const PAGE_SIZE = 60;
+const PAGE_SIZE = 24;
 const MAX_VARIANT_MATCH_COUNT = 1_000_000;
 const MAX_RENDERED_RESOURCE_VARIANTS = 12;
 const MAX_TIMELINE_TRACKS = 80;
@@ -663,6 +663,7 @@ const app = {
   items: [],
   total: 0,
   offset: 0,
+  page: 1,
   query: "",
   type: "",
   packageState: "all",
@@ -918,7 +919,10 @@ function cacheElements() {
     "empty-message",
     "empty-action",
     "card-grid",
-    "load-more",
+    "library-pagination",
+    "page-previous",
+    "page-status",
+    "page-next",
     "add-pin-button",
     "pins-count",
     "leases-count",
@@ -1111,7 +1115,12 @@ function bindEvents() {
     if (app.view === "timeline") drawTimelineCanvas();
   });
   elements.autoReconcile.addEventListener("change", updateAutoReconcile);
-  elements.loadMore.addEventListener("click", () => loadLibrary({ append: true }));
+  elements.pagePrevious.addEventListener("click", () =>
+    changeLibraryPage(app.page - 1),
+  );
+  elements.pageNext.addEventListener("click", () =>
+    changeLibraryPage(app.page + 1),
+  );
   elements.clearFilters.addEventListener("click", clearFilters);
   elements.emptyAction.addEventListener("click", handleEmptyAction);
   elements.personTarget.addEventListener("change", () => {
@@ -1122,7 +1131,7 @@ function bindEvents() {
     renderPersonContext();
     if (app.view === "workspace") {
       if (isIndividualClothingCategory()) {
-        loadLibrary({ preserveCount: true });
+        loadLibrary({ preservePage: true });
       } else {
         renderLibrary();
       }
@@ -1554,7 +1563,7 @@ async function refreshAll(options = {}) {
     });
 
     if (["resources", "workspace", "packages"].includes(app.view)) {
-      await loadLibrary({ preserveCount: true });
+      await loadLibrary({ preservePage: true });
     }
   } catch (error) {
     setConnection("error", "Unavailable");
@@ -4633,7 +4642,7 @@ async function loadPersons({ quiet = false } = {}) {
       renderAtomContext();
       if (app.view === "workspace" && previousKey !== personControlKey()) {
         if (isIndividualClothingCategory()) {
-          await loadLibrary({ preserveCount: true });
+          await loadLibrary({ preservePage: true });
         } else {
           renderLibrary();
         }
@@ -7128,7 +7137,56 @@ async function loadStatus() {
   setConnection("online", "Local manager");
 }
 
-async function loadLibrary({ append = false, preserveCount = false } = {}) {
+function libraryPaginationState(total, page) {
+  const normalizedTotal = Math.max(0, Math.trunc(numberOr(total, 0)));
+  const pageCount = Math.max(1, Math.ceil(normalizedTotal / PAGE_SIZE));
+  const normalizedPage = Math.min(
+    pageCount,
+    Math.max(1, Math.trunc(numberOr(page, 1))),
+  );
+  return {
+    total: normalizedTotal,
+    page: normalizedPage,
+    pageCount,
+    offset: (normalizedPage - 1) * PAGE_SIZE,
+    hasPrevious: normalizedPage > 1,
+    hasNext: normalizedPage < pageCount,
+  };
+}
+
+function libraryPageCount(total = app.total) {
+  return libraryPaginationState(total, 1).pageCount;
+}
+
+function changeLibraryPage(page) {
+  if (
+    app.loading ||
+    !["resources", "workspace", "packages"].includes(app.view)
+  ) {
+    return;
+  }
+  const nextPage = libraryPaginationState(app.total, page).page;
+  if (nextPage === app.page) return;
+  loadLibrary({ page: nextPage, scrollToResults: true });
+}
+
+function scrollLibraryToStart() {
+  const reduceMotion = Boolean(
+    window.matchMedia?.("(prefers-reduced-motion: reduce)").matches,
+  );
+  window.requestAnimationFrame(() => {
+    elements.resultCount.scrollIntoView({
+      behavior: reduceMotion ? "auto" : "smooth",
+      block: "start",
+    });
+  });
+}
+
+async function loadLibrary({
+  page = null,
+  preservePage = false,
+  scrollToResults = false,
+} = {}) {
   if (app.view === "access") return;
 
   if (app.requestController) {
@@ -7138,22 +7196,17 @@ async function loadLibrary({ append = false, preserveCount = false } = {}) {
   app.requestController = controller;
   app.loading = true;
 
-  const offset = append ? app.items.length : 0;
-  const limit =
-    !append && preserveCount
-      ? Math.min(Math.max(PAGE_SIZE, app.items.length), 500)
-      : PAGE_SIZE;
-  if (!append) {
-    app.items = [];
-    app.offset = 0;
-    showLoadingState();
-  } else {
-    elements.loadMore.disabled = true;
-    elements.loadMore.textContent = "Loading…";
-  }
+  const requestedPage =
+    page === null ? (preservePage ? app.page : 1) : numberOr(page, 1);
+  let resolvedPage = Math.max(1, Math.trunc(requestedPage));
+  let offset = (resolvedPage - 1) * PAGE_SIZE;
+  app.page = resolvedPage;
+  app.offset = offset;
+  app.items = [];
+  showLoadingState();
 
   const params = new URLSearchParams({
-    limit: String(limit),
+    limit: String(PAGE_SIZE),
     offset: String(offset),
   });
   if (app.query) params.set("q", app.query);
@@ -7181,14 +7234,39 @@ async function loadLibrary({ append = false, preserveCount = false } = {}) {
   try {
     const endpoint =
       app.view === "packages" ? "/api/packages" : "/api/resources";
-    const result = await api(`${endpoint}?${params.toString()}`, {
+    let result = await api(`${endpoint}?${params.toString()}`, {
       signal: controller.signal,
     });
-    const incoming = Array.isArray(result) ? result : result.items || [];
-    app.items = append ? app.items.concat(incoming) : incoming;
-    app.total = numberOr(result.total, app.items.length);
+    let incoming = Array.isArray(result) ? result : result.items || [];
+    let total = Math.max(
+      0,
+      Math.trunc(numberOr(result.total, incoming.length)),
+    );
+    const lastPage = libraryPageCount(total);
+
+    if (total > 0 && resolvedPage > lastPage) {
+      resolvedPage = lastPage;
+      offset = (resolvedPage - 1) * PAGE_SIZE;
+      params.set("offset", String(offset));
+      result = await api(`${endpoint}?${params.toString()}`, {
+        signal: controller.signal,
+      });
+      incoming = Array.isArray(result) ? result : result.items || [];
+      total = Math.max(
+        0,
+        Math.trunc(numberOr(result.total, incoming.length)),
+      );
+    } else if (total === 0) {
+      resolvedPage = 1;
+      offset = 0;
+    }
+
+    app.items = incoming;
+    app.total = total;
+    app.page = resolvedPage;
     app.offset = offset;
     renderLibrary();
+    if (scrollToResults) scrollLibraryToStart();
   } catch (error) {
     if (error.name !== "AbortError") {
       showErrorState(error);
@@ -7197,8 +7275,7 @@ async function loadLibrary({ append = false, preserveCount = false } = {}) {
     if (app.requestController === controller) {
       app.loading = false;
       app.requestController = null;
-      elements.loadMore.disabled = false;
-      elements.loadMore.textContent = "Load more";
+      renderLibraryPagination();
     }
   }
 }
@@ -7432,6 +7509,17 @@ function normalizeFacetTypes(facets) {
     .sort((a, b) => a.value.localeCompare(b.value, undefined, { sensitivity: "base" }));
 }
 
+function renderLibraryPagination() {
+  const pagination = libraryPaginationState(app.total, app.page);
+  const hasPages = app.total > PAGE_SIZE && app.items.length > 0;
+  elements.libraryPagination.hidden = !hasPages;
+  elements.pageStatus.textContent = `Page ${formatNumber(app.page)} of ${formatNumber(
+    pagination.pageCount,
+  )}`;
+  elements.pagePrevious.disabled = app.loading || !pagination.hasPrevious;
+  elements.pageNext.disabled = app.loading || !pagination.hasNext;
+}
+
 function renderLibrary() {
   const detailWasOpen = Boolean(elements.resourceDetailDialog?.open);
   const detailResourceId = detailWasOpen
@@ -7494,14 +7582,15 @@ function renderLibrary() {
         ? "resource"
         : "package";
   const shown = app.items.length;
+  const rangeStart = shown > 0 ? app.offset + 1 : 0;
+  const rangeEnd = shown > 0 ? Math.min(app.total, app.offset + shown) : 0;
   elements.resultCount.textContent =
-    app.total === shown
+    app.offset === 0 && app.total === shown
       ? `${formatNumber(app.total)} ${plural(noun, app.total)}`
-      : `Showing ${formatNumber(shown)} of ${formatNumber(app.total)} ${plural(
-          noun,
-          app.total,
-        )}`;
-  elements.loadMore.hidden = shown >= app.total || shown === 0;
+      : `Showing ${formatNumber(rangeStart)}–${formatNumber(
+          rangeEnd,
+        )} of ${formatNumber(app.total)} ${plural(noun, app.total)}`;
+  renderLibraryPagination();
   updateClearFilters();
 }
 
@@ -7510,7 +7599,9 @@ function showLoadingState() {
   elements.loadingState.setAttribute("aria-busy", "true");
   elements.cardGrid.hidden = true;
   elements.emptyState.hidden = true;
-  elements.loadMore.hidden = true;
+  elements.libraryPagination.hidden = true;
+  elements.pagePrevious.disabled = true;
+  elements.pageNext.disabled = true;
   elements.resultCount.textContent =
     app.view === "workspace"
       ? `Loading ${currentWorkspaceCategory()?.label.toLowerCase() || "assets"}…`
@@ -7528,7 +7619,9 @@ function showErrorState(error) {
   elements.emptyAction.textContent = "Try again";
   elements.emptyAction.dataset.action = "retry";
   elements.resultCount.textContent = "Could not load library";
-  elements.loadMore.hidden = true;
+  elements.libraryPagination.hidden = true;
+  elements.pagePrevious.disabled = true;
+  elements.pageNext.disabled = true;
 }
 
 function renderEmptyLibrary() {
@@ -8070,7 +8163,7 @@ async function setPersonClothing(
     );
     if (/revision|stale/i.test(errorMessage(error))) {
       await loadPersons({ quiet: true });
-      await loadLibrary({ preserveCount: true });
+      await loadLibrary({ preservePage: true });
     }
   } finally {
     app.clothingMutationInFlight = false;

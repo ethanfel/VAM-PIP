@@ -25,6 +25,102 @@ class WorkspaceWebUITests(unittest.TestCase):
         self.assertIn('id="asset-category-list"', self.html)
         self.assertIn("scenes, atoms, plugins, clothing, and Person presets", self.html)
 
+    def test_library_uses_bounded_carousel_pages(self) -> None:
+        for control_id in (
+            "library-pagination",
+            "page-previous",
+            "page-status",
+            "page-next",
+        ):
+            with self.subTest(control_id=control_id):
+                self.assertIn(f'id="{control_id}"', self.html)
+        self.assertNotIn('id="load-more"', self.html)
+        self.assertNotIn(">Load more<", self.html)
+        self.assertIn(".library-pagination", self.styles)
+        self.assertIn(".library-page-button", self.styles)
+
+        self.assertIn("const PAGE_SIZE = 24;", self.javascript)
+        self.assertIn("page: 1,", self.javascript)
+        self.assertIn("function changeLibraryPage(page)", self.javascript)
+        self.assertIn(
+            "loadLibrary({ page: nextPage, scrollToResults: true })",
+            self.javascript,
+        )
+        self.assertIn("offset = (resolvedPage - 1) * PAGE_SIZE;", self.javascript)
+        self.assertIn('params.set("offset", String(offset));', self.javascript)
+        self.assertIn("app.items = incoming;", self.javascript)
+        self.assertNotIn("app.items.concat(incoming)", self.javascript)
+        self.assertIn("resolvedPage > lastPage", self.javascript)
+        self.assertIn("renderLibraryPagination();", self.javascript)
+        self.assertIn(
+            "Page ${formatNumber(app.page)} of ${formatNumber(",
+            self.javascript,
+        )
+        self.assertIn("!pagination.hasPrevious", self.javascript)
+        self.assertIn("!pagination.hasNext", self.javascript)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is not installed")
+    def test_library_pagination_state_clamps_boundaries(self) -> None:
+        pagination_start = self.javascript.index(
+            "function libraryPaginationState("
+        )
+        pagination_end = self.javascript.index(
+            "function libraryPageCount(", pagination_start
+        )
+        number_start = self.javascript.index("function numberOr(")
+        number_end = self.javascript.index("function formatNumber(", number_start)
+        script = (
+            '"use strict";\n'
+            "const PAGE_SIZE = 24;\n"
+            f"{self.javascript[pagination_start:pagination_end]}\n"
+            f"{self.javascript[number_start:number_end]}\n"
+            """
+const output = {
+  empty: libraryPaginationState(0, 99),
+  exact: libraryPaginationState(24, 2),
+  first: libraryPaginationState(100, 1),
+  middle: libraryPaginationState(100, 3),
+  last: libraryPaginationState(100, 99),
+  malformed: libraryPaginationState(-10, "nope"),
+};
+process.stdout.write(JSON.stringify(output));
+"""
+        )
+        completed = subprocess.run(
+            ["node", "-"],
+            input=script,
+            text=True,
+            capture_output=True,
+            check=True,
+            timeout=10,
+        )
+        result = json.loads(completed.stdout)
+
+        self.assertEqual(
+            result["empty"],
+            {
+                "total": 0,
+                "page": 1,
+                "pageCount": 1,
+                "offset": 0,
+                "hasPrevious": False,
+                "hasNext": False,
+            },
+        )
+        self.assertEqual(result["exact"]["page"], 1)
+        self.assertEqual(result["exact"]["pageCount"], 1)
+        self.assertEqual(result["first"]["offset"], 0)
+        self.assertFalse(result["first"]["hasPrevious"])
+        self.assertTrue(result["first"]["hasNext"])
+        self.assertEqual(result["middle"]["offset"], 48)
+        self.assertTrue(result["middle"]["hasPrevious"])
+        self.assertTrue(result["middle"]["hasNext"])
+        self.assertEqual(result["last"]["page"], 5)
+        self.assertEqual(result["last"]["offset"], 96)
+        self.assertTrue(result["last"]["hasPrevious"])
+        self.assertFalse(result["last"]["hasNext"])
+        self.assertEqual(result["malformed"], result["empty"])
+
     def test_person_controls_are_contextual(self) -> None:
         self.assertIn('id="person-context"', self.html)
         self.assertIn('id="person-target"', self.html)
@@ -124,7 +220,7 @@ class WorkspaceWebUITests(unittest.TestCase):
         self.assertIn("person.clothing?.revision", self.javascript)
         self.assertIn(
             "if (isIndividualClothingCategory()) {\n"
-            "          await loadLibrary({ preserveCount: true });",
+            "          await loadLibrary({ preservePage: true });",
             self.javascript,
         )
 
@@ -257,7 +353,7 @@ class WorkspaceWebUITests(unittest.TestCase):
             self.javascript,
         )
 
-    def test_clothing_action_keeps_original_target_and_loaded_page_count(self) -> None:
+    def test_clothing_action_keeps_original_target_and_current_page(self) -> None:
         action_start = self.javascript.index("async function setPersonClothing(")
         action_end = self.javascript.index(
             "function workspaceApplyAvailability(", action_start
@@ -271,14 +367,15 @@ class WorkspaceWebUITests(unittest.TestCase):
         library_start = self.javascript.index("async function loadLibrary(")
         library_end = self.javascript.index("function renderStatus()", library_start)
         library = self.javascript[library_start:library_end]
-        self.assertIn("preserveCount = false", library)
+        self.assertIn("preservePage = false", library)
         self.assertIn(
-            "Math.min(Math.max(PAGE_SIZE, app.items.length), 500)",
+            "page === null ? (preservePage ? app.page : 1)",
             library,
         )
-        self.assertIn("limit: String(limit)", library)
+        self.assertIn("limit: String(PAGE_SIZE)", library)
+        self.assertNotIn("Math.min(Math.max(PAGE_SIZE, app.items.length)", library)
         self.assertGreaterEqual(
-            self.javascript.count("loadLibrary({ preserveCount: true })"),
+            self.javascript.count("loadLibrary({ preservePage: true })"),
             4,
         )
 
@@ -1338,10 +1435,8 @@ class WorkspaceWebUITests(unittest.TestCase):
         load_start = self.javascript.index("async function loadLibrary(")
         load_end = self.javascript.index("function renderStatus()", load_start)
         load = self.javascript[load_start:load_end]
-        self.assertIn(
-            "app.items = append ? app.items.concat(incoming) : incoming;",
-            load,
-        )
+        self.assertIn("app.items = incoming;", load)
+        self.assertNotIn("concat(incoming)", load)
         self.assertNotIn("new Map(", load)
         self.assertNotIn("new Set(", load)
 
@@ -2023,8 +2118,8 @@ process.stdout.write(JSON.stringify({{
         self.assertIn("body.timeline-popout .timeline-transport", self.styles)
 
     def test_static_assets_use_the_current_cache_version(self) -> None:
-        self.assertIn("/styles.css?v=0.11.0", self.html)
-        self.assertIn("/app.js?v=0.11.0", self.html)
+        self.assertIn("/styles.css?v=0.11.1", self.html)
+        self.assertIn("/app.js?v=0.11.1", self.html)
 
 
 if __name__ == "__main__":
