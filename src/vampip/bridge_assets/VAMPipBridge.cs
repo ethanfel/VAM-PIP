@@ -2803,7 +2803,8 @@ namespace VAMPip
                     "A body-proportion morph is no longer available.");
             }
             morph.LoadDeltas();
-            morph.SetValue(value);
+            morph.SetValueThreadSafe(value);
+            morph.SyncJSON();
             if (!IsFinite(morph.morphValue) ||
                 Mathf.Abs(morph.morphValue - value) > 0.0001f)
             {

@@ -3213,8 +3213,8 @@ process.stdout.write(JSON.stringify(output));
         self.assertIn("@media (max-width: 500px)", self.styles)
 
     def test_static_assets_use_the_current_cache_version(self) -> None:
-        self.assertIn("/styles.css?v=0.16.1", self.html)
-        self.assertIn("/app.js?v=0.16.1", self.html)
+        self.assertIn("/styles.css?v=0.16.2", self.html)
+        self.assertIn("/app.js?v=0.16.2", self.html)
 
 
 if __name__ == "__main__":

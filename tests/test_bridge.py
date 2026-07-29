@@ -1366,7 +1366,13 @@ class BridgeSourceTests(unittest.TestCase):
         )
         apply_source = source[apply_start:apply_end]
         self.assertIn("morph.LoadDeltas();", apply_source)
-        self.assertIn("morph.SetValue(value);", apply_source)
+        self.assertIn("morph.SetValueThreadSafe(value);", apply_source)
+        self.assertIn("morph.SyncJSON();", apply_source)
+        self.assertNotIn("morph.SetValue(value);", apply_source)
+        self.assertLess(
+            apply_source.index("morph.SetValueThreadSafe(value);"),
+            apply_source.index("morph.SyncJSON();"),
+        )
         self.assertIn("RestoreBodyProportionValues(", apply_source)
         self.assertIn("CurrentSam3dSnapshot() != null", apply_source)
         self.assertIn(
