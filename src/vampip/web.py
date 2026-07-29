@@ -320,11 +320,39 @@ class ManagerRequestHandler(BaseHTTPRequestHandler):
                     limit=int(query.get("limit", ["100"])[0]),
                     offset=int(query.get("offset", ["0"])[0]),
                 )
-                for item in result.get("items", []):
-                    item["thumbnail_url"] = (
-                        f"/api/resources/{item['id']}/thumbnail"
-                        f"?token={self.server.api_token}"
-                    )
+                thumbnail_token = quote(self.server.api_token, safe="")
+                result_items = result.get("items")
+                if not isinstance(result_items, list):
+                    result_items = []
+                for item in result_items:
+                    if not isinstance(item, dict):
+                        continue
+                    resource_id = item.get("id")
+                    if (
+                        isinstance(resource_id, int)
+                        and not isinstance(resource_id, bool)
+                        and resource_id > 0
+                    ):
+                        item["thumbnail_url"] = (
+                            f"/api/resources/{resource_id}/thumbnail"
+                            f"?token={thumbnail_token}"
+                        )
+                    variants = item.get("variants")
+                    if not isinstance(variants, list):
+                        continue
+                    for variant in variants:
+                        if not isinstance(variant, dict):
+                            continue
+                        variant_id = variant.get("id")
+                        if (
+                            isinstance(variant_id, int)
+                            and not isinstance(variant_id, bool)
+                            and variant_id > 0
+                        ):
+                            variant["thumbnail_url"] = (
+                                f"/api/resources/{variant_id}/thumbnail"
+                                f"?token={thumbnail_token}"
+                            )
                 self._json(HTTPStatus.OK, result)
                 return
             if parsed.path == "/api/catalog/facets":

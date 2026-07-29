@@ -499,6 +499,27 @@ Loose-file reads compare file identity before and after reading. The cache key
 includes loose-file identity or the pre-read archive identity and ZIP member
 metadata, so an observed source change produces a new cache entry.
 
+Resource search also derives bounded, presentation-only related-option groups.
+The conservative first-pass allowlist is a clothing item to `Clothing Item
+Presets`, or same-type `Preset Hair`, `Preset Clothing`, and `Clothing Item
+Presets`. Candidate rows must have the exact source, creator, package, and
+case-sensitive folder, overlapping declared versions, and a base/suffix
+filename match at `_`, `-`, or space. Same-type preset families must also have
+the exact atom type. The established clothing-to-item-preset relation also
+accepts an exact stem and does not require matching atom types: the distinct
+resource types establish the roles, and BrowserAssist leaves nearly all
+item-preset atom types empty. Candidate SQL reads each exact
+source/creator/package family once, then applies the case-sensitive parent
+filter in Python, avoiding amplification from overlapping recursive folder
+prefixes. Longest-base assignment is deterministic. Child numeric IDs and
+case-insensitive logical paths are deduplicated, and `variant_count` reports
+that full deduplicated count before the twelve-option response cap. Only those
+returned twelve options receive optional package-state resolution through the
+page's existing resolver. The public child document contains its numeric
+catalogue ID and filtered package state, never a resource path, key, or
+resolved resource reference. Its confidence is deliberately `name-match`:
+the relation is not semantic identity and grants no live-action authority.
+
 ## Web service and API
 
 [`serve_manager()`](../src/vampip/web.py) starts a dependency-free

@@ -1,6 +1,7 @@
 "use strict";
 
 const PAGE_SIZE = 60;
+const MAX_VARIANT_MATCH_COUNT = 1_000_000;
 const TOKEN_KEY = "vampip-token";
 const WORKSPACE_ACTION_STALL_MS = 5 * 60 * 1000;
 const PERSON_BRIDGE_BUSY_STATES = new Set([
@@ -687,6 +688,8 @@ const app = {
   personEquipmentRequestGeneration: 0,
   personEquipmentRequestController: null,
   equipmentExpandedSlots: new Set(),
+  expandedVariantDrawers: new Set(),
+  variantDrawerDomSequence: 0,
   personHair: null,
   personHairError: null,
   personHairLoading: false,
@@ -2859,133 +2862,515 @@ function resourceThumbnailUrl(resourceId) {
     : path;
 }
 
-function relatedClothingStyleVariants(item) {
-  if (item.variant_group !== "related-clothing-styles") return [];
-  const variants = [];
-  const seen = new Set();
-  for (const rawVariant of asArray(item.variants)) {
-    if (
-      !rawVariant ||
-      typeof rawVariant !== "object" ||
-      Array.isArray(rawVariant)
-    ) {
-      continue;
-    }
-    const id = integerValue(rawVariant.id);
-    if (id === null || id < 1 || seen.has(id)) continue;
-    const displayName = String(rawVariant.display_name || "").trim();
-    const label = String(rawVariant.label || displayName).trim();
-    if (!displayName && !label) continue;
-    seen.add(id);
-    variants.push({
-      id,
-      displayName: displayName || label,
-      label: label || displayName,
-      favorite: booleanValue(rawVariant.favorite, false),
-    });
+function normalizedResourceState(item, { assumeHidden = false } = {}) {
+  const missingReason =
+    typeof item?.missing_reason === "string"
+      ? item.missing_reason.trim()
+      : "";
+  const explicit = String(item?.state || "").trim().toLowerCase();
+  if (
+    booleanValue(item?.missing, false) ||
+    missingReason ||
+    ["missing", "unavailable"].includes(explicit)
+  ) {
+    return "missing";
   }
-  return variants;
+  if (
+    booleanValue(item?.local, false) ||
+    ["local", "loose"].includes(explicit)
+  ) {
+    return "local";
+  }
+  if (["active", "enabled"].includes(explicit)) return "active";
+  if (["hidden", "disabled", "inactive", "available"].includes(explicit)) {
+    return "hidden";
+  }
+
+  for (const key of ["active", "package_active", "enabled"]) {
+    if (Object.prototype.hasOwnProperty.call(item || {}, key)) {
+      return booleanValue(item[key], false) ? "active" : "hidden";
+    }
+  }
+  return assumeHidden ? "hidden" : "unknown";
 }
 
-function browseRelatedClothingStyles(query) {
-  const categoryId = "clothing-item-presets";
-  const category = ensureWorkspaceCategories().find(
-    (candidate) => candidate.id === categoryId,
+function normalizedResourceId(value) {
+  return Number.isSafeInteger(value) && value > 0 ? value : null;
+}
+
+function missingResourcePresentation(reason, isMissing = false) {
+  const code =
+    typeof reason === "string" ? reason.trim().toLowerCase() : "";
+  if (code === "package") {
+    return {
+      code,
+      label: "Package missing",
+      detail: "The containing VAR package is not installed.",
+    };
+  }
+  if (code === "resource") {
+    return {
+      code,
+      label: "Resource missing",
+      detail:
+        "The catalogue entry exists, but its exact resource file is unavailable.",
+    };
+  }
+  if (!isMissing) {
+    return { code: "", label: "", detail: "" };
+  }
+  return {
+    code: "unknown",
+    label: "Resource unavailable",
+    detail: "The catalogue could not resolve this resource.",
+  };
+}
+
+function normalizeResourceCardModel(item, options = {}) {
+  const source =
+    item && typeof item === "object" && !Array.isArray(item) ? item : {};
+  const id = normalizedResourceId(source.id ?? source.resource_id);
+  const packageRef = String(packageRoot(source) || "").trim();
+  const safePackageRef = safePresentationLabel(packageRef, "");
+  const declaredTitle = safePresentationLabel(
+    source.display_name ||
+      source.title ||
+      source.name ||
+      source.resource_name ||
+    source.displayName,
+    "",
   );
-  if (!category) {
+  const title = safePresentationLabel(
+    resourceTitle(source),
+    options.fallbackTitle || "Untitled resource",
+  );
+  const label = safePresentationLabel(source.label, title);
+  const creator = safePresentationLabel(
+    source.creator || creatorFromRoot(packageRef),
+    "Unknown creator",
+  );
+  const packageLabel = safePresentationLabel(
+    source.package || source.package_name || safePackageRef,
+    safePackageRef,
+  );
+  const type = safePresentationLabel(resourceType(source), "Resource");
+  const tags = Array.from(
+    new Set(
+      normalizeTags(
+        source.clothing?.tags || source.tags || source.tags_json,
+      )
+        .map((tag) => safePresentationLabel(tag, ""))
+        .filter(Boolean),
+    ),
+  );
+  const state = normalizedResourceState(source, options);
+  const missingStatus = missingResourcePresentation(
+    source.missing_reason,
+    state === "missing",
+  );
+  const selectedVersion = equipmentPackageVersion(source);
+  const selectedVersionLabel =
+    selectedVersion === null ? resourceSelectedVersion(source) : String(selectedVersion);
+  const thumbnail = String(
+    source.thumbnail_url ||
+      source.thumbnail ||
+      source.thumb_url ||
+      source.preview_url ||
+      "",
+  ).trim();
+  const relationshipKind = String(source.relationship_kind || "")
+    .trim()
+    .toLowerCase();
+  const relationshipConfidence = String(
+    source.relationship_confidence || "",
+  )
+    .trim()
+    .toLowerCase();
+
+  return {
+    id,
+    hasDeclaredTitle: Boolean(declaredTitle),
+    searchName: declaredTitle,
+    title,
+    label,
+    creator,
+    packageRef,
+    packageLabel,
+    type,
+    tags,
+    state,
+    stateLabel:
+      state === "missing"
+        ? missingStatus.label
+        : {
+            active: "Active",
+            hidden: "Available",
+            local: "Local",
+            unknown: "State unknown",
+          }[state] || "State unknown",
+    active: state === "active",
+    local: state === "local",
+    missing: state === "missing",
+    valid: itemIsValid(source),
+    favorite: booleanValue(source.favorite, false),
+    thumbnail,
+    selectedVersion,
+    selectedVersionLabel,
+    updateVersion: resourceUpdateVersion(source),
+    relationshipKind,
+    relationshipConfidence,
+    relationshipReason: safePresentationLabel(
+      source.relationship_reason,
+      "Same package/folder/name match; not semantic identity",
+    ),
+    missingReasonCode: missingStatus.code,
+    missingDetail: missingStatus.detail,
+  };
+}
+
+function normalizeRelatedResourceVariants(item) {
+  const group = String(item?.variant_group || "").trim().toLowerCase();
+  if (
+    group !== "related-resources" &&
+    group !== "related-clothing-styles"
+  ) {
+    return [];
+  }
+  const legacyClothingStyles = group === "related-clothing-styles";
+  const seenIds = new Set();
+  return asArray(item?.variants)
+    .filter(
+      (rawVariant) =>
+        rawVariant &&
+        typeof rawVariant === "object" &&
+        !Array.isArray(rawVariant),
+    )
+    .map((rawVariant) => {
+      const source = { ...rawVariant };
+      if (legacyClothingStyles && !source.resource_type) {
+        source.resource_type = "Clothing Item Presets";
+      }
+      if (legacyClothingStyles && !source.relationship_kind) {
+        source.relationship_kind = "item-style";
+      }
+      const model = normalizeResourceCardModel(source, {
+        fallbackTitle: "Unnamed name match",
+      });
+      if (model.id !== null) {
+        if (seenIds.has(model.id)) return null;
+        seenIds.add(model.id);
+      }
+      return {
+        ...model,
+        browseQuery: model.searchName,
+        relationshipMetadataComplete:
+          model.hasDeclaredTitle &&
+          model.id !== null &&
+          model.valid &&
+          model.relationshipConfidence === "name-match",
+      };
+    })
+    .filter(Boolean);
+}
+
+function workspaceCategoryForResourceType(type) {
+  const normalizedType = String(type || "").trim().toLowerCase();
+  if (!normalizedType) return null;
+  return (
+    ensureWorkspaceCategories().find((category) =>
+      asArray(category.resourceTypes).some(
+        (candidateType) =>
+          String(candidateType || "").trim().toLowerCase() === normalizedType,
+      ),
+    ) || null
+  );
+}
+
+function browseRelatedResource(model, fallbackQuery = "") {
+  const query = safePresentationLabel(
+    model?.browseQuery || model?.title || fallbackQuery,
+    "",
+  );
+  if (!query) {
     toast(
-      "Item styles unavailable",
-      "Refresh the manager’s Workspace category map and try again.",
+      "Name match unavailable",
+      "This catalogue row does not contain a safe searchable name.",
       "error",
     );
     return;
   }
 
-  const viewChanged = app.view !== "workspace";
-  app.query = String(query || "").trim();
+  const category = workspaceCategoryForResourceType(model?.type);
+  app.query = query;
   app.packageState = "all";
-  elements.searchInput.value = app.query;
+  elements.searchInput.value = query;
   elements.stateFilter.value = "all";
-  if (viewChanged) setView("workspace");
 
-  const categoryChanged = app.selectedWorkspaceCategoryId !== categoryId;
-  if (categoryChanged) {
-    setWorkspaceCategory(categoryId);
-  } else if (!viewChanged) {
-    loadLibrary();
+  if (category) {
+    const viewChanged = app.view !== "workspace";
+    if (viewChanged) setView("workspace");
+    const categoryChanged =
+      app.selectedWorkspaceCategoryId !== category.id;
+    if (categoryChanged) {
+      setWorkspaceCategory(category.id);
+    } else if (!viewChanged) {
+      loadLibrary();
+    }
+  } else {
+    const viewChanged = app.view !== "resources";
+    app.type = "";
+    elements.typeFilter.value = "";
+    if (viewChanged) {
+      setView("resources");
+    } else {
+      loadLibrary();
+    }
   }
   elements.searchInput.focus({ preventScroll: true });
 }
 
-function appendRelatedClothingStyles(body, item) {
-  const variants = relatedClothingStyleVariants(item);
-  if (!variants.length) return;
-
-  const ownerSearch =
-    String(item.variant_search || "").trim() || resourceTitle(item);
-  const declaredCount = integerValue(item.variant_count);
-  const variantCount =
-    declaredCount !== null && declaredCount >= variants.length
-      ? declaredCount
-      : variants.length;
-  const section = createElement("section", "related-styles");
-  section.setAttribute(
-    "aria-label",
-    `Related styles for ${resourceTitle(item)}; catalogue name matches`,
+function browseRelatedClothingStyles(query) {
+  browseRelatedResource(
+    {
+      browseQuery: query,
+      type: "Clothing Item Presets",
+    },
+    query,
   );
-  const heading = createElement("div", "related-styles-heading");
-  const title = createElement("strong");
-  title.textContent = "Related styles";
-  const count = createElement("span");
-  count.textContent = `${formatNumber(variantCount)} name ${plural(
-    "match",
-    variantCount,
-  )}`;
-  const viewAll = button("View all", "quiet-button related-styles-view-all");
-  viewAll.title = `Search item styles for ${ownerSearch}`;
-  viewAll.addEventListener("click", () =>
-    browseRelatedClothingStyles(ownerSearch),
-  );
-  heading.append(title, count, viewAll);
+}
 
-  const strip = createElement("div", "related-styles-strip");
-  for (const variant of variants.slice(0, 4)) {
-    const tile = button("", "related-style-tile");
-    tile.title = `Search for ${variant.displayName}`;
-    tile.setAttribute(
-      "aria-label",
-      `Browse related style ${variant.label}${
-        variant.favorite ? ", favorited" : ""
-      }`,
-    );
-    const visual = createElement("span", "related-style-visual");
-    const fallback = createElement("span", "related-style-fallback");
-    fallback.textContent = initials(variant.label);
-    fallback.setAttribute("aria-hidden", "true");
+function resourceVariantDrawerKey(item) {
+  const id = normalizedResourceId(item?.id ?? item?.resource_id);
+  if (id !== null) return `resource:${id}`;
+  const presentation = safePresentationLabel(
+    `${packageRoot(item || {})} ${resourceTitle(item || {})}`,
+    "",
+  )
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 96);
+  return presentation ? `presentation:${presentation}` : "";
+}
+
+function relatedResourceKindLabel(model) {
+  if (model.relationshipKind === "item-style") return "Item style name match";
+  if (model.relationshipKind === "preset-variant") {
+    return "Preset name match";
+  }
+  return "Name match";
+}
+
+function relatedResourceStateLabel(model) {
+  return (
+    {
+      active: "Available",
+      local: "Available",
+      hidden: "Hidden in VaM",
+      missing: model.stateLabel,
+      unknown: "State unknown",
+    }[model.state] || "State unknown"
+  );
+}
+
+function createRelatedResourceRow(model, ownerSearch) {
+  const row = createElement("article", "resource-variant-row");
+  const visual = createElement("span", "resource-variant-visual");
+  const fallback = createElement("span", "resource-variant-fallback");
+  fallback.textContent = initials(model.label);
+  fallback.setAttribute("aria-hidden", "true");
+  visual.append(fallback);
+  if (model.id !== null) {
     const image = document.createElement("img");
     image.alt = "";
     image.loading = "lazy";
     image.decoding = "async";
     image.addEventListener("error", () => image.remove());
-    image.src = resourceThumbnailUrl(variant.id);
-    visual.append(fallback, image);
-    const label = createElement("span", "related-style-label");
-    label.textContent = variant.label;
-    if (variant.favorite) {
-      const favorite = createElement("span", "related-style-favorite");
-      favorite.textContent = "★";
-      favorite.setAttribute("aria-hidden", "true");
-      tile.append(visual, label, favorite);
-    } else {
-      tile.append(visual, label);
-    }
-    tile.addEventListener("click", () =>
-      browseRelatedClothingStyles(variant.displayName),
-    );
-    strip.append(tile);
+    image.src = model.thumbnail || resourceThumbnailUrl(model.id);
+    visual.append(image);
   }
-  section.append(heading, strip);
-  body.append(section);
+
+  const copy = createElement("div", "resource-variant-copy");
+  const heading = createElement("strong", "resource-variant-name");
+  heading.textContent = model.label;
+  heading.title = model.label;
+  copy.append(heading);
+  if (model.title !== model.label) {
+    const catalogueName = createElement("span", "resource-variant-catalogue-name");
+    catalogueName.textContent = model.title;
+    catalogueName.title = model.title;
+    copy.append(catalogueName);
+  }
+
+  const provenance = createElement("span", "resource-variant-provenance");
+  provenance.textContent = [model.creator, model.packageLabel]
+    .filter(Boolean)
+    .join(" · ");
+  copy.append(provenance);
+
+  const metadata = createElement("span", "resource-variant-meta");
+  metadata.append(badge(prettyType(model.type), "meta-pill"));
+  metadata.append(
+    badge(
+      relatedResourceStateLabel(model),
+      `meta-pill variant-state is-${model.state}`,
+    ),
+  );
+  if (model.updateVersion !== null) {
+    metadata.append(
+      badge(
+        `v${model.selectedVersionLabel} → v${model.updateVersion} available`,
+        "meta-pill version-update",
+      ),
+    );
+  } else if (
+    model.selectedVersion !== null ||
+    model.selectedVersionLabel !== "?"
+  ) {
+    metadata.append(
+      badge(`v${model.selectedVersionLabel}`, "meta-pill"),
+    );
+  }
+  for (const tag of model.tags.slice(0, 2)) {
+    metadata.append(badge(tag, "meta-pill"));
+  }
+  if (model.favorite) {
+    metadata.append(badge("★ Favorite", "meta-pill variant-favorite"));
+  }
+  copy.append(metadata);
+
+  const relationship = createElement("span", "resource-variant-relationship");
+  relationship.textContent = `${relatedResourceKindLabel(model)} · ${
+    model.relationshipReason
+  }`;
+  copy.append(relationship);
+  if (model.missingDetail) {
+    const missing = createElement("span", "resource-variant-missing");
+    missing.textContent = model.missingDetail;
+    copy.append(missing);
+  }
+
+  const browse = button(
+    model.relationshipKind === "item-style"
+      ? "Browse style"
+      : "Browse variant",
+    "secondary-button resource-variant-browse",
+  );
+  const query = model.browseQuery || ownerSearch;
+  browse.disabled = !query;
+  browse.title = model.relationshipMetadataComplete
+    ? `Browse catalogue matches for ${query}; name matches do not perform live actions`
+    : "Browse catalogue name matches; relationship metadata is incomplete and no live action is available";
+  browse.addEventListener("click", () =>
+    browseRelatedResource({ ...model, browseQuery: query }, ownerSearch),
+  );
+
+  row.append(visual, copy, browse);
+  return row;
+}
+
+function appendResourceVariantDrawer(body, item) {
+  const variants = normalizeRelatedResourceVariants(item);
+  const variantCount = normalizedVariantCount(
+    item?.variant_count,
+    variants.length,
+  );
+  if (!variantCount) return;
+
+  const ownerTitle = safePresentationLabel(
+    resourceTitle(item),
+    "Resource",
+  );
+  const ownerSearch = safePresentationLabel(
+    item?.variant_search,
+    ownerTitle,
+  );
+  const drawerKey = resourceVariantDrawerKey(item);
+  const details = createElement("details", "resource-variant-drawer");
+  app.variantDrawerDomSequence += 1;
+  const panelId = `resource-variants-${(
+    drawerKey || "card"
+  ).replace(/[^a-z0-9_-]+/gi, "-")}-${app.variantDrawerDomSequence}`;
+  const summary = createElement("summary", "resource-variant-summary");
+  summary.setAttribute("aria-controls", panelId);
+  const summaryCopy = createElement("span", "resource-variant-summary-copy");
+  const summaryTitle = createElement("strong");
+  summaryTitle.textContent = "Styles & variants";
+  const summaryReason = createElement("span");
+  summaryReason.textContent = "Name match · Same package/folder";
+  summaryCopy.append(summaryTitle, summaryReason);
+  const count = createElement("span", "resource-variant-count");
+  count.textContent = formatNumber(variantCount);
+  count.setAttribute(
+    "aria-label",
+    `${formatNumber(variantCount)} name ${plural("match", variantCount)}`,
+  );
+  summary.append(summaryCopy, count);
+
+  const panel = createElement("div", "resource-variant-panel");
+  panel.id = panelId;
+  const displayedVariants = variants.slice(0, 12);
+  let populated = false;
+  const populate = () => {
+    if (populated) return;
+    populated = true;
+    const rows = createElement("div", "resource-variant-list");
+    for (const variant of displayedVariants) {
+      rows.append(createRelatedResourceRow(variant, ownerSearch));
+    }
+    panel.append(rows);
+    if (variantCount > displayedVariants.length) {
+      const footer = createElement("div", "resource-variant-footer");
+      const showing = createElement("span");
+      showing.textContent = `Showing ${formatNumber(
+        displayedVariants.length,
+      )} of ${formatNumber(variantCount)}`;
+      const viewAll = button(
+        "View all name matches",
+        "quiet-button resource-variant-view-all",
+      );
+      viewAll.addEventListener("click", () =>
+        browseRelatedResource(
+          { ...(variants[0] || {}), browseQuery: ownerSearch },
+          ownerSearch,
+        ),
+      );
+      footer.append(showing, viewAll);
+      panel.append(footer);
+    }
+  };
+
+  details.addEventListener("toggle", () => {
+    summary.setAttribute("aria-expanded", String(details.open));
+    if (drawerKey) {
+      if (details.open) app.expandedVariantDrawers.add(drawerKey);
+      else app.expandedVariantDrawers.delete(drawerKey);
+    }
+    if (details.open) populate();
+  });
+  const expanded = Boolean(
+    drawerKey && app.expandedVariantDrawers.has(drawerKey),
+  );
+  details.open = expanded;
+  summary.setAttribute("aria-expanded", String(expanded));
+  if (expanded) populate();
+  details.append(summary, panel);
+  body.append(details);
+}
+
+function normalizedVariantCount(value, loadedCount) {
+  const safeLoadedCount =
+    Number.isSafeInteger(loadedCount) && loadedCount >= 0
+      ? loadedCount
+      : 0;
+  if (
+    !Number.isSafeInteger(value) ||
+    value < safeLoadedCount ||
+    value > MAX_VARIANT_MATCH_COUNT
+  ) {
+    return safeLoadedCount;
+  }
+  return value;
 }
 
 function clothingCategoryForItem(item) {
@@ -5062,10 +5447,11 @@ function renderEmptyLibrary() {
 
 function createResourceCard(item) {
   const card = createElement("article", "library-card resource-card");
-  const title = resourceTitle(item);
-  const root = packageRoot(item);
-  const active = itemIsActive(item);
-  const state = String(item.state || (active ? "active" : "hidden")).toLowerCase();
+  const model = normalizeResourceCardModel(item, { assumeHidden: true });
+  const title = model.title;
+  const root = model.packageRef;
+  const active = model.active;
+  const state = model.state;
   const pinned = isPinned(root);
 
   const preview = createElement("div", "card-preview");
@@ -5074,8 +5460,7 @@ function createResourceCard(item) {
   fallback.textContent = initials(title);
   preview.append(fallback);
 
-  const thumbnail =
-    item.thumbnail_url || item.thumbnail || item.thumb_url || item.preview_url || "";
+  const thumbnail = model.thumbnail;
   if (thumbnail) {
     const image = document.createElement("img");
     image.alt = "";
@@ -5088,13 +5473,8 @@ function createResourceCard(item) {
   }
 
   const badges = createElement("div", "card-badges");
-  badges.append(badge(prettyType(resourceType(item)), "type-badge"));
-  const stateLabel = {
-    active: "Active",
-    hidden: "Available",
-    missing: "Missing",
-    local: "Local",
-  }[state] || (active ? "Active" : "Available");
+  badges.append(badge(prettyType(model.type), "type-badge"));
+  const stateLabel = model.stateLabel;
   badges.append(
     badge(
       stateLabel,
@@ -5122,12 +5502,11 @@ function createResourceCard(item) {
   body.append(heading);
 
   const subtitle = createElement("p", "card-subtitle");
-  const creator = item.creator || creatorFromRoot(root) || "Unknown creator";
   const creatorSpan = createElement("span", "creator");
-  creatorSpan.textContent = String(creator);
+  creatorSpan.textContent = model.creator;
   subtitle.append(creatorSpan);
-  if (root) {
-    subtitle.append(document.createTextNode(` · ${root}`));
+  if (model.packageLabel) {
+    subtitle.append(document.createTextNode(` · ${model.packageLabel}`));
   }
   body.append(subtitle);
 
@@ -5140,10 +5519,18 @@ function createResourceCard(item) {
         "meta-pill version-update",
       ),
     );
+  } else if (
+    model.selectedVersion !== null ||
+    model.selectedVersionLabel !== "?"
+  ) {
+    metadata.append(
+      badge(`v${model.selectedVersionLabel}`, "meta-pill"),
+    );
   }
-  const tags = normalizeTags(
-    item.clothing?.tags || item.tags || item.tags_json,
-  );
+  if (model.favorite) {
+    metadata.append(badge("★ Favorite", "meta-pill variant-favorite"));
+  }
+  const tags = model.tags;
   const atomType = item.atom_type || item.atomType;
   if (atomType) metadata.append(badge(String(atomType), "meta-pill"));
   for (const tag of tags.slice(0, atomType ? 2 : 3)) {
@@ -5153,7 +5540,7 @@ function createResourceCard(item) {
     metadata.append(badge(fileExtension(item.resource_path || item.path), "meta-pill"));
   }
   body.append(metadata);
-  appendRelatedClothingStyles(body, item);
+  appendResourceVariantDrawer(body, item);
 
   const actions = createElement("div", "card-actions");
   const workspaceCategory =
@@ -5251,14 +5638,18 @@ function appendPackageAccessActions(
   );
   const isLocal = state === "local";
   const isMissing = state === "missing";
+  const missingStatus = missingResourcePresentation(
+    item?.missing_reason,
+    isMissing,
+  );
   if (isLocal) leaseButton.textContent = "Local · Always available";
-  if (isMissing) leaseButton.textContent = "Package not installed";
+  if (isMissing) leaseButton.textContent = missingStatus.label;
   leaseButton.disabled =
     isLocal || isMissing || (!item.id && !root) || !itemIsValid(item);
   if (isLocal) {
     leaseButton.title = "Loose resources are always available";
   } else if (isMissing) {
-    leaseButton.title = "The VAR containing this resource is not installed";
+    leaseButton.title = missingStatus.detail;
   } else if (root) {
     leaseButton.title = `Temporarily enable ${root} and its dependencies`;
   } else {
@@ -5291,7 +5682,7 @@ function appendPackageAccessActions(
         (!item.id && !root) ||
         !itemIsValid(item),
       reason: isMissing
-        ? "The newer package version is not installed"
+        ? missingStatus.detail
         : "Temporarily enable this exact newer version and its dependencies",
       onUpdate: (updateButton, packageVersion) =>
         createThreeDayLease(
@@ -5381,9 +5772,11 @@ function clothingActionAvailability(
   const itemRevision = String(item.clothing_revision || "");
   const liveRevision = String(liveClothing?.revision || "");
   const key = `${category?.id || "clothing"}:${resourceId}`;
-  const state = String(
-    item.state || (itemIsActive(item) ? "active" : "hidden"),
-  ).toLowerCase();
+  const state = normalizedResourceState(item, { assumeHidden: true });
+  const missingStatus = missingResourcePresentation(
+    item?.missing_reason,
+    state === "missing",
+  );
   let reason = "";
 
   if (!category || category.operation !== "set-person-clothing") {
@@ -5396,7 +5789,7 @@ function clothingActionAvailability(
   } else if (!category.liveAction) {
     reason = "This manager exposes clothing as browse-only";
   } else if (state === "missing") {
-    reason = "The package containing this clothing item is not installed";
+    reason = missingStatus.detail;
   } else if (
     !itemIsValid(item) ||
     !Number.isInteger(resourceId) ||
@@ -5444,7 +5837,9 @@ function clothingActionAvailability(
     : state === "active" || state === "local"
       ? "Wear"
       : "Enable & wear";
-  if (item.worn === true && item.clothing_locked === true) {
+  if (state === "missing") {
+    label = missingStatus.label;
+  } else if (item.worn === true && item.clothing_locked === true) {
     label = "Locked in VaM";
   } else if (typeof item.worn !== "boolean") {
     label = "State unavailable";
@@ -5857,9 +6252,11 @@ function workspaceApplyAvailability(item, category = currentWorkspaceCategory())
   const snapshot = app.person || {};
   const persons = personList(snapshot);
   const selected = app.selectedPersonUid;
-  const state = String(
-    item.state || (itemIsActive(item) ? "active" : "hidden"),
-  ).toLowerCase();
+  const state = normalizedResourceState(item, { assumeHidden: true });
+  const missingStatus = missingResourcePresentation(
+    item?.missing_reason,
+    state === "missing",
+  );
   const resourceId = Number(item.id);
   const gameRunning = personVamRunning(snapshot);
   const key = `${category?.id || "asset"}:${resourceId}`;
@@ -5880,7 +6277,7 @@ function workspaceApplyAvailability(item, category = currentWorkspaceCategory())
   let reason = "";
 
   if (state === "missing") {
-    reason = "The package containing this asset is not installed";
+    reason = missingStatus.detail;
   } else if (!itemIsValid(item) || !Number.isInteger(resourceId) || resourceId < 1) {
     reason = "This catalogue entry cannot be resolved safely";
   } else if (!category || !category.liveAction) {
@@ -5945,7 +6342,7 @@ function workspaceApplyAvailability(item, category = currentWorkspaceCategory())
 
   let label = "Load";
   if (state === "missing") {
-    label = "Package not installed";
+    label = missingStatus.label;
   } else if (category?.operation === "load-scene") {
     label = app.workspaceApplyMode === "merge" ? "Merge scene" : "Replace scene";
   } else if (category?.operation === "load-subscene") {

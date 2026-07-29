@@ -21,6 +21,24 @@ _MAX_MANIFEST_BYTES = 64 * 1024 * 1024
 DEFAULT_MAX_THUMBNAIL_BYTES = 16 * 1024 * 1024
 MAX_RELATED_RESOURCE_VARIANTS = 12
 _MAX_RELATED_QUERY_KEYS = 200
+_GENERIC_VARIANT_RESOURCE_TYPES = frozenset(
+    {
+        "clothing item presets",
+        "preset clothing",
+        "preset hair",
+    }
+)
+_VARIANT_PACKAGE_STATE_FIELDS = (
+    "package_ref",
+    "selected_version",
+    "enabled",
+    "missing",
+    "missing_reason",
+    "local",
+    "update_available",
+    "update_version",
+    "update_package_ref",
+)
 
 _REQUIRED_RESOURCE_COLUMNS = {
     "id",
@@ -910,26 +928,34 @@ def _catalog_version_identities(value: object) -> frozenset[str]:
     return frozenset(identities)
 
 
-def _attach_clothing_style_variants(
+def _attach_resource_variants(
     connection: sqlite3.Connection,
     rows: list[sqlite3.Row],
     items: list[dict[str, object]],
+    *,
+    resolver: _ResourceResolver | None,
+    include_package_state: bool,
 ) -> None:
-    """Attach bounded, presentational sibling-style relationships.
+    """Attach bounded, presentational resource relationships.
 
-    BrowserAssist does not publish a trustworthy target-clothing identity for
-    ``Clothing Item Presets``. Same-folder presets whose basename begins with
-    the clothing item's basename are still useful as a conservative browsing
-    hint. The relationship is deliberately not an action identity.
+    BrowserAssist does not publish trustworthy action identities between
+    resources. Exact-family, same-folder rows whose basenames form an explicit
+    base/suffix pair are still useful as a conservative browsing hint.
+    Clothing-to-item-preset rows additionally allow an exact stem because
+    their distinct resource types identify the base and option roles. These
+    relationships never participate in live-action resolution.
     """
 
-    returned_owners: dict[int, tuple[str, dict[str, object]]] = {}
-    query_keys: dict[tuple[str, str, str, str], tuple[str, str, str, str]] = {}
+    clothing_types = {"clothing (female)", "clothing (male)"}
+    eligible_owner_types = clothing_types | set(_GENERIC_VARIANT_RESOURCE_TYPES)
+    returned_owners: dict[int, tuple[str, sqlite3.Row, dict[str, object]]] = {}
+    wanted_parents: set[tuple[str, str, str, str]] = set()
+    query_families: dict[
+        tuple[str, str, str],
+        tuple[str, str, str],
+    ] = {}
     for row, item in zip(rows, items):
-        if str(row["resource_type"]).casefold() not in {
-            "clothing (female)",
-            "clothing (male)",
-        }:
+        if str(row["resource_type"]).casefold() not in eligible_owner_types:
             continue
         parent, stem = _resource_parent_and_stem(row["resource_path"])
         if not parent or not stem:
@@ -938,44 +964,37 @@ def _attach_clothing_style_variants(
             str(row["source"]),
             str(row["creator"]),
             str(row["package_name"]),
-            parent.casefold(),
+            parent,
         )
         versions = _catalog_version_identities(row["versions_json"])
         if not versions:
             continue
-        returned_owners[int(row["id"])] = (stem, item)
-        path_prefix = _escape_like(parent + "\\") + "%"
-        query_keys.setdefault(
-            key,
-            (
-                str(row["source"]),
-                str(row["creator"]),
-                str(row["package_name"]),
-                path_prefix,
-            ),
-        )
-    if not query_keys:
+        returned_owners[int(row["id"])] = (stem, row, item)
+        wanted_parents.add(key)
+        family = key[:3]
+        query_families.setdefault(family, family)
+    if not query_families:
         return
 
     variant_rows: list[sqlite3.Row] = []
-    query_values = list(query_keys.values())
+    query_values = list(query_families.values())
     for start in range(0, len(query_values), _MAX_RELATED_QUERY_KEYS):
         batch = query_values[start : start + _MAX_RELATED_QUERY_KEYS]
-        values_sql = ", ".join("(?, ?, ?, ?)" for _ in batch)
+        values_sql = ", ".join("(?, ?, ?)" for _ in batch)
         parameters: list[object] = []
-        for source, creator, package_name, prefix in batch:
-            parameters.extend((source, creator, package_name, prefix))
+        for source, creator, package_name in batch:
+            parameters.extend((source, creator, package_name))
         parameters.append(str(rows[0]["root"]))
         variant_rows.extend(
             connection.execute(
                 f"""
-                WITH wanted(source, creator, package_name, path_prefix) AS (
+                WITH wanted(source, creator, package_name) AS (
                     VALUES {values_sql}
                 )
                 SELECT resource.id, resource.source, resource.creator,
                        resource.package_name, resource.versions_json,
                        resource.resource_path, resource.resource_type,
-                       resource.favorite
+                       resource.atom_type, resource.favorite
                 FROM wanted
                 CROSS JOIN catalog_resources AS resource
                     INDEXED BY idx_catalog_root_family
@@ -983,12 +1002,12 @@ def _attach_clothing_style_variants(
                   AND resource.creator = wanted.creator
                   AND resource.package_name = wanted.package_name
                   AND resource.source = wanted.source
-                  AND resource.resource_path COLLATE NOCASE LIKE
-                      wanted.path_prefix ESCAPE '\\'
                   AND resource.resource_type COLLATE NOCASE IN (
                       'Clothing Item Presets',
                       'Clothing (Female)',
-                      'Clothing (Male)'
+                      'Clothing (Male)',
+                      'Preset Clothing',
+                      'Preset Hair'
                   )
                 """,
                 parameters,
@@ -1008,13 +1027,11 @@ def _attach_clothing_style_variants(
 
     owners: dict[
         tuple[str, str, str, str],
-        list[tuple[str, frozenset[str], int]],
+        list[tuple[str, frozenset[str], int, str, str]],
     ] = {}
     for row in resource_rows:
-        if str(row["resource_type"]).casefold() not in {
-            "clothing (female)",
-            "clothing (male)",
-        }:
+        resource_type = str(row["resource_type"]).casefold()
+        if resource_type not in eligible_owner_types:
             continue
         parent, stem = _resource_parent_and_stem(row["resource_path"])
         versions = _catalog_version_identities(row["versions_json"])
@@ -1024,73 +1041,134 @@ def _attach_clothing_style_variants(
             str(row["source"]),
             str(row["creator"]),
             str(row["package_name"]),
-            parent.casefold(),
+            parent,
         )
-        owners.setdefault(key, []).append((stem, versions, int(row["id"])))
+        if key not in wanted_parents:
+            continue
+        owners.setdefault(key, []).append(
+            (
+                stem,
+                versions,
+                int(row["id"]),
+                resource_type,
+                str(row["atom_type"]),
+            )
+        )
 
     related: dict[int, dict[str, dict[str, object]]] = {}
+    related_ids: dict[int, set[int]] = {}
     for row in resource_rows:
-        if str(row["resource_type"]).casefold() != "clothing item presets":
-            continue
+        child_id = int(row["id"])
+        child_type = str(row["resource_type"]).casefold()
         parent, variant_stem = _resource_parent_and_stem(row["resource_path"])
         key = (
             str(row["source"]),
             str(row["creator"]),
             str(row["package_name"]),
-            parent.casefold(),
+            parent,
         )
+        if key not in wanted_parents:
+            continue
         variant_versions = _catalog_version_identities(row["versions_json"])
-        candidates = [
-            (owner_stem, owner_id)
-            for owner_stem, owner_versions, owner_id in owners.get(key, ())
-            if (
-                owner_versions & variant_versions
-                and (
-                    variant_stem.casefold() == owner_stem.casefold()
-                    or any(
-                        variant_stem.casefold().startswith(
-                            f"{owner_stem.casefold()}{separator}"
-                        )
-                        for separator in ("_", "-", " ")
-                    )
-                )
+        if not variant_versions:
+            continue
+        candidates: list[tuple[str, int, str]] = []
+        variant_stem_key = variant_stem.casefold()
+        for (
+            owner_stem,
+            owner_versions,
+            owner_id,
+            owner_type,
+            owner_atom_type,
+        ) in owners.get(key, ()):
+            if owner_id == child_id or not (owner_versions & variant_versions):
+                continue
+            owner_stem_key = owner_stem.casefold()
+            suffix_match = any(
+                variant_stem_key.startswith(f"{owner_stem_key}{separator}")
+                for separator in ("_", "-", " ")
             )
-        ]
+            relationship_kind: str | None = None
+            if (
+                owner_type in clothing_types
+                and child_type == "clothing item presets"
+                and (variant_stem_key == owner_stem_key or suffix_match)
+            ):
+                relationship_kind = "item-style"
+            elif (
+                owner_type == child_type
+                and owner_type in _GENERIC_VARIANT_RESOURCE_TYPES
+                and owner_atom_type == str(row["atom_type"])
+                and suffix_match
+            ):
+                relationship_kind = "preset-variant"
+            if relationship_kind is not None:
+                candidates.append(
+                    (owner_stem, owner_id, relationship_kind)
+                )
         if not candidates:
             continue
-        owner_stem, owner_id = min(
+        owner_stem, owner_id, relationship_kind = min(
             candidates,
             key=lambda candidate: (-len(candidate[0]), candidate[1]),
         )
         returned_owner = returned_owners.get(owner_id)
         if returned_owner is None:
             continue
-        _, owner_item = returned_owner
+        _, _, owner_item = returned_owner
         logical_path = str(row["resource_path"]).replace("/", "\\").casefold()
+        owner_related_ids = related_ids.setdefault(owner_id, set())
+        if child_id in owner_related_ids:
+            continue
+        owner_related_ids.add(child_id)
         related.setdefault(id(owner_item), {}).setdefault(
             logical_path,
             {
-                "id": int(row["id"]),
+                "id": child_id,
                 "display_name": _display_name(str(row["resource_path"])),
                 "label": _variant_label(owner_stem, variant_stem),
+                "resource_type": str(row["resource_type"]),
+                "creator": str(row["creator"]),
+                "package": str(row["package_name"]),
                 "favorite": bool(row["favorite"]),
+                "relationship_kind": relationship_kind,
+                "relationship_confidence": "name-match",
+                "relationship_reason": (
+                    "Same-package folder/name/version match; "
+                    "not semantic identity"
+                ),
+                "_row": row,
             },
         )
 
-    for owner_stem, item in returned_owners.values():
+    for _, owner_row, item in returned_owners.values():
         variants = list(related.get(id(item), {}).values())
         if not variants:
             continue
         variants.sort(
             key=lambda variant: (
                 str(variant["label"]).casefold(),
+                str(variant["display_name"]).casefold(),
                 int(variant["id"]),
             )
         )
-        item["variant_group"] = "related-clothing-styles"
-        item["variant_count"] = len(variants)
-        item["variants"] = variants[:MAX_RELATED_RESOURCE_VARIANTS]
-        item["variant_search"] = owner_stem
+        variant_count = len(variants)
+        variants = variants[:MAX_RELATED_RESOURCE_VARIANTS]
+        for variant in variants:
+            variant_row = variant.pop("_row")
+            if include_package_state and resolver is not None:
+                state = resolver.resource_state(variant_row)
+                variant.update(
+                    {
+                        key: state[key]
+                        for key in _VARIANT_PACKAGE_STATE_FIELDS
+                        if key in state
+                    }
+                )
+        item["variant_group"] = "related-resources"
+        item["variant_count"] = variant_count
+        item["variants"] = variants
+        item["variant_search"] = _display_name(str(owner_row["resource_path"]))
 
 
 def _escape_like(value: str) -> str:
@@ -1388,7 +1466,13 @@ def search_resources(
             if clothing is not None:
                 item["clothing"] = clothing
     if rows:
-        _attach_clothing_style_variants(connection, rows, items)
+        _attach_resource_variants(
+            connection,
+            rows,
+            items,
+            resolver=resolver,
+            include_package_state=include_package_state,
+        )
     for item in items:
         item.pop("clothing_versions", None)
     return {

@@ -743,7 +743,9 @@ class CatalogTests(unittest.TestCase):
                 "packageName": "Wardrobe",
                 "resourceFullFileName": path,
                 "resourceType": resource_type,
-                "presetAtomType": "Person",
+                "presetAtomType": (
+                    "" if resource_type == "Clothing Item Presets" else "Person"
+                ),
                 "varVersions": ["1"],
             }
 
@@ -779,12 +781,33 @@ class CatalogTests(unittest.TestCase):
 
         by_name = {item["display_name"]: item for item in result["items"]}
         dress = by_name["Dress"]
-        self.assertEqual(dress["variant_group"], "related-clothing-styles")
+        self.assertEqual(dress["variant_group"], "related-resources")
         self.assertEqual(dress["variant_count"], 14)
         self.assertEqual(len(dress["variants"]), 12)
         self.assertEqual(dress["variants"][0]["label"], "Color00")
         self.assertEqual(dress["variant_search"], "Dress")
-        self.assertNotIn("path", dress["variants"][0])
+        first_variant = dress["variants"][0]
+        self.assertEqual(first_variant["resource_type"], "Clothing Item Presets")
+        self.assertEqual(first_variant["creator"], "Creator")
+        self.assertEqual(first_variant["package"], "Wardrobe")
+        self.assertEqual(first_variant["relationship_kind"], "item-style")
+        self.assertEqual(
+            first_variant["relationship_confidence"],
+            "name-match",
+        )
+        self.assertEqual(
+            first_variant["relationship_reason"],
+            "Same-package folder/name/version match; not semantic identity",
+        )
+        for private_field in (
+            "path",
+            "key",
+            "source",
+            "versions",
+            "resolved_resource_ref",
+            "package_ref",
+        ):
+            self.assertNotIn(private_field, first_variant)
 
         long_dress = by_name["Dress Long"]
         self.assertEqual(long_dress["variant_count"], 1)
@@ -1042,11 +1065,12 @@ class CatalogTests(unittest.TestCase):
 
             self.assertEqual(len(recording.related_calls), 2)
             for sql, parameters in recording.related_calls:
-                self.assertLessEqual(len(parameters), 801)
+                self.assertLessEqual(len(parameters), 601)
                 self.assertIn(
                     "CROSS JOIN catalog_resources AS resource",
                     sql,
                 )
+                self.assertNotIn("path_prefix", sql)
                 plan = database.execute(
                     f"EXPLAIN QUERY PLAN {sql}",
                     parameters,
@@ -1060,6 +1084,367 @@ class CatalogTests(unittest.TestCase):
 
         self.assertEqual(len(result["items"]), 205)
         self.assertTrue(all(item.get("variant_count") == 1 for item in result["items"]))
+
+    def test_related_query_fetches_nested_package_family_once(self) -> None:
+        resources: list[dict[str, object]] = []
+        parent = "Custom\\Clothing\\Female\\Creator"
+        for index in range(220):
+            parent += f"\\Nested{index:03d}"
+            common = {
+                "creatorName": "Creator",
+                "packageName": "DeepWardrobe",
+                "varVersions": ["1"],
+            }
+            resources.extend(
+                [
+                    {
+                        **common,
+                        "resourceFullFileName": (
+                            f"{parent}\\Dress{index:03d}.vam"
+                        ),
+                        "resourceType": "Clothing (Female)",
+                        "presetAtomType": "Person",
+                    },
+                    {
+                        **common,
+                        "resourceFullFileName": (
+                            f"{parent}\\Dress{index:03d}_Black.vap"
+                        ),
+                        "resourceType": "Clothing Item Presets",
+                        "presetAtomType": "",
+                    },
+                ]
+            )
+        self.write_catalogue(resources)
+
+        class RecordingConnection:
+            def __init__(self, wrapped: sqlite3.Connection) -> None:
+                self.wrapped = wrapped
+                self.related_calls: list[tuple[str, tuple[object, ...]]] = []
+
+            def execute(
+                self,
+                sql: str,
+                parameters: tuple[object, ...] | list[object] = (),
+            ) -> sqlite3.Cursor:
+                if "WITH wanted(source, creator, package_name" in sql:
+                    self.related_calls.append((sql, tuple(parameters)))
+                return self.wrapped.execute(sql, parameters)
+
+        with connect(self.state) as database:
+            import_browserassist(database, self.vam_root)
+            recording = RecordingConnection(database)
+            result = search_resources(
+                recording,
+                self.vam_root,
+                resource_type="Clothing (Female)",
+                include_package_state=False,
+                limit=500,
+            )
+
+        self.assertEqual(len(recording.related_calls), 1)
+        related_sql, related_parameters = recording.related_calls[0]
+        self.assertEqual(len(related_parameters), 4)
+        self.assertNotIn("path_prefix", related_sql)
+        self.assertNotIn(" LIKE ", related_sql)
+        self.assertEqual(len(result["items"]), 220)
+        self.assertTrue(
+            all(item.get("variant_count") == 1 for item in result["items"])
+        )
+
+    def test_same_type_preset_variants_use_longest_real_base_once(self) -> None:
+        parent = "Custom\\Atom\\Person\\Hair\\Creator\\Bob"
+
+        def resource(path: str) -> dict[str, object]:
+            return {
+                "creatorName": "Creator",
+                "packageName": "HairPack",
+                "resourceFullFileName": path,
+                "resourceType": "Preset Hair",
+                "presetAtomType": "Person",
+                "varVersions": ["3"],
+            }
+
+        self.write_catalogue(
+            [
+                resource(f"{parent}\\Preset_Bob.vap"),
+                resource(f"{parent}\\Preset_Bob_Red.vap"),
+                resource(f"{parent}\\Preset_Bob-Blue.vap"),
+                resource(f"{parent}\\Preset_Bob_Red_Shiny.vap"),
+            ]
+        )
+
+        with connect(self.state) as database:
+            import_browserassist(database, self.vam_root)
+            result = search_resources(
+                database,
+                self.vam_root,
+                resource_type="Preset Hair",
+                include_package_state=False,
+            )
+
+        by_name = {item["display_name"]: item for item in result["items"]}
+        bob = by_name["Bob"]
+        red = by_name["Bob_Red"]
+        self.assertEqual(bob["variant_group"], "related-resources")
+        self.assertEqual(bob["variant_count"], 2)
+        self.assertEqual(
+            [variant["display_name"] for variant in bob["variants"]],
+            ["Bob-Blue", "Bob_Red"],
+        )
+        self.assertNotIn(bob["id"], {variant["id"] for variant in bob["variants"]})
+        self.assertEqual(red["variant_count"], 1)
+        self.assertEqual(
+            [variant["display_name"] for variant in red["variants"]],
+            ["Bob_Red_Shiny"],
+        )
+        self.assertNotIn(
+            by_name["Bob_Red_Shiny"]["id"],
+            {variant["id"] for variant in bob["variants"]},
+        )
+        all_child_ids = [
+            variant["id"]
+            for item in result["items"]
+            for variant in item.get("variants", [])
+        ]
+        self.assertEqual(len(all_child_ids), len(set(all_child_ids)))
+        self.assertTrue(
+            all(
+                variant["relationship_kind"] == "preset-variant"
+                for item in result["items"]
+                for variant in item.get("variants", [])
+            )
+        )
+
+    def test_preset_variants_do_not_cross_family_folder_version_or_atom(self) -> None:
+        owner_path = "Custom\\Atom\\Person\\Hair\\Creator\\Shared\\Preset_Bob.vap"
+
+        def resource(
+            package: str,
+            path: str,
+            version: str,
+            *,
+            resource_type: str = "Preset Hair",
+            atom_type: str = "Person",
+        ) -> dict[str, object]:
+            return {
+                "creatorName": "Creator",
+                "packageName": package,
+                "resourceFullFileName": path,
+                "resourceType": resource_type,
+                "presetAtomType": atom_type,
+                "varVersions": [version],
+            }
+
+        self.write_catalogue(
+            [
+                resource("HairPack", owner_path, "2"),
+                resource(
+                    "hairpack",
+                    owner_path.replace(".vap", "_PackageCase.vap"),
+                    "2",
+                ),
+                resource(
+                    "HairPack",
+                    owner_path.replace("\\Shared\\", "\\Elsewhere\\").replace(
+                        ".vap", "_OtherFolder.vap"
+                    ),
+                    "2",
+                ),
+                resource(
+                    "HairPack",
+                    owner_path.replace("\\Shared\\", "\\shared\\").replace(
+                        ".vap", "_FolderCase.vap"
+                    ),
+                    "2",
+                ),
+                resource(
+                    "HairPack",
+                    owner_path.replace(".vap", "_OldVersion.vap"),
+                    "1",
+                ),
+                resource(
+                    "HairPack",
+                    owner_path.replace(".vap", "_OtherAtom.vap"),
+                    "2",
+                    atom_type="Hair",
+                ),
+                resource(
+                    "HairPack",
+                    owner_path.replace("Preset_Bob", "Preset_Bobcat"),
+                    "2",
+                ),
+                resource(
+                    "HairPack",
+                    owner_path.replace(".vap", "_OtherType.vap"),
+                    "2",
+                    resource_type="Preset Clothing",
+                ),
+            ]
+        )
+
+        with connect(self.state) as database:
+            import_browserassist(database, self.vam_root)
+            result = search_resources(
+                database,
+                self.vam_root,
+                query="Preset_Bob.vap",
+                include_package_state=False,
+            )
+
+        self.assertEqual(result["total"], 1)
+        self.assertNotIn("variants", result["items"][0])
+
+    def test_generic_variant_types_are_intentionally_narrow(self) -> None:
+        def resource(
+            resource_type: str,
+            path: str,
+        ) -> dict[str, object]:
+            return {
+                "creatorName": "Creator",
+                "packageName": "Looks",
+                "resourceFullFileName": path,
+                "resourceType": resource_type,
+                "presetAtomType": "Person",
+                "varVersions": ["1"],
+            }
+
+        self.write_catalogue(
+            [
+                resource(
+                    "Preset Appearance",
+                    "Custom\\Atom\\Person\\Appearance\\Preset_Look.vap",
+                ),
+                resource(
+                    "Preset Appearance",
+                    "Custom\\Atom\\Person\\Appearance\\Preset_Look_Red.vap",
+                ),
+                resource(
+                    "Preset Skin",
+                    "Custom\\Atom\\Person\\Skin\\Preset_Skin.vap",
+                ),
+                resource(
+                    "Preset Skin",
+                    "Custom\\Atom\\Person\\Skin\\Preset_Skin_Tan.vap",
+                ),
+            ]
+        )
+
+        with connect(self.state) as database:
+            import_browserassist(database, self.vam_root)
+            result = search_resources(
+                database,
+                self.vam_root,
+                include_package_state=False,
+            )
+
+        self.assertTrue(
+            all("variants" not in item for item in result["items"])
+        )
+
+    def test_variant_package_state_is_exact_safe_and_bounded(self) -> None:
+        parent = "Custom\\Atom\\Person\\Hair\\Creator\\Bob"
+        base_member = f"{parent}\\Preset_Bob.vap".replace("\\", "/")
+        old_child_member = f"{parent}\\Preset_Bob_Red.vap".replace("\\", "/")
+        make_var(
+            self.addons / "Creator.HairPack.1.var",
+            creator="Creator",
+            package="HairPack",
+            members={
+                base_member: b"{}",
+                old_child_member: b"{}",
+            },
+        )
+        make_var(
+            self.addons / "Creator.HairPack.2.var",
+            creator="Creator",
+            package="HairPack",
+            members={base_member: b"{}"},
+        )
+
+        def resource(path: str) -> dict[str, object]:
+            return {
+                "creatorName": "Creator",
+                "packageName": "HairPack",
+                "resourceFullFileName": path,
+                "resourceType": "Preset Hair",
+                "presetAtomType": "Person",
+                "varVersions": ["1", "2"],
+            }
+
+        resources = [
+            resource(f"{parent}\\Preset_Bob.vap"),
+            resource(f"{parent}\\Preset_Bob_Red.vap"),
+        ]
+        self.write_catalogue(resources)
+
+        with connect(self.state) as database:
+            scan(self.addons, database)
+            import_browserassist(database, self.vam_root)
+            exact = search_resources(
+                database,
+                self.vam_root,
+                resource_type="Preset Hair",
+            )
+            without_state = search_resources(
+                database,
+                self.vam_root,
+                query="Preset_Bob.vap",
+                include_package_state=False,
+            )
+
+        bob = next(
+            item for item in exact["items"] if item["display_name"] == "Bob"
+        )
+        variant = bob["variants"][0]
+        self.assertEqual(bob["selected_version"], "2")
+        self.assertEqual(variant["selected_version"], "1")
+        self.assertEqual(variant["package_ref"], "Creator.HairPack.1")
+        self.assertTrue(variant["enabled"])
+        self.assertFalse(variant["missing"])
+        self.assertNotIn("resolved_resource_ref", variant)
+        self.assertNotIn("path", variant)
+        self.assertNotIn("package_ref", without_state["items"][0]["variants"][0])
+
+        many_resources = [
+            resource(f"{parent}\\Preset_Bob.vap"),
+            *[
+                resource(f"{parent}\\Preset_Bob_Color{index:02d}.vap")
+                for index in range(14)
+            ],
+        ]
+        self.write_catalogue(many_resources)
+        with connect(self.state) as database:
+            import_browserassist(database, self.vam_root)
+            state = {
+                "package_ref": "Creator.HairPack.1",
+                "selected_version": "1",
+                "enabled": True,
+                "missing": False,
+                "resolved_resource_ref": "private-reference",
+            }
+            with mock.patch(
+                "vampip.catalog._ResourceResolver.resource_state",
+                autospec=True,
+                return_value=state,
+            ) as resource_state:
+                bounded = search_resources(
+                    database,
+                    self.vam_root,
+                    query="Preset_Bob.vap",
+                    limit=1,
+                )
+
+        bounded_owner = bounded["items"][0]
+        self.assertEqual(bounded_owner["variant_count"], 14)
+        self.assertEqual(len(bounded_owner["variants"]), 12)
+        self.assertEqual(resource_state.call_count, 13)
+        self.assertTrue(
+            all(
+                "resolved_resource_ref" not in variant
+                for variant in bounded_owner["variants"]
+            )
+        )
 
     def test_connect_migrates_legacy_catalog_clothing_metadata_column(
         self,

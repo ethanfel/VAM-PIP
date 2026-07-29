@@ -7,6 +7,7 @@ import tempfile
 import threading
 import unittest
 from unittest import mock
+from urllib.parse import quote
 
 from vampip.service import ManagerService
 from vampip.web import ManagerHTTPServer
@@ -156,8 +157,8 @@ class WebSecurityTests(unittest.TestCase):
             "frame-ancestors 'none'", response.getheader("Content-Security-Policy")
         )
         document = response.read().decode("utf-8")
-        self.assertIn("/styles.css?v=0.8.1", document)
-        self.assertIn("/app.js?v=0.8.1", document)
+        self.assertIn("/styles.css?v=0.9.0", document)
+        self.assertIn("/app.js?v=0.9.0", document)
 
     def test_session_plugin_endpoints_report_and_import_defaults(self) -> None:
         preset_path = write_web_session_defaults(self.vam_root)
@@ -676,6 +677,59 @@ class WebSecurityTests(unittest.TestCase):
             target_uid="Person 2",
             limit=20,
             offset=0,
+        )
+
+    def test_resource_search_adds_thumbnails_to_numeric_variants_only(self) -> None:
+        special_token = "test token/+?&=#% with-special-characters"
+        self.server.api_token = special_token
+        self.server.service.search_resources = mock.Mock(
+            return_value={
+                "items": [
+                    {
+                        "id": 42,
+                        "variants": [
+                            {"id": 73, "label": "Red"},
+                            {"id": True, "label": "Boolean"},
+                            {"id": -4, "label": "Negative"},
+                            {"id": "81", "label": "String"},
+                        ],
+                    },
+                    {"id": 43, "variants": None},
+                    {"id": 44, "variants": {"id": 74}},
+                    {"id": 45, "variants": "not-a-list"},
+                    {"id": 46, "variants": ({"id": 75},)},
+                ],
+                "total": 5,
+            }
+        )
+        headers = {"X-VAMPIP-Token": special_token}
+        self.connection.request("GET", "/api/resources", headers=headers)
+        response = self.connection.getresponse()
+
+        self.assertEqual(response.status, 200)
+        document = self.response_json(response)
+        item = document["items"][0]
+        encoded_token = quote(special_token, safe="")
+        self.assertEqual(
+            item["thumbnail_url"],
+            f"/api/resources/42/thumbnail?token={encoded_token}",
+        )
+        self.assertEqual(
+            item["variants"][0]["thumbnail_url"],
+            f"/api/resources/73/thumbnail?token={encoded_token}",
+        )
+        self.assertTrue(
+            all(
+                "thumbnail_url" not in variant
+                for variant in item["variants"][1:]
+            )
+        )
+        self.assertIsNone(document["items"][1]["variants"])
+        self.assertNotIn("thumbnail_url", document["items"][2]["variants"])
+        self.assertEqual(document["items"][3]["variants"], "not-a-list")
+        self.assertNotIn(
+            "thumbnail_url",
+            document["items"][4]["variants"][0],
         )
 
     def test_workspace_scene_and_generic_live_action_routes(self) -> None:

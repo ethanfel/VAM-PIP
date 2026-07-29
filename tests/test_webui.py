@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
+import shutil
+import subprocess
 import unittest
 
 
@@ -1110,45 +1113,419 @@ class WorkspaceWebUITests(unittest.TestCase):
         self.assertIn("requestBody.package_version = packageVersion", action)
         self.assertIn("revision: availability.revision", action)
 
-    def test_related_clothing_styles_only_navigate_to_style_search(self) -> None:
-        start = self.javascript.index("function relatedClothingStyleVariants(")
+    def test_name_matched_variant_drawer_is_lazy_and_browse_only(self) -> None:
+        start = self.javascript.index("function normalizedResourceState(")
         end = self.javascript.index("function clothingCategoryForItem(", start)
         block = self.javascript[start:end]
         for field in (
-            'item.variant_group !== "related-clothing-styles"',
-            "item.variant_count",
-            "rawVariant.id",
-            "rawVariant.display_name",
-            "rawVariant.label",
-            "rawVariant.favorite",
-            "item.variant_search",
+            'group !== "related-resources"',
+            'group !== "related-clothing-styles"',
+            "item?.variant_count",
+            "source.display_name",
+            "source.label",
+            "source.favorite",
+            "source.resource_type = \"Clothing Item Presets\"",
+            "source.relationship_kind = \"item-style\"",
+            "source.relationship_confidence",
+            "source.relationship_reason",
+            "equipmentPackageVersion(source)",
+            "resourceUpdateVersion(source)",
+            "item?.variant_search",
         ):
             with self.subTest(field=field):
                 self.assertIn(field, block)
-        self.assertIn('"clothing-item-presets"', block)
-        self.assertIn("resourceThumbnailUrl(variant.id)", block)
+        self.assertIn('createElement("details", "resource-variant-drawer")', block)
+        self.assertIn('createElement("summary", "resource-variant-summary")', block)
+        self.assertIn('"Styles & variants"', block)
+        self.assertIn('"Name match · Same package/folder"', block)
+        self.assertIn('"Same package/folder/name match; not semantic identity"', block)
+        self.assertIn('details.addEventListener("toggle"', block)
+        self.assertIn("app.expandedVariantDrawers.add(drawerKey)", block)
+        self.assertIn("app.expandedVariantDrawers.delete(drawerKey)", block)
+        self.assertIn("if (details.open) populate();", block)
+        self.assertIn("if (expanded) populate();", block)
+        self.assertIn("resourceThumbnailUrl(model.id)", block)
+        self.assertIn("const seenIds = new Set();", block)
+        self.assertIn("if (seenIds.has(model.id)) return null;", block)
         self.assertIn(
-            "browseRelatedClothingStyles(variant.displayName)",
+            'model.relationshipConfidence === "name-match"',
             block,
         )
-        self.assertIn("browseRelatedClothingStyles(ownerSearch)", block)
+        self.assertIn(
+            "browseRelatedResource({ ...model, browseQuery: query }, ownerSearch)",
+            block,
+        )
+        self.assertIn(
+            "{ ...(variants[0] || {}), browseQuery: ownerSearch }",
+            block,
+        )
+        self.assertIn('"Browse style"', block)
+        self.assertIn('"Browse variant"', block)
+        self.assertIn('"Hidden in VaM"', block)
+        self.assertIn('"Available"', block)
+        self.assertIn('"Package missing"', block)
+        self.assertIn('"Resource missing"', block)
+        self.assertIn(
+            '"The containing VAR package is not installed."',
+            block,
+        )
+        self.assertIn(
+            '"The catalogue entry exists, but its exact resource file is unavailable."',
+            block,
+        )
+        self.assertIn("normalizedVariantCount(", block)
+        self.assertIn("Number.isSafeInteger(value)", block)
+        self.assertIn("value > MAX_VARIANT_MATCH_COUNT", block)
+        self.assertIn("function normalizedResourceId(", block)
+        self.assertIn("Number.isSafeInteger(value) && value > 0", block)
+        self.assertIn(
+            'String(candidateType || "").trim().toLowerCase() === normalizedType',
+            block,
+        )
+        self.assertNotIn('"Applied"', block)
         for forbidden in (
             '"/api/vam',
             "setPersonClothing(",
             "applyWorkspaceResource(",
             "createThreeDayLease(",
+            "addPin(",
         ):
             with self.subTest(forbidden=forbidden):
                 self.assertNotIn(forbidden, block)
-        self.assertIn("appendRelatedClothingStyles(body, item)", self.javascript)
+        self.assertIn("appendResourceVariantDrawer(body, item)", self.javascript)
         for selector in (
-            ".related-styles",
-            ".related-styles-strip",
-            ".related-style-tile",
-            ".related-style-favorite",
+            ".resource-variant-drawer",
+            ".resource-variant-summary",
+            ".resource-variant-row",
+            ".resource-variant-visual",
+            ".resource-variant-browse",
         ):
             with self.subTest(selector=selector):
                 self.assertIn(selector, self.styles)
+        summary_start = self.styles.index(".resource-variant-summary {")
+        summary_end = self.styles.index(
+            ".resource-variant-summary::-webkit-details-marker",
+            summary_start,
+        )
+        self.assertIn("min-height: 44px", self.styles[summary_start:summary_end])
+        browse_start = self.styles.index(".resource-variant-browse {")
+        browse_end = self.styles.index(
+            ".resource-variant-footer {",
+            browse_start,
+        )
+        browse = self.styles[browse_start:browse_end]
+        self.assertIn("min-height: 40px", browse)
+        self.assertIn("grid-column: 1 / -1", browse)
+
+    def test_generic_card_model_does_not_dedupe_top_level_results(self) -> None:
+        model_start = self.javascript.index("function normalizeResourceCardModel(")
+        model_end = self.javascript.index(
+            "function normalizeRelatedResourceVariants(", model_start
+        )
+        model = self.javascript[model_start:model_end]
+        self.assertIn("resourceTitle(source)", model)
+        self.assertIn("searchName: declaredTitle", model)
+        for field in (
+            "title,",
+            "creator,",
+            "packageRef,",
+            "packageLabel,",
+            "type,",
+            "tags,",
+            "state,",
+            "selectedVersion,",
+            "updateVersion:",
+            "favorite:",
+        ):
+            with self.subTest(field=field):
+                self.assertIn(field, model)
+
+        load_start = self.javascript.index("async function loadLibrary(")
+        load_end = self.javascript.index("function renderStatus()", load_start)
+        load = self.javascript[load_start:load_end]
+        self.assertIn(
+            "app.items = append ? app.items.concat(incoming) : incoming;",
+            load,
+        )
+        self.assertNotIn("new Map(", load)
+        self.assertNotIn("new Set(", load)
+
+    def test_missing_resource_reason_is_reused_by_disabled_actions(self) -> None:
+        access_start = self.javascript.index(
+            "function appendPackageAccessActions("
+        )
+        access_end = self.javascript.index(
+            "function resourceUpdateVersion(",
+            access_start,
+        )
+        access = self.javascript[access_start:access_end]
+        self.assertIn("missingResourcePresentation(", access)
+        self.assertIn("leaseButton.textContent = missingStatus.label", access)
+        self.assertIn("leaseButton.title = missingStatus.detail", access)
+
+        clothing_start = self.javascript.index(
+            "function clothingActionAvailability("
+        )
+        clothing_end = self.javascript.index(
+            "async function setPersonClothing(",
+            clothing_start,
+        )
+        clothing = self.javascript[clothing_start:clothing_end]
+        self.assertIn(
+            "normalizedResourceState(item, { assumeHidden: true })",
+            clothing,
+        )
+        self.assertIn("reason = missingStatus.detail", clothing)
+        self.assertIn("label = missingStatus.label", clothing)
+
+        workspace_start = self.javascript.index(
+            "function workspaceApplyAvailability("
+        )
+        workspace_end = self.javascript.index(
+            "async function applyWorkspaceResource(",
+            workspace_start,
+        )
+        workspace = self.javascript[workspace_start:workspace_end]
+        self.assertIn(
+            "normalizedResourceState(item, { assumeHidden: true })",
+            workspace,
+        )
+        self.assertIn("reason = missingStatus.detail", workspace)
+        self.assertIn("label = missingStatus.label", workspace)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is not installed")
+    def test_variant_normalization_contract_handles_malformed_payloads(
+        self,
+    ) -> None:
+        def javascript_block(start: str, end: str) -> str:
+            start_index = self.javascript.index(start)
+            end_index = self.javascript.index(end, start_index)
+            return self.javascript[start_index:end_index]
+
+        functions = "\n".join(
+            (
+                javascript_block(
+                    "function booleanValue(",
+                    "function workspaceCategoryId(",
+                ),
+                javascript_block(
+                    "function safePresentationLabel(",
+                    "function safeOpaqueKey(",
+                ),
+                javascript_block(
+                    "function normalizedResourceState(",
+                    "function workspaceCategoryForResourceType(",
+                ),
+                javascript_block(
+                    "function workspaceCategoryForResourceType(",
+                    "function browseRelatedResource(",
+                ),
+                javascript_block(
+                    "function normalizedVariantCount(",
+                    "function clothingCategoryForItem(",
+                ),
+                javascript_block(
+                    "function equipmentPackageVersion(",
+                    "function equipmentItemKey(",
+                ),
+                javascript_block(
+                    "function resourceUpdateVersion(",
+                    "function appendResourceUpdateAction(",
+                ),
+                javascript_block(
+                    "function packageRoot(",
+                    "function prettyType(",
+                ),
+                javascript_block(
+                    "function asArray(",
+                    "function numberOr(",
+                ),
+            )
+        )
+        script = (
+            '"use strict";\n'
+            "const MAX_VARIANT_MATCH_COUNT = 1_000_000;\n"
+            "function ensureWorkspaceCategories() {"
+            ' return [{ id: "hair", resourceTypes: ["Preset Hair"] }];'
+            " }\n"
+            f"{functions}\n"
+            """
+const common = {
+  resource_type: "Preset Hair",
+  relationship_kind: "preset-variant",
+  relationship_confidence: "name-match",
+};
+const variants = normalizeRelatedResourceVariants({
+  variant_group: "related-resources",
+  variants: [
+    null,
+    true,
+    "not-an-object",
+    [],
+    { ...common, id: true, display_name: "Boolean ID" },
+    { ...common, id: "7", display_name: "String ID" },
+    { ...common, id: -3, display_name: "Negative ID" },
+    {
+      ...common,
+      id: 7,
+      display_name: "Valid",
+      label: "/Custom/private/path",
+    },
+    { ...common, id: 7, display_name: "Duplicate" },
+    {
+      ...common,
+      id: 8,
+      display_name: "/Custom/private/name",
+      label: "/Custom/private/label",
+    },
+  ],
+});
+const packageMissing = normalizeResourceCardModel({
+  display_name: "Package missing",
+  missing: true,
+  missing_reason: "package",
+});
+const resourceMissing = normalizeResourceCardModel({
+  display_name: "Resource missing",
+  missing: true,
+  missing_reason: "resource",
+});
+const unsafeMissing = normalizeResourceCardModel({
+  display_name: "Unknown missing",
+  missing: true,
+  missing_reason: "/Custom/private/reason",
+});
+const output = {
+  variants: variants.map((variant) => ({
+    id: variant.id,
+    title: variant.title,
+    label: variant.label,
+    browseQuery: variant.browseQuery,
+  })),
+  nonArrayCount: normalizeRelatedResourceVariants({
+    variant_group: "related-resources",
+    variants: { id: 2 },
+  }).length,
+  categoryId: workspaceCategoryForResourceType("  PRESET HAIR  ")?.id || null,
+  counts: {
+    negative: normalizedVariantCount(-2, 4),
+    boolean: normalizedVariantCount(true, 4),
+    string: normalizedVariantCount("14", 4),
+    huge: normalizedVariantCount(MAX_VARIANT_MATCH_COUNT + 1, 4),
+    valid: normalizedVariantCount(14, 4),
+  },
+  states: {
+    active: normalizedResourceState({ enabled: true }),
+    hidden: normalizedResourceState({ enabled: false }),
+    local: normalizedResourceState({ local: true }),
+    missing: normalizedResourceState({ missing: true }),
+    missingLocal: normalizedResourceState({
+      local: true,
+      missing: true,
+      missing_reason: "resource",
+    }),
+    explicitMissingLocal: normalizedResourceState({
+      local: true,
+      state: "missing",
+    }),
+    unknown: normalizedResourceState({}),
+    assumedHidden: normalizedResourceState({}, { assumeHidden: true }),
+  },
+  packageMissing,
+  resourceMissing,
+  unsafeMissing,
+};
+process.stdout.write(JSON.stringify(output));
+"""
+        )
+        completed = subprocess.run(
+            ["node", "-"],
+            input=script,
+            text=True,
+            capture_output=True,
+            check=True,
+            timeout=10,
+        )
+        result = json.loads(completed.stdout)
+
+        self.assertEqual(result["nonArrayCount"], 0)
+        self.assertEqual(result["categoryId"], "hair")
+        self.assertEqual(
+            [variant["id"] for variant in result["variants"]],
+            [None, None, None, 7, 8],
+        )
+        self.assertEqual(
+            [variant["title"] for variant in result["variants"]],
+            [
+                "Boolean ID",
+                "String ID",
+                "Negative ID",
+                "Valid",
+                "Unnamed name match",
+            ],
+        )
+        self.assertEqual(result["variants"][3]["label"], "Valid")
+        self.assertEqual(result["variants"][4]["browseQuery"], "")
+        self.assertEqual(
+            result["counts"],
+            {
+                "negative": 4,
+                "boolean": 4,
+                "string": 4,
+                "huge": 4,
+                "valid": 14,
+            },
+        )
+        self.assertEqual(
+            result["states"],
+            {
+                "active": "active",
+                "hidden": "hidden",
+                "local": "local",
+                "missing": "missing",
+                "missingLocal": "missing",
+                "explicitMissingLocal": "missing",
+                "unknown": "unknown",
+                "assumedHidden": "hidden",
+            },
+        )
+        self.assertEqual(
+            (
+                result["packageMissing"]["stateLabel"],
+                result["packageMissing"]["missingReasonCode"],
+                result["packageMissing"]["missingDetail"],
+            ),
+            (
+                "Package missing",
+                "package",
+                "The containing VAR package is not installed.",
+            ),
+        )
+        self.assertEqual(
+            (
+                result["resourceMissing"]["stateLabel"],
+                result["resourceMissing"]["missingReasonCode"],
+                result["resourceMissing"]["missingDetail"],
+            ),
+            (
+                "Resource missing",
+                "resource",
+                "The catalogue entry exists, but its exact resource file is unavailable.",
+            ),
+        )
+        self.assertEqual(
+            (
+                result["unsafeMissing"]["stateLabel"],
+                result["unsafeMissing"]["missingReasonCode"],
+                result["unsafeMissing"]["missingDetail"],
+            ),
+            (
+                "Resource unavailable",
+                "unknown",
+                "The catalogue could not resolve this resource.",
+            ),
+        )
+        self.assertNotIn("/Custom/private", completed.stdout)
 
     def test_character_sheet_is_responsive_and_accessible(self) -> None:
         for selector in (
@@ -1175,8 +1552,8 @@ class WorkspaceWebUITests(unittest.TestCase):
         self.assertIn('aria-hidden="true"', self.html)
 
     def test_static_assets_use_the_current_cache_version(self) -> None:
-        self.assertIn("/styles.css?v=0.8.1", self.html)
-        self.assertIn("/app.js?v=0.8.1", self.html)
+        self.assertIn("/styles.css?v=0.9.0", self.html)
+        self.assertIn("/app.js?v=0.9.0", self.html)
 
 
 if __name__ == "__main__":
