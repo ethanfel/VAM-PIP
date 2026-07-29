@@ -60,8 +60,10 @@ from vampip.manager_state import (
     clear_baseline,
     create_lease,
     ensure_baseline,
+    get_lease_context,
     get_setting,
     list_leases,
+    list_package_choices,
     list_pins,
     load_baseline,
     remove_lease,
@@ -69,11 +71,19 @@ from vampip.manager_state import (
     remove_pin,
     renew_lease,
     resolve_managed_set,
+    set_package_choice,
+    set_lease_context,
     set_setting,
 )
 from vampip.models import parse_dependency_ref
-from vampip.profiles import preferred, resolve
-from vampip.references import resource_package_roots
+from vampip.profiles import (
+    PackageCopyChoice,
+    PackageCopyChoiceError,
+    Resolution,
+    preferred,
+    resolve,
+)
+from vampip.references import package_dependency_graph, resource_package_roots
 from vampip.runtime import derive_vam_root, find_vam_processes
 from vampip.session_plugins import (
     SessionPlugin,
@@ -85,6 +95,7 @@ from vampip.switching import (
     apply_switch,
     build_baseline_restore_plan,
     build_switch_plan,
+    logical_relative_path,
     manager_lock,
     rollback_switch,
 )
@@ -92,6 +103,158 @@ from vampip.switching import (
 
 class LiveActionBusyError(RuntimeError):
     """Raised when an ordered VaM bridge action is still in flight."""
+
+
+class PackageConflictError(ValueError):
+    """A package identity needs an explicit, structured user decision."""
+
+    def __init__(
+        self,
+        message: str,
+        conflicts: list[dict[str, object]],
+        *,
+        code: str = "package_copy_conflict",
+    ) -> None:
+        super().__init__(message)
+        self.code = code
+        self.conflicts = conflicts
+
+    def document(self) -> dict[str, object]:
+        return {
+            "code": self.code,
+            "error": str(self),
+            "conflicts": self.conflicts,
+        }
+
+
+def _choice_digest(choice: object | None) -> str | None:
+    value = getattr(choice, "selected_content_sha256", None)
+    return str(value) if value else None
+
+
+def _package_copy_id(row: sqlite3.Row) -> str:
+    payload = "\0".join(
+        (
+            str(row["root"]),
+            str(row["path"]),
+            str(row["size"]),
+            str(row["mtime_ns"]),
+            str(row["content_sha256"] or ""),
+        )
+    )
+    return hashlib.sha256(payload.encode("utf-8", errors="surrogatepass")).hexdigest()[
+        :32
+    ]
+
+
+def _package_conflict_document(
+    group: list[sqlite3.Row],
+    *,
+    choice: object | None,
+    vam_running: bool,
+) -> dict[str, object]:
+    """Serialize one already-hashed same-ID group without accepting paths."""
+
+    ordered = sorted(
+        group,
+        key=lambda row: (
+            logical_relative_path(row).casefold(),
+            str(row["relative_path"]).casefold(),
+        ),
+    )
+    identity = package_id(ordered[0])
+    selected_digest = _choice_digest(choice)
+    available_digests = {
+        str(row["content_sha256"])
+        for row in ordered
+        if is_archive_content_sha256(row["content_sha256"])
+    }
+    choice_stale = bool(
+        selected_digest is not None and selected_digest not in available_digests
+    )
+    selected_physical_path: str | None = None
+    if choice is not None and not choice_stale:
+        try:
+            selected_physical_path = str(preferred(ordered, choice)["path"])
+        except ValueError:
+            selected_physical_path = None
+    copies: list[dict[str, object]] = []
+    for row in ordered:
+        try:
+            dependencies = json.loads(row["dependencies_json"])
+        except (TypeError, json.JSONDecodeError):
+            dependencies = []
+        if not isinstance(dependencies, list):
+            dependencies = []
+        logical_path = logical_relative_path(row)
+        digest = str(row["content_sha256"] or "")
+        digest_selected = bool(
+            selected_digest is not None and digest == selected_digest
+        )
+        path_selected = bool(
+            digest_selected and str(row["path"]) == selected_physical_path
+        )
+        copies.append(
+            {
+                "copy_id": _package_copy_id(row),
+                "relative_path": str(row["relative_path"]),
+                "logical_relative_path": logical_path,
+                "size": int(row["size"]),
+                "mtime_ns": int(row["mtime_ns"]),
+                "active": bool(row["enabled"]),
+                "enabled": bool(row["enabled"]),
+                "content_sha256": digest,
+                "content_fingerprint": (
+                    digest.removeprefix("1:")[:12]
+                    if is_archive_content_sha256(digest)
+                    else None
+                ),
+                "selected": path_selected,
+                "selected_content": digest_selected,
+                "dependencies": [
+                    value for value in dependencies if isinstance(value, str)
+                ],
+            }
+        )
+    revision_payload = json.dumps(
+        [
+            identity.casefold(),
+            selected_digest,
+            (
+                str(getattr(choice, "preferred_logical_path", "") or "")
+                if choice is not None
+                else ""
+            ),
+            [
+                [
+                    item["copy_id"],
+                    item["content_sha256"],
+                    item["active"],
+                ]
+                for item in copies
+            ],
+        ],
+        separators=(",", ":"),
+        ensure_ascii=False,
+    )
+    report_revision = hashlib.sha256(revision_payload.encode("utf-8")).hexdigest()
+    nonselected_active = bool(
+        selected_digest
+        and any(
+            bool(row["enabled"])
+            and str(row["content_sha256"] or "") != selected_digest
+            for row in ordered
+        )
+    )
+    return {
+        "package_id": identity,
+        "report_revision": report_revision,
+        "selected_content_sha256": selected_digest,
+        "choice_stale": choice_stale,
+        "resolved": bool(selected_digest and not choice_stale),
+        "requires_vam_close": bool(vam_running and nonselected_active),
+        "copies": copies,
+    }
 
 
 _LIVE_PACKAGE_RESCAN_SETTING = "pending_live_package_rescan"
@@ -1932,6 +2095,10 @@ class ManagerService:
                 "resource state must be all, active, hidden, missing, or local"
             )
         with connect(self.state_dir) as connection:
+            package_choices = list_package_choices(
+                connection,
+                str(self.addon_dir),
+            )
             selected_types = [
                 value
                 for value in (resource_types or [])
@@ -1961,6 +2128,7 @@ class ManagerService:
                 favorite=favorite,
                 addon_root=self.addon_dir,
                 package_state=None if state == "all" else state,
+                package_choices=package_choices,
                 limit=limit,
                 offset=offset,
             )
@@ -2682,16 +2850,493 @@ class ManagerService:
 
     def resource_thumbnail(self, resource_id: int) -> tuple[Path, str] | None:
         with connect(self.state_dir) as connection:
+            package_choices = list_package_choices(
+                connection,
+                str(self.addon_dir),
+            )
             result = get_resource_thumbnail(
                 connection,
                 self.vam_root,
                 resource_id,
                 self.state_dir / "thumbnails",
                 addon_root=self.addon_dir,
+                package_choices=package_choices,
             )
         if result is None:
             return None
         return result.path, result.content_type
+
+    def resource_details(
+        self,
+        resource_id: int,
+        *,
+        package_version: int | None = None,
+    ) -> dict[str, object]:
+        """Return a lazy, bounded dependency catalogue for one resource."""
+
+        if (
+            isinstance(resource_id, bool)
+            or not isinstance(resource_id, int)
+            or resource_id < 1
+        ):
+            raise ValueError("resource_id must be a positive integer")
+        version_text = self._validate_package_version(package_version)
+        with manager_lock(self.state_dir), connect(self.state_dir) as connection:
+            rows, _ = self._rows(connection, refresh=False)
+            resource = connection.execute(
+                """
+                SELECT id, creator, package_name, versions_json, resource_path,
+                       resource_type, atom_type
+                FROM catalog_resources
+                WHERE id = ? AND root = ?
+                """,
+                (resource_id, str(self.vam_root)),
+            ).fetchone()
+            if resource is None:
+                raise FileNotFoundError(f"unknown catalog resource: {resource_id}")
+            choices = list_package_choices(connection, str(self.addon_dir))
+            roots_from_fallback = False
+            try:
+                roots = resource_package_roots(
+                    connection,
+                    self.vam_root,
+                    resource_id,
+                    addon_root=self.addon_dir,
+                    version_text=version_text,
+                    package_choices=choices,
+                )
+            except ValueError as exc:
+                if str(exc) != "resource is missing from its installed package":
+                    raise
+                creator = str(resource["creator"])
+                package_name = str(resource["package_name"])
+                family_ids = sorted(
+                    {
+                        package_id(row)
+                        for row in rows
+                        if (
+                            row["valid"]
+                            and row["version_text"]
+                            and str(row["creator"]).casefold()
+                            == creator.casefold()
+                            and str(row["package_name"]).casefold()
+                            == package_name.casefold()
+                            and (
+                                version_text is None
+                                or str(row["version_text"]).casefold()
+                                == version_text.casefold()
+                            )
+                        )
+                    },
+                    key=str.casefold,
+                )
+                rows, repair_reports = self._package_conflict_reports(
+                    connection,
+                    rows,
+                    family_ids,
+                    choices=choices,
+                )
+                roots = [
+                    str(report["package_id"])
+                    for report in repair_reports
+                ]
+                if not roots:
+                    raise
+                roots_from_fallback = True
+            graph = package_dependency_graph(
+                roots,
+                rows,
+                package_choices=choices,
+            )
+
+            ambiguous = [
+                str(value) for value in graph.get("ambiguous_ids", [])
+            ]
+            if ambiguous:
+                rows, _ = self._package_conflict_reports(
+                    connection,
+                    rows,
+                    ambiguous,
+                    choices=choices,
+                )
+                # Logical hashes can distinguish harmless repacks from genuine
+                # forks and can change which dependency branches are relevant.
+                choices = list_package_choices(connection, str(self.addon_dir))
+                try:
+                    roots = resource_package_roots(
+                        connection,
+                        self.vam_root,
+                        resource_id,
+                        addon_root=self.addon_dir,
+                        version_text=version_text,
+                        package_choices=choices,
+                    )
+                    roots_from_fallback = False
+                except ValueError as exc:
+                    if (
+                        not roots_from_fallback
+                        or str(exc)
+                        != "resource is missing from its installed package"
+                    ):
+                        raise
+                graph = package_dependency_graph(
+                    roots,
+                    rows,
+                    package_choices=choices,
+                )
+
+            conflict_ids = [
+                str(value) for value in graph.get("conflict_ids", [])
+            ]
+            conflict_keys = {
+                identity.casefold() for identity in conflict_ids
+            }
+            graph_hash_hydration_needed = any(
+                row["valid"]
+                and row["version_text"]
+                and package_id(row).casefold() in conflict_keys
+                and not is_archive_content_sha256(row["content_sha256"])
+                for row in rows
+            )
+            rows, conflicts = self._package_conflict_reports(
+                connection,
+                rows,
+                conflict_ids,
+                choices=choices,
+            )
+            if graph_hash_hydration_needed:
+                # A saved choice can initially look stale simply because its
+                # only remaining copy has not been logically hashed yet. The
+                # conflict report hydrates those hashes, so rebuild the graph
+                # before returning rather than publishing one stale frame.
+                try:
+                    roots = resource_package_roots(
+                        connection,
+                        self.vam_root,
+                        resource_id,
+                        addon_root=self.addon_dir,
+                        version_text=version_text,
+                        package_choices=choices,
+                    )
+                    roots_from_fallback = False
+                except ValueError as exc:
+                    if (
+                        not roots_from_fallback
+                        or str(exc)
+                        != "resource is missing from its installed package"
+                    ):
+                        raise
+                graph = package_dependency_graph(
+                    roots,
+                    rows,
+                    package_choices=choices,
+                )
+                refreshed_conflict_ids = [
+                    str(value) for value in graph.get("conflict_ids", [])
+                ]
+                rows, conflicts = self._package_conflict_reports(
+                    connection,
+                    rows,
+                    refreshed_conflict_ids,
+                    choices=choices,
+                )
+            try:
+                location = resolve_resource_archive(
+                    connection,
+                    self.vam_root,
+                    resource_id,
+                    addon_root=self.addon_dir,
+                    version_text=version_text,
+                    package_choices=choices,
+                )
+            except ValueError as exc:
+                if (
+                    not roots_from_fallback
+                    or str(exc)
+                    != "resource is missing from its installed package"
+                ):
+                    raise
+                location = None
+
+        dependencies = graph.get("dependencies")
+        if not isinstance(dependencies, list):
+            dependencies = []
+        reports = {
+            str(report["package_id"]).casefold(): report
+            for report in conflicts
+        }
+        for dependency in dependencies:
+            if not isinstance(dependency, dict):
+                continue
+            resolved_id = dependency.get("resolved_id")
+            report = (
+                reports.get(str(resolved_id).casefold())
+                if resolved_id is not None
+                else None
+            )
+            if report is not None:
+                dependency["conflict"] = True
+                dependency["conflict_resolved"] = bool(report.get("resolved"))
+                dependency["selected_content_sha256"] = report.get(
+                    "selected_content_sha256"
+                )
+
+        counts = graph.get("counts")
+        if not isinstance(counts, dict):
+            counts = {}
+        counts["conflicts"] = len(conflicts)
+        path = str(resource["resource_path"])
+        return {
+            "resource": {
+                "id": resource_id,
+                "name": Path(path.replace("\\", "/")).stem.removeprefix("Preset_"),
+                "resource_path": path,
+                "resource_type": str(resource["resource_type"]),
+                "atom_type": str(resource["atom_type"]),
+                "creator": str(resource["creator"]),
+                "package": str(resource["package_name"]),
+                "package_ref": location.package_ref if location is not None else None,
+                "selected_version": (
+                    location.version_text if location is not None else version_text
+                ),
+                "local": bool(location is not None and location.local_path is not None),
+            },
+            "detected": True,
+            "roots": roots,
+            "counts": counts,
+            "dependencies": dependencies,
+            "conflicts": conflicts,
+            "truncated": bool(graph.get("truncated")),
+            "edge_count": int(graph.get("edge_count") or 0),
+        }
+
+    def choose_package_copy(
+        self,
+        package_identity: str,
+        copy_id: str | None,
+        report_revision: str,
+    ) -> dict[str, object]:
+        """Persist a content choice after validating an opaque report token."""
+
+        identity = package_identity.strip() if isinstance(package_identity, str) else ""
+        opaque_copy = copy_id.strip() if isinstance(copy_id, str) else ""
+        revision = (
+            report_revision.strip() if isinstance(report_revision, str) else ""
+        )
+        parsed = parse_dependency_ref(identity)
+        if (
+            not identity
+            or len(identity) > 500
+            or parsed is None
+            or parsed.full_id.casefold() != identity.casefold()
+        ):
+            raise ValueError("package_id must be an exact package identity")
+        if not opaque_copy or re.fullmatch(r"[0-9a-f]{32}", opaque_copy) is None:
+            raise ValueError("copy_id must be a 32-character opaque token")
+        if re.fullmatch(r"[0-9a-f]{64}", revision) is None:
+            raise ValueError("report_revision must be a 64-character token")
+
+        with manager_lock(self.state_dir), connect(self.state_dir) as connection:
+            rows, _ = self._rows(connection, refresh=True)
+            choices = list_package_choices(connection, str(self.addon_dir))
+            rows, reports = self._package_conflict_reports(
+                connection,
+                rows,
+                [identity],
+                choices=choices,
+            )
+            if not reports:
+                raise ValueError(
+                    f"{identity} does not currently have different same-ID contents"
+                )
+            report = reports[0]
+            if report["report_revision"] != revision:
+                raise FileExistsError(
+                    "the package copies changed; refresh the dependency report"
+                )
+            copies = report.get("copies")
+            selected_copy = next(
+                (
+                    item
+                    for item in copies
+                    if isinstance(item, dict) and item.get("copy_id") == opaque_copy
+                ),
+                None,
+            ) if isinstance(copies, list) else None
+            if selected_copy is None:
+                raise FileExistsError(
+                    "the selected package copy is stale; refresh and try again"
+                )
+            digest = selected_copy.get("content_sha256")
+            if not is_archive_content_sha256(digest):
+                raise ValueError("the selected package copy could not be verified")
+            choice = PackageCopyChoice(
+                package_id=str(report["package_id"]),
+                selected_content_sha256=str(digest),
+                preferred_logical_path=str(
+                    selected_copy["logical_relative_path"]
+                ),
+            )
+            tentative_choices = dict(choices)
+            tentative_choices[identity.casefold()] = choice
+
+            # Validate every persistent consumer under the proposed choice
+            # before mutating any choice or lease row. Logical hash hydration
+            # commits its cache internally, so all user-visible writes must
+            # stay below this validation phase to preserve atomicity.
+            validation_ids: dict[str, str] = {}
+            pin_roots = [
+                str(pin["root_ref"])
+                for pin in list_pins(connection)
+            ]
+            if pin_roots:
+                pin_graph = package_dependency_graph(
+                    pin_roots,
+                    rows,
+                    package_choices=choices,
+                )
+                pin_uses_choice = any(
+                    isinstance(dependency, dict)
+                    and str(dependency.get("resolved_id") or "").casefold()
+                    == identity.casefold()
+                    for dependency in pin_graph.get("dependencies", [])
+                )
+                if pin_uses_choice or bool(pin_graph.get("truncated")):
+                    pin_resolution = self._resolve_package_roots(
+                        connection,
+                        rows,
+                        [identity],
+                        tentative_choices,
+                    )
+                    if pin_resolution.missing:
+                        missing = ", ".join(
+                            reference
+                            for _, reference in pin_resolution.missing[:10]
+                        )
+                        raise ValueError(
+                            "the selected package content needs unavailable "
+                            f"pinned dependencies: {missing}"
+                        )
+                    for package_row in pin_resolution.selected:
+                        selected_id = package_id(package_row)
+                        validation_ids[selected_id.casefold()] = selected_id
+
+            active_leases = [
+                lease
+                for lease in list_leases(connection)
+                if not bool(lease["expired"])
+                and any(
+                    str(package).casefold() == identity.casefold()
+                    for package in lease["packages"]
+                )
+            ]
+            prepared_leases: list[tuple[str, Resolution]] = []
+            for lease in active_leases:
+                lease_id = str(lease["id"])
+                lease_context = get_lease_context(connection, lease_id)
+                if lease_context is None:
+                    raise ValueError(
+                        "an active lease predates safe package-copy choices; "
+                        "release and reload that asset before changing content"
+                    )
+                snapshot_ids = [
+                    str(package) for package in lease["packages"]
+                ]
+                lease_roots = list(snapshot_ids)
+                if lease_context["kind"] == "resource":
+                    # Resource scans currently retain package identities but
+                    # not every referenced member path. Swapping any affected
+                    # fork could therefore remove an embedded asset even when
+                    # its package still resolves. Keep the active resource
+                    # immutable; release/reload it after making the choice.
+                    raise ValueError(
+                        "an active leased resource uses this package; "
+                        "release and reload that asset before changing content"
+                    )
+                lease_resolution = self._resolve_package_roots(
+                    connection,
+                    rows,
+                    lease_roots,
+                    tentative_choices,
+                )
+                if lease_resolution.missing:
+                    missing = ", ".join(
+                        reference
+                        for _, reference in lease_resolution.missing[:10]
+                    )
+                    raise ValueError(
+                        "the selected package content needs unavailable "
+                        f"dependencies: {missing}"
+                    )
+                prepared_leases.append((lease_id, lease_resolution))
+                for package_row in lease_resolution.selected:
+                    selected_id = package_id(package_row)
+                    validation_ids[selected_id.casefold()] = selected_id
+
+            rows = rows_for_root(connection, self.addon_dir)
+            rows, downstream_conflicts = self._package_conflict_reports(
+                connection,
+                rows,
+                list(validation_ids.values()),
+                choices=tentative_choices,
+            )
+            unresolved = [
+                item
+                for item in downstream_conflicts
+                if not bool(item.get("resolved"))
+            ]
+            if unresolved:
+                raise PackageConflictError(
+                    "the selected content reaches another unresolved "
+                    "same-ID package conflict",
+                    unresolved,
+                )
+
+            added_lease_packages = 0
+            for lease_id, lease_resolution in prepared_leases:
+                for package_row in lease_resolution.selected:
+                    cursor = connection.execute(
+                        """
+                        INSERT OR IGNORE INTO manager_lease_packages(
+                            lease_id, package_id
+                        ) VALUES (?, ?)
+                        """,
+                        (lease_id, package_id(package_row)),
+                    )
+                    added_lease_packages += cursor.rowcount
+
+            choice = set_package_choice(
+                connection,
+                str(self.addon_dir),
+                choice.package_id,
+                choice.selected_content_sha256,
+                preferred_logical_path=choice.preferred_logical_path,
+            )
+            connection.commit()
+            refreshed_report = _package_conflict_document(
+                [
+                    row
+                    for row in rows
+                    if (
+                        row["valid"]
+                        and row["version_text"]
+                        and package_id(row).casefold() == identity.casefold()
+                    )
+                ],
+                choice=choice,
+                vam_running=bool(self._running_pids()),
+            )
+        return {
+            "saved": True,
+            "package_id": str(refreshed_report["package_id"]),
+            "selected_content_sha256": str(digest),
+            "requires_vam_close": bool(
+                refreshed_report.get("requires_vam_close")
+            ),
+            "affected_leases": len(prepared_leases),
+            "added_lease_packages": added_lease_packages,
+            "conflict": refreshed_report,
+        }
 
     def lease_resource(
         self,
@@ -2704,15 +3349,30 @@ class ManagerService:
         bridge_rescan: bool = True,
     ) -> dict[str, object]:
         version_text = self._validate_package_version(package_version)
-        with connect(self.state_dir) as connection:
-            self._rows(connection, refresh=False)
+        with manager_lock(self.state_dir), connect(self.state_dir) as connection:
+            rows, _ = self._rows(connection, refresh=True)
+            package_choices = list_package_choices(
+                connection,
+                str(self.addon_dir),
+            )
             roots = resource_package_roots(
                 connection,
                 self.vam_root,
                 int(resource_id),
                 addon_root=self.addon_dir,
                 version_text=version_text,
+                package_choices=package_choices,
             )
+            resource_location = resolve_resource_archive(
+                connection,
+                self.vam_root,
+                int(resource_id),
+                addon_root=self.addon_dir,
+                version_text=version_text,
+                package_choices=package_choices,
+            )
+            if resource_location is None:
+                raise ValueError("resource is missing from its installed package")
             row = connection.execute(
                 """
                 SELECT resource_path FROM catalog_resources
@@ -2720,6 +3380,33 @@ class ManagerService:
                 """,
                 (int(resource_id), str(self.vam_root)),
             ).fetchone()
+            if label is None and row is not None:
+                label = Path(
+                    str(row["resource_path"]).replace("\\", "/")
+                ).stem.removeprefix("Preset_")
+            if roots:
+                lease_id, resolution, managed_mode = self._create_lease_record(
+                    connection,
+                    rows,
+                    roots,
+                    days=days,
+                    label=label,
+                )
+                set_lease_context(
+                    connection,
+                    lease_id,
+                    kind="resource",
+                    resource_id=int(resource_id),
+                    package_version=resource_location.version_text,
+                    owner_package_id=resource_location.package_ref,
+                    resource_path=resource_location.resource_path,
+                    archive_member=resource_location.archive_member,
+                )
+                if apply and not managed_mode:
+                    raise ValueError(
+                        "managed mode is not active; configure pins and "
+                        "activate it first"
+                    )
         if not roots:
             return {
                 "resource_id": int(resource_id),
@@ -2729,18 +3416,19 @@ class ManagerService:
                 "applied": False,
                 "already_local": True,
             }
-        if label is None and row is not None:
-            label = Path(
-                str(row["resource_path"]).replace("\\", "/")
-            ).stem.removeprefix("Preset_")
-        result = self.lease(
-            roots,
-            days=days,
-            label=label,
-            apply=apply,
-            bridge_rescan=bridge_rescan,
-        )
-        result["resource_id"] = int(resource_id)
+        result: dict[str, object] = {
+            "resource_id": int(resource_id),
+            "lease_id": lease_id,
+            "roots": roots,
+            "resolved_packages": len(resolution.selected),
+            "applied": False,
+        }
+        if apply:
+            result["reconcile"] = self.reconcile(
+                apply=True,
+                bridge_rescan=bridge_rescan,
+            )
+            result["applied"] = True
         if version_text is not None:
             result["selected_version"] = version_text
         result["discovered_roots"] = roots
@@ -3127,6 +3815,10 @@ class ManagerService:
         with self._bridge_mailbox_transaction():
             with connect(self.state_dir) as connection:
                 self._rows(connection, refresh=False)
+                package_choices = list_package_choices(
+                    connection,
+                    str(self.addon_dir),
+                )
                 row = connection.execute(
                     """
                     SELECT resource_type, atom_type, resource_path
@@ -3159,6 +3851,7 @@ class ManagerService:
                     resource_id,
                     addon_root=self.addon_dir,
                     version_text=version_text,
+                    package_choices=package_choices,
                 )
             if location is None:
                 raise ValueError(
@@ -3344,6 +4037,10 @@ class ManagerService:
 
         with connect(self.state_dir) as connection:
             self._rows(connection, refresh=False)
+            package_choices = list_package_choices(
+                connection,
+                str(self.addon_dir),
+            )
             row = connection.execute(
                 """
                 SELECT resource_type, atom_type FROM catalog_resources
@@ -3359,6 +4056,7 @@ class ManagerService:
                 int(resource_id),
                 addon_root=self.addon_dir,
                 version_text=version_text,
+                package_choices=package_choices,
             )
         if location is None:
             raise ValueError("the selected catalog resource file is not installed")
@@ -4183,50 +4881,165 @@ class ManagerService:
     def _running_pids(self) -> list[int]:
         return self._process_probe()
 
+    def _package_conflict_reports(
+        self,
+        connection: sqlite3.Connection,
+        rows: list[sqlite3.Row],
+        package_ids: list[str] | tuple[str, ...],
+        *,
+        choices: dict[str, PackageCopyChoice] | None = None,
+        vam_running: bool | None = None,
+    ) -> tuple[list[sqlite3.Row], list[dict[str, object]]]:
+        """Hydrate and serialize genuine logical conflicts for exact IDs."""
+
+        wanted = {identity.casefold() for identity in package_ids}
+        grouped: dict[str, list[sqlite3.Row]] = {}
+        for row in rows:
+            if row["valid"] and row["version_text"]:
+                key = package_id(row).casefold()
+                if key in wanted:
+                    grouped.setdefault(key, []).append(row)
+        current_choices = choices
+        if current_choices is None:
+            current_choices = list_package_choices(
+                connection,
+                str(self.addon_dir),
+            )
+        hash_rows = [
+            row
+            for key, group in grouped.items()
+            if len(group) > 1 or key in current_choices
+            for row in group
+        ]
+        if hash_rows:
+            ensure_content_hashes(connection, hash_rows)
+            rows = rows_for_root(connection, self.addon_dir)
+            grouped.clear()
+            for row in rows:
+                if row["valid"] and row["version_text"]:
+                    key = package_id(row).casefold()
+                    if key in wanted:
+                        grouped.setdefault(key, []).append(row)
+
+        running = (
+            bool(self._running_pids())
+            if vam_running is None
+            else bool(vam_running)
+        )
+        reports: list[dict[str, object]] = []
+        for key, group in grouped.items():
+            signatures = [
+                str(row["content_sha256"])
+                for row in group
+                if is_archive_content_sha256(row["content_sha256"])
+            ]
+            unique_signatures = set(signatures)
+            choice = current_choices.get(key) if current_choices else None
+            selected_digest = _choice_digest(choice)
+            stale = bool(
+                selected_digest is not None
+                and selected_digest not in unique_signatures
+            )
+            genuine_conflict = (
+                len(group) > 1
+                and (
+                    len(signatures) != len(group)
+                    or len(unique_signatures) > 1
+                )
+            )
+            if not genuine_conflict and not stale:
+                continue
+            reports.append(
+                _package_conflict_document(
+                    group,
+                    choice=choice,
+                    vam_running=running,
+                )
+            )
+        reports.sort(key=lambda report: str(report["package_id"]).casefold())
+        return rows, reports
+
+    def _resolve_package_roots(
+        self,
+        connection: sqlite3.Connection,
+        rows: list[sqlite3.Row],
+        roots: list[str],
+        choices: dict[str, PackageCopyChoice],
+    ) -> Resolution:
+        current_rows = rows
+        repaired_choices: set[str] = set()
+        while True:
+            try:
+                return resolve(roots, current_rows, choices=choices)
+            except PackageCopyChoiceError as exc:
+                current_rows, reports = self._package_conflict_reports(
+                    connection,
+                    current_rows,
+                    [exc.package_id],
+                    choices=choices,
+                )
+                unresolved = [
+                    report
+                    for report in reports
+                    if not bool(report.get("resolved"))
+                ]
+                if unresolved:
+                    raise PackageConflictError(
+                        "saved package-copy choice needs attention: "
+                        + exc.package_id,
+                        unresolved,
+                        code="package_copy_choice_stale",
+                    ) from exc
+                choice_key = exc.package_id.casefold()
+                if choice_key in repaired_choices:
+                    raise
+                repaired_choices.add(choice_key)
+
     def _verify_desired_copies(
         self,
         connection: sqlite3.Connection,
         rows: list[sqlite3.Row],
         desired_ids: list[str],
+        *,
+        vam_running: bool | None = None,
     ) -> list[sqlite3.Row]:
         """Compare logical contents of ambiguous desired package copies."""
 
-        desired = {identity.casefold() for identity in desired_ids}
-        grouped: dict[str, list[sqlite3.Row]] = {}
-        for row in rows:
-            if row["valid"] and row["version_text"]:
-                key = package_id(row).casefold()
-                if key in desired:
-                    grouped.setdefault(key, []).append(row)
-
-        hash_rows: list[sqlite3.Row] = []
-        for group in grouped.values():
-            if len(group) > 1:
-                hash_rows.extend(group)
-        if hash_rows:
-            ensure_content_hashes(connection, hash_rows)
-            rows = rows_for_root(connection, self.addon_dir)
-
-        grouped.clear()
-        for row in rows:
-            if row["valid"] and row["version_text"]:
-                key = package_id(row).casefold()
-                if key in desired:
-                    grouped.setdefault(key, []).append(row)
-        conflicts: list[str] = []
-        for group in grouped.values():
-            if len(group) < 2:
-                continue
-            signatures = {str(row["content_sha256"] or "") for row in group}
-            if (
-                any(not is_archive_content_sha256(value) for value in signatures)
-                or len(signatures) > 1
-            ):
-                conflicts.append(package_id(group[0]))
-        if conflicts:
-            raise ValueError(
-                "same-ID packages contain different data: "
-                + ", ".join(sorted(conflicts, key=str.casefold)[:10])
+        choices = list_package_choices(connection, str(self.addon_dir))
+        rows, reports = self._package_conflict_reports(
+            connection,
+            rows,
+            desired_ids,
+            choices=choices,
+            vam_running=vam_running,
+        )
+        unresolved = [
+            report
+            for report in reports
+            if not bool(report.get("resolved"))
+        ]
+        if unresolved:
+            identities = ", ".join(
+                str(report["package_id"]) for report in unresolved[:10]
+            )
+            raise PackageConflictError(
+                "same-ID packages contain different data: " + identities,
+                unresolved,
+            )
+        unsafe_live = [
+            report
+            for report in reports
+            if bool(report.get("requires_vam_close"))
+        ]
+        if unsafe_live:
+            identities = ", ".join(
+                str(report["package_id"]) for report in unsafe_live[:10]
+            )
+            raise PackageConflictError(
+                "close VaM to switch away from the active conflicting copy: "
+                + identities,
+                unsafe_live,
+                code="package_copy_switch_requires_vam_close",
             )
         return rows
 
@@ -4234,12 +5047,13 @@ class ManagerService:
     def _session_plugin_root_row(
         plugin: SessionPlugin,
         rows: list[sqlite3.Row],
+        choices: dict[str, PackageCopyChoice] | None = None,
     ) -> sqlite3.Row | None:
         """Return the archive selected for one packaged plugin root."""
 
         if plugin.package_ref is None:
             return None
-        resolution = resolve([plugin.package_ref], rows)
+        resolution = resolve([plugin.package_ref], rows, choices=choices)
         if any(
             owner == "<root>" and reference.casefold() == plugin.package_ref.casefold()
             for owner, reference in resolution.missing
@@ -4302,13 +5116,14 @@ class ManagerService:
         with manager_lock(self.state_dir), connect(self.state_dir) as connection:
             rows, _ = self._rows(connection, refresh=False)
             pins = list_pins(connection)
+            choices = list_package_choices(connection, str(self.addon_dir))
 
         pinned_roots = {str(pin["root_ref"]).casefold() for pin in pins}
         enabled_roots = list(preset.enabled_package_roots)
-        session_resolution = resolve(enabled_roots, rows)
+        session_resolution = resolve(enabled_roots, rows, choices=choices)
         items: list[dict[str, object]] = []
         for plugin in preset.plugins:
-            root_row = self._session_plugin_root_row(plugin, rows)
+            root_row = self._session_plugin_root_row(plugin, rows, choices)
             loose_available = self._loose_session_plugin_exists(plugin)
             items.append(
                 {
@@ -4385,12 +5200,18 @@ class ManagerService:
         with manager_lock(self.state_dir):
             with connect(self.state_dir) as connection:
                 rows, _ = self._rows(connection, refresh=bool(roots))
+                choices = list_package_choices(connection, str(self.addon_dir))
                 existing = {
                     str(pin["root_ref"]).casefold() for pin in list_pins(connection)
                 }
                 already_pinned = sum(root.casefold() in existing for root in roots)
                 if roots:
-                    resolution = resolve(roots, rows)
+                    resolution = self._resolve_package_roots(
+                        connection,
+                        rows,
+                        roots,
+                        choices,
+                    )
                     if resolution.missing:
                         summary = ", ".join(
                             (
@@ -4448,6 +5269,7 @@ class ManagerService:
             auto_reconcile = bool(get_setting(connection, "auto_reconcile", True))
             pins = list_pins(connection)
             leases = list_leases(connection)
+            choices = list_package_choices(connection, str(self.addon_dir))
             catalog_count = connection.execute(
                 "SELECT COUNT(*) FROM catalog_resources WHERE root = ?",
                 (str(self.vam_root),),
@@ -4459,14 +5281,27 @@ class ManagerService:
             pending_disable = 0
             pending_enable = 0
             missing: tuple[tuple[str, str], ...] = ()
+            package_choice_issue: dict[str, str] | None = None
             if managed_mode:
-                desired, missing = resolve_managed_set(connection, rows)
                 try:
+                    desired, missing = resolve_managed_set(
+                        connection,
+                        rows,
+                        choices=choices,
+                    )
                     pending_plan = build_switch_plan(
-                        rows, desired, disable_unselected=True
+                        rows,
+                        desired,
+                        disable_unselected=True,
+                        choices=choices,
                     )
                     pending_disable = len(pending_plan.to_disable)
                     pending_enable = len(pending_plan.to_enable)
+                except PackageCopyChoiceError as exc:
+                    package_choice_issue = {
+                        "package_id": exc.package_id,
+                        "error": str(exc),
+                    }
                 except ValueError:
                     pending_disable = 0
                     pending_enable = 0
@@ -4490,6 +5325,7 @@ class ManagerService:
             "catalog_resources": catalog_count,
             "pending_enable": pending_enable,
             "pending_disable": pending_disable,
+            "package_choice_issue": package_choice_issue,
             "missing_pins": [
                 {"required_by": owner, "reference": reference}
                 for owner, reference in missing
@@ -4528,6 +5364,7 @@ class ManagerService:
         needle = query.strip().casefold()
         with connect(self.state_dir) as connection:
             rows, _ = self._rows(connection, refresh=False)
+            choices = list_package_choices(connection, str(self.addon_dir))
 
         grouped: dict[str, list[sqlite3.Row]] = {}
         invalid: list[sqlite3.Row] = []
@@ -4539,9 +5376,16 @@ class ManagerService:
 
         items: list[dict[str, object]] = []
         for group in grouped.values():
-            selected = preferred(group)
+            identity_key = package_id(group[0]).casefold()
+            choice = choices.get(identity_key)
+            try:
+                selected = preferred(group, choice)
+                choice_stale = False
+            except PackageCopyChoiceError:
+                selected = preferred(group)
+                choice_stale = True
             identity = package_id(selected)
-            active = any(bool(row["enabled"]) for row in group)
+            active = bool(selected["enabled"])
             if needle and needle not in identity.casefold():
                 continue
             if state == "active" and not active:
@@ -4567,6 +5411,8 @@ class ManagerService:
                     "relative_path": selected["relative_path"],
                     "copies": len(group),
                     "dependencies": dependencies,
+                    "copy_choice": _choice_digest(choice),
+                    "copy_choice_stale": choice_stale,
                 }
             )
         if state in {"all", "invalid"}:
@@ -4611,7 +5457,13 @@ class ManagerService:
         with manager_lock(self.state_dir):
             with connect(self.state_dir) as connection:
                 rows, _ = self._rows(connection, refresh=True)
-                resolution = resolve(roots, rows)
+                choices = list_package_choices(connection, str(self.addon_dir))
+                resolution = self._resolve_package_roots(
+                    connection,
+                    rows,
+                    roots,
+                    choices,
+                )
                 if resolution.missing:
                     summary = ", ".join(
                         reference for _, reference in resolution.missing[:10]
@@ -4641,6 +5493,47 @@ class ManagerService:
             result["reconcile"] = self.reconcile(apply=True)
         return result
 
+    def _create_lease_record(
+        self,
+        connection: sqlite3.Connection,
+        rows: list[sqlite3.Row],
+        roots: list[str],
+        *,
+        days: float,
+        label: str | None,
+    ) -> tuple[str, Resolution, bool]:
+        choices = list_package_choices(connection, str(self.addon_dir))
+        resolution = self._resolve_package_roots(
+            connection,
+            rows,
+            roots,
+            choices,
+        )
+        rows = self._verify_desired_copies(
+            connection,
+            rows,
+            [package_id(row) for row in resolution.selected],
+        )
+        choices = list_package_choices(connection, str(self.addon_dir))
+        resolution = self._resolve_package_roots(
+            connection,
+            rows,
+            roots,
+            choices,
+        )
+        lease_id = create_lease(
+            connection,
+            roots,
+            resolution,
+            days=days,
+            label=label,
+        )
+        return (
+            lease_id,
+            resolution,
+            bool(get_setting(connection, "managed_mode", False)),
+        )
+
     def lease(
         self,
         roots: list[str],
@@ -4655,21 +5548,23 @@ class ManagerService:
         with manager_lock(self.state_dir):
             with connect(self.state_dir) as connection:
                 rows, _ = self._rows(connection, refresh=True)
-                resolution = resolve(roots, rows)
-                rows = self._verify_desired_copies(
+                lease_id, resolution, managed_mode = self._create_lease_record(
                     connection,
                     rows,
-                    [package_id(row) for row in resolution.selected],
-                )
-                resolution = resolve(roots, rows)
-                lease_id = create_lease(
-                    connection,
                     roots,
-                    resolution,
                     days=days,
                     label=label,
                 )
-                managed_mode = bool(get_setting(connection, "managed_mode", False))
+                set_lease_context(
+                    connection,
+                    lease_id,
+                    kind="generic",
+                )
+                if apply and not managed_mode:
+                    raise ValueError(
+                        "managed mode is not active; configure pins and "
+                        "activate it first"
+                    )
         result: dict[str, object] = {
             "lease_id": lease_id,
             "roots": roots,
@@ -4677,12 +5572,6 @@ class ManagerService:
             "applied": False,
         }
         if apply:
-            if not managed_mode:
-                with connect(self.state_dir) as connection:
-                    remove_lease(connection, lease_id)
-                raise ValueError(
-                    "managed mode is not active; configure pins and activate it first"
-                )
             result["reconcile"] = self.reconcile(
                 apply=True,
                 bridge_rescan=bridge_rescan,
@@ -4875,21 +5764,69 @@ class ManagerService:
                     session_roots = load_session_plugin_defaults(
                         self.vam_root
                     ).enabled_package_roots
-                desired, missing = resolve_managed_set(
+                choices = list_package_choices(
                     connection,
-                    rows,
-                    extra_roots=session_roots,
+                    str(self.addon_dir),
                 )
+                repaired_choices: set[str] = set()
+                while True:
+                    try:
+                        desired, missing = resolve_managed_set(
+                            connection,
+                            rows,
+                            extra_roots=session_roots,
+                            choices=choices,
+                        )
+                        break
+                    except PackageCopyChoiceError as exc:
+                        rows, reports = self._package_conflict_reports(
+                            connection,
+                            rows,
+                            [exc.package_id],
+                            choices=choices,
+                        )
+                        unresolved = [
+                            report
+                            for report in reports
+                            if not bool(report.get("resolved"))
+                        ]
+                        if unresolved:
+                            raise PackageConflictError(
+                                "saved package-copy choice needs attention: "
+                                + exc.package_id,
+                                unresolved,
+                                code="package_copy_choice_stale",
+                            ) from exc
+                        choice_key = exc.package_id.casefold()
+                        if choice_key in repaired_choices:
+                            raise
+                        repaired_choices.add(choice_key)
                 if missing:
                     summary = ", ".join(reference for _, reference in missing[:10])
                     raise ValueError(f"managed package resolution failed: {summary}")
-                rows = self._verify_desired_copies(connection, rows, desired)
-
-                full_plan = build_switch_plan(rows, desired, disable_unselected=True)
                 pids = self._running_pids()
                 running = bool(pids)
+                rows = self._verify_desired_copies(
+                    connection,
+                    rows,
+                    desired,
+                    vam_running=running,
+                )
+                choices = list_package_choices(connection, str(self.addon_dir))
+
+                full_plan = build_switch_plan(
+                    rows,
+                    desired,
+                    disable_unselected=True,
+                    choices=choices,
+                )
                 plan = (
-                    build_switch_plan(rows, desired, disable_unselected=False)
+                    build_switch_plan(
+                        rows,
+                        desired,
+                        disable_unselected=False,
+                        choices=choices,
+                    )
                     if running
                     else full_plan
                 )
@@ -4915,6 +5852,46 @@ class ManagerService:
                 baseline_added = ensure_baseline(connection, root_text, rows)
                 if baseline_added or activating:
                     connection.commit()
+
+                # VaM is external to the manager lock and may have started or
+                # stopped while dependency hashing and plan construction ran.
+                # Recheck immediately before the filesystem switch, then
+                # revalidate conflict safety against the same runtime decision
+                # that selects the disabling or enable-only plan.
+                final_pids = self._running_pids()
+                final_running = bool(final_pids)
+                if final_running != running:
+                    running = final_running
+                    pids = final_pids
+                    rows = self._verify_desired_copies(
+                        connection,
+                        rows,
+                        desired,
+                        vam_running=running,
+                    )
+                    choices = list_package_choices(
+                        connection,
+                        str(self.addon_dir),
+                    )
+                    full_plan = build_switch_plan(
+                        rows,
+                        desired,
+                        disable_unselected=True,
+                        choices=choices,
+                    )
+                    plan = (
+                        build_switch_plan(
+                            rows,
+                            desired,
+                            disable_unselected=False,
+                            choices=choices,
+                        )
+                        if running
+                        else full_plan
+                    )
+                    pending_disable = len(full_plan.to_disable) if running else 0
+                    if bridge_rescan and running and plan.to_enable:
+                        self._ensure_bridge_mailbox_idle()
                 manifest = apply_switch(
                     self.state_dir,
                     self.addon_dir,

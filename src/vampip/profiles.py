@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import defaultdict, deque
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
@@ -21,6 +22,37 @@ _PROFILE_NAME = re.compile(r"^[A-Za-z0-9_.-]+$")
 class Resolution:
     selected: tuple[sqlite3.Row, ...]
     missing: tuple[tuple[str, str], ...]
+
+
+@dataclass(frozen=True)
+class PackageCopyChoice:
+    package_id: str
+    selected_content_sha256: str
+    preferred_logical_path: str | None = None
+
+
+class PackageCopyChoiceError(ValueError):
+    """A saved physical-copy choice cannot be applied safely."""
+
+    def __init__(
+        self,
+        package_id: str,
+        selected_content_sha256: str,
+        *,
+        reason: str,
+        available_content_sha256: tuple[str, ...] = (),
+    ) -> None:
+        self.package_id = package_id
+        self.selected_content_sha256 = selected_content_sha256
+        self.reason = reason
+        self.available_content_sha256 = available_content_sha256
+        if reason == "unverified":
+            detail = "installed copies have not all been content-hashed"
+        else:
+            detail = "the selected content is no longer installed"
+        super().__init__(
+            f"saved package-copy choice for {package_id} cannot be used: {detail}"
+        )
 
 
 @dataclass(frozen=True)
@@ -53,21 +85,114 @@ def _preferred_key(row: sqlite3.Row) -> tuple[int, int, int, int, str]:
     )
 
 
-def preferred(rows: list[sqlite3.Row]) -> sqlite3.Row:
-    return min(rows, key=_preferred_key)
+def preferred(
+    rows: list[sqlite3.Row],
+    choice: PackageCopyChoice | None = None,
+) -> sqlite3.Row:
+    candidates = rows
+    if choice is not None:
+        expected_id = choice.package_id.casefold()
+        identities = {package_id(row).casefold() for row in rows}
+        if identities != {expected_id}:
+            raise ValueError(
+                f"package-copy choice for {choice.package_id} was applied "
+                "to different package candidates"
+            )
+        selected_digest = choice.selected_content_sha256.strip()
+        if not selected_digest:
+            raise ValueError("selected package content hash cannot be empty")
+        candidates = [
+            row
+            for row in rows
+            if str(row["content_sha256"] or "").casefold()
+            == selected_digest.casefold()
+        ]
+        if not candidates:
+            available = tuple(
+                sorted(
+                    {
+                        str(row["content_sha256"])
+                        for row in rows
+                        if row["content_sha256"]
+                    },
+                    key=str.casefold,
+                )
+            )
+            reason = (
+                "unverified"
+                if any(not row["content_sha256"] for row in rows)
+                else "stale"
+            )
+            raise PackageCopyChoiceError(
+                choice.package_id,
+                selected_digest,
+                reason=reason,
+                available_content_sha256=available,
+            )
+
+    hint = (
+        choice.preferred_logical_path.casefold()
+        if choice is not None and choice.preferred_logical_path
+        else None
+    )
+
+    def key(row: sqlite3.Row) -> tuple[object, ...]:
+        hint_rank = (
+            0
+            if hint is not None and _logical_relative(row).casefold() == hint
+            else 1
+        )
+        return (hint_rank, *_preferred_key(row))
+
+    return min(candidates, key=key)
 
 
-def _choose_latest(rows: list[sqlite3.Row]) -> sqlite3.Row | None:
+def _choice_for(
+    identity: str,
+    choices: Mapping[str, PackageCopyChoice],
+) -> PackageCopyChoice | None:
+    return choices.get(identity.casefold())
+
+
+def _preferred_with_choices(
+    rows: list[sqlite3.Row],
+    choices: Mapping[str, PackageCopyChoice],
+) -> sqlite3.Row:
+    identity = package_id(rows[0])
+    return preferred(rows, _choice_for(identity, choices))
+
+
+def _choose_latest(
+    rows: list[sqlite3.Row],
+    choices: Mapping[str, PackageCopyChoice],
+) -> sqlite3.Row | None:
     if not rows:
         return None
     numeric = [row for row in rows if row["version"] is not None]
     if numeric:
         highest = max(row["version"] for row in numeric)
-        return preferred([row for row in numeric if row["version"] == highest])
-    return preferred(rows)
+        return _preferred_with_choices(
+            [row for row in numeric if row["version"] == highest],
+            choices,
+        )
+    default = preferred(rows)
+    exact = [
+        row
+        for row in rows
+        if package_id(row).casefold() == package_id(default).casefold()
+    ]
+    return _preferred_with_choices(exact, choices)
 
 
-def resolve(roots: list[str], rows: list[sqlite3.Row]) -> Resolution:
+def resolve(
+    roots: list[str],
+    rows: list[sqlite3.Row],
+    *,
+    choices: Mapping[str, PackageCopyChoice] | None = None,
+) -> Resolution:
+    normalized_choices = {
+        key.casefold(): choice for key, choice in (choices or {}).items()
+    }
     valid = [row for row in rows if row["valid"] and row["version_text"]]
     by_full: dict[str, list[sqlite3.Row]] = defaultdict(list)
     by_family: dict[str, list[sqlite3.Row]] = defaultdict(list)
@@ -78,13 +203,16 @@ def resolve(roots: list[str], rows: list[sqlite3.Row]) -> Resolution:
     def choose(reference: str) -> sqlite3.Row | None:
         key = reference.casefold()
         if key in by_full:
-            return preferred(by_full[key])
+            return _preferred_with_choices(by_full[key], normalized_choices)
         dependency = parse_dependency_ref(reference)
         if dependency is not None:
             if dependency.is_latest:
-                return _choose_latest(by_family.get(dependency.family_key, []))
+                return _choose_latest(
+                    by_family.get(dependency.family_key, []),
+                    normalized_choices,
+                )
             return None
-        return _choose_latest(by_family.get(key, []))
+        return _choose_latest(by_family.get(key, []), normalized_choices)
 
     pending: deque[tuple[str, str]] = deque(("<root>", root) for root in roots)
     selected: dict[str, sqlite3.Row] = {}

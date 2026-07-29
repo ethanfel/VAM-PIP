@@ -1256,7 +1256,19 @@ process.stdout.write(JSON.stringify(output));
         self.assertIn('createElement("div", "resource-detail-preview")', block)
         self.assertIn('createElement("dl", "resource-detail-facts")', block)
         self.assertIn("appendResourceActions(actions, item, model)", block)
-        self.assertIn("renderResourceDetailVariants(layout, item)", block)
+        self.assertIn(
+            'createElement("div", "resource-detail-catalogue")',
+            block,
+        )
+        self.assertIn(
+            "renderResourceDetailDependencies(\n"
+            "    catalogue,\n"
+            "    item,",
+            block,
+        )
+        self.assertIn("reusableDependencyReport", block)
+        self.assertIn("{ refresh: !reusableDependencyReport }", block)
+        self.assertIn("renderResourceDetailVariants(catalogue, item)", block)
         self.assertIn(
             'createElement("div", "resource-variant-gallery")',
             block,
@@ -1338,6 +1350,8 @@ process.stdout.write(JSON.stringify(output));
             ".resource-detail-layout",
             ".resource-detail-preview",
             ".resource-detail-facts",
+            ".resource-detail-catalogue",
+            ".resource-detail-dependencies",
             ".resource-variant-gallery",
             ".resource-variant-tile",
             ".resource-variant-visual",
@@ -1375,6 +1389,269 @@ process.stdout.write(JSON.stringify(output));
         self.assertIn(
             "elements.searchInput.focus({ preventScroll: true })",
             render,
+        )
+
+    def test_resource_detail_lazily_renders_a_paged_dependency_catalogue(
+        self,
+    ) -> None:
+        start = self.javascript.index("function boundedDependencyText(")
+        end = self.javascript.index(
+            "function renderResourceDetailVariants(", start
+        )
+        block = self.javascript[start:end]
+        self.assertIn("const DEPENDENCY_PAGE_SIZE = 8;", self.javascript)
+        self.assertIn("const MAX_RENDERED_DEPENDENCIES = 2_048;", self.javascript)
+        self.assertIn("function normalizeDependencyReport(payload)", block)
+        self.assertIn(
+            "source.dependencies || envelope.dependencies",
+            block,
+        )
+        self.assertIn("entry.required_by", block)
+        self.assertIn("entry.resolved_id", block)
+        self.assertIn("report.truncated", block)
+        self.assertIn(
+            "`/api/resources/${encodeURIComponent(resourceId)}/details${versionQuery}`",
+            block,
+        )
+        self.assertIn("equipmentPackageVersion(item)", block)
+        self.assertIn("?package_version=", block)
+        self.assertIn("new AbortController()", block)
+        self.assertIn("generation !== app.resourceDependencyGeneration", block)
+        self.assertIn("if (initialPayload && !refresh)", block)
+        self.assertIn(
+            '"Previous dependency page"',
+            block,
+        )
+        self.assertIn('"Next dependency page"', block)
+        self.assertIn(
+            "page.start + DEPENDENCY_PAGE_SIZE",
+            block,
+        )
+        self.assertIn(
+            "browseDependencyPackage(entry.packageId)",
+            block,
+        )
+        self.assertIn('setView("packages")', block)
+        self.assertIn("elements.searchInput.value = query", block)
+        self.assertIn("app.exactPackageId = query", block)
+        self.assertNotIn("load-more", block.lower())
+        for selector in (
+            ".dependency-summary",
+            ".dependency-conflict-panel",
+            ".dependency-copy-grid",
+            ".dependency-list",
+            ".dependency-page-arrow",
+            ".dependency-open-package",
+        ):
+            with self.subTest(selector=selector):
+                self.assertIn(selector, self.styles)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is not installed")
+    def test_dependency_package_navigation_filters_to_the_exact_identity(
+        self,
+    ) -> None:
+        start = self.javascript.index("function packageItemIdentity(")
+        end = self.javascript.index("function changeLibraryPage(", start)
+        helper = self.javascript[start:end]
+        script = f"""
+"use strict";
+function numberOr(value, fallback = 0) {{
+  const number = Number(value);
+  return Number.isFinite(number) ? number : fallback;
+}}
+const offsets = [];
+async function api(path) {{
+  const params = new URL(path, "http://localhost").searchParams;
+  const offset = Number(params.get("offset") || 0);
+  offsets.push(offset);
+  if (offset === 0) {{
+    return {{
+      items: [
+        {{ id: "Creator.Asset.10" }},
+        {{ id: "Prefix.Creator.Asset.1" }},
+      ],
+      total: 3,
+    }};
+  }}
+  return {{
+    items: [{{ id: "Creator.Asset.1" }}],
+    total: 3,
+  }};
+}}
+{helper}
+(async () => {{
+  const result = await findExactPackage(
+    new URLSearchParams({{ q: "Creator.Asset.1", state: "all" }}),
+    "Creator.Asset.1",
+    {{ signal: null }},
+  );
+  process.stdout.write(JSON.stringify({{ result, offsets }}));
+}})();
+"""
+        completed = subprocess.run(
+            ["node", "-"],
+            input=script,
+            text=True,
+            capture_output=True,
+            check=True,
+            timeout=10,
+        )
+        result = json.loads(completed.stdout)
+        self.assertEqual(
+            result["result"],
+            {
+                "items": [{"id": "Creator.Asset.1"}],
+                "total": 1,
+            },
+        )
+        self.assertEqual(result["offsets"], [0, 2])
+
+    def test_dependency_conflicts_offer_only_server_issued_copy_choices(
+        self,
+    ) -> None:
+        start = self.javascript.index(
+            "async function chooseDependencyPackageCopy("
+        )
+        end = self.javascript.index(
+            "function createDependencyRow(", start
+        )
+        block = self.javascript[start:end]
+        self.assertIn('api("/api/package-copy-choice"', block)
+        self.assertIn("package_id: conflict.packageId", block)
+        self.assertIn("copy_id: copy.copyId", block)
+        self.assertIn("conflict.reportRevision || report.reportRevision", block)
+        self.assertIn('"Use this content"', block)
+        self.assertIn('"Using this content"', block)
+        self.assertIn("!packageCopy.copyId", block)
+        self.assertIn("copy.relative_path || copy.logical_path || copy.path", self.javascript)
+        request = block[
+            block.index('api("/api/package-copy-choice"') :
+            block.index("});", block.index('api("/api/package-copy-choice"')) + 3
+        ]
+        self.assertNotIn("relative_path:", request)
+        self.assertNotIn("path:", request)
+
+    def test_package_conflict_errors_open_an_actionable_persistent_resolver(
+        self,
+    ) -> None:
+        conflict_start = self.javascript.index(
+            "function isPackageCopyConflictError("
+        )
+        conflict_end = self.javascript.index(
+            "async function applyWorkspaceResource(", conflict_start
+        )
+        conflict = self.javascript[conflict_start:conflict_end]
+        self.assertIn('"package_copy_conflict"', conflict)
+        self.assertIn("normalizeDependencyReport(payload)", conflict)
+        self.assertIn("app.pendingResourceConflict", conflict)
+        self.assertIn("app.resourceDependencyFocus = true", conflict)
+        self.assertIn("openResourceDetailDialog(item, opener)", conflict)
+        self.assertIn("persistent: true", conflict)
+        self.assertIn('actionLabel: "Review choices"', conflict)
+        apply_start = self.javascript.index(
+            "async function applyWorkspaceResource("
+        )
+        apply_end = self.javascript.index(
+            "function createPackageCard(", apply_start
+        )
+        apply = self.javascript[apply_start:apply_end]
+        self.assertIn("isPackageCopyConflictError(error)", apply)
+        self.assertIn(
+            "presentPackageCopyConflict(item, error, sourceButton, action)",
+            apply,
+        )
+
+        api_start = self.javascript.index("async function api(path, options = {})")
+        api_end = self.javascript.index("function showDialog(", api_start)
+        api = self.javascript[api_start:api_end]
+        self.assertIn("error.payload =", api)
+        self.assertIn("error.payload.error_code", api)
+        self.assertIn("payloadError.code", api)
+        self.assertIn("error.code = String(", api)
+
+        toast_start = self.javascript.index("function updateToast(")
+        toast_end = self.javascript.index("function setButtonBusy(", toast_start)
+        toast = self.javascript[toast_start:toast_end]
+        self.assertIn("options.actionLabel", toast)
+        self.assertIn("options.onAction", toast)
+        self.assertIn("data-toast-action", toast)
+        self.assertIn("data-toast-close", toast)
+        self.assertIn(".toast .toast-action", self.styles)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is not installed")
+    def test_dependency_report_normalizer_is_bounded_and_tolerates_partial_data(
+        self,
+    ) -> None:
+        start = self.javascript.index("function boundedDependencyText(")
+        end = self.javascript.index("function dependencyStateLabel(", start)
+        normalizer = self.javascript[start:end]
+        script = f"""
+"use strict";
+const DEPENDENCY_PAGE_SIZE = 8;
+const MAX_RENDERED_DEPENDENCIES = 2_048;
+function asArray(value) {{ return Array.isArray(value) ? value : []; }}
+function numberOr(value, fallback = 0) {{
+  const number = Number(value);
+  return Number.isFinite(number) ? number : fallback;
+}}
+function booleanValue(value, fallback = false) {{
+  return typeof value === "boolean" ? value : fallback;
+}}
+function safePresentationLabel(value, fallback) {{
+  const text = String(value || "").trim().slice(0, 120);
+  return text || fallback;
+}}
+{normalizer}
+const report = normalizeDependencyReport({{
+  revision: "rev-7",
+  truncated: true,
+  dependencies: [
+    null,
+    {{ requested: "Creator.Asset.latest", resolved_id: "Creator.Asset.4",
+       state: "available", direct: true, required_by: "Loose scene" }},
+    {{ requested: "Creator.Missing.1", state: "missing" }},
+  ],
+  conflicts: [{{
+    package_id: "Creator.Asset.4",
+    selected_content_sha256: "1:abc",
+    copies: [
+      {{ copy_id: "copy-a", content_sha256: "1:abc", selected: false }},
+      {{ relative_path: "no-safe-id.var" }},
+    ],
+  }}],
+}});
+process.stdout.write(JSON.stringify({{
+  revision: report.reportRevision,
+  truncated: report.truncated,
+  dependencies: report.dependencies,
+  selected: report.conflicts[0].copies[0].selected,
+  pager: dependencyPaginationState(17, 99),
+}}));
+"""
+        completed = subprocess.run(
+            ["node", "-"],
+            input=script,
+            text=True,
+            capture_output=True,
+            check=True,
+            timeout=10,
+        )
+        result = json.loads(completed.stdout)
+        self.assertEqual(result["revision"], "rev-7")
+        self.assertTrue(result["truncated"])
+        self.assertEqual(len(result["dependencies"]), 2)
+        self.assertEqual(result["dependencies"][0]["state"], "hidden")
+        self.assertEqual(result["dependencies"][0]["requiredBy"], ["Loose scene"])
+        self.assertTrue(result["selected"])
+        self.assertEqual(
+            result["pager"],
+            {
+                "page": 3,
+                "pageCount": 3,
+                "start": 16,
+                "hasPrevious": True,
+                "hasNext": False,
+            },
         )
 
     def test_compact_resource_card_opens_details_with_an_explicit_button(
@@ -2118,8 +2395,8 @@ process.stdout.write(JSON.stringify({{
         self.assertIn("body.timeline-popout .timeline-transport", self.styles)
 
     def test_static_assets_use_the_current_cache_version(self) -> None:
-        self.assertIn("/styles.css?v=0.11.1", self.html)
-        self.assertIn("/app.js?v=0.11.1", self.html)
+        self.assertIn("/styles.css?v=0.12.0", self.html)
+        self.assertIn("/app.js?v=0.12.0", self.html)
 
 
 if __name__ == "__main__":

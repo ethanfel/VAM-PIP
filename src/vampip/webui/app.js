@@ -3,6 +3,8 @@
 const PAGE_SIZE = 24;
 const MAX_VARIANT_MATCH_COUNT = 1_000_000;
 const MAX_RENDERED_RESOURCE_VARIANTS = 12;
+const DEPENDENCY_PAGE_SIZE = 8;
+const MAX_RENDERED_DEPENDENCIES = 2_048;
 const MAX_TIMELINE_TRACKS = 80;
 const MAX_TIMELINE_KEYS_PER_TRACK = 2_000;
 const MAX_TIMELINE_KEYS = 10_000;
@@ -667,6 +669,7 @@ const app = {
   query: "",
   type: "",
   packageState: "all",
+  exactPackageId: "",
   loading: false,
   requestController: null,
   searchTimer: null,
@@ -696,6 +699,15 @@ const app = {
   personEquipmentRequestController: null,
   equipmentExpandedSlots: new Set(),
   resourceDetailOpener: null,
+  resourceDetailItem: null,
+  resourceDependencyController: null,
+  resourceDependencyGeneration: 0,
+  resourceDependencyPage: 1,
+  resourceDependencyReport: null,
+  resourceDependencyFocus: false,
+  pendingResourceConflict: null,
+  packageChoiceInFlight: new Set(),
+  packageConflictToast: null,
   personHair: null,
   personHairError: null,
   personHairLoading: false,
@@ -1214,6 +1226,8 @@ function bindEvents() {
 
   elements.searchInput.addEventListener("input", () => {
     window.clearTimeout(app.searchTimer);
+    app.exactPackageId = "";
+    if (app.requestController) app.requestController.abort();
     app.searchTimer = window.setTimeout(() => {
       app.query = elements.searchInput.value.trim();
       loadLibrary();
@@ -1222,12 +1236,14 @@ function bindEvents() {
   });
 
   elements.typeFilter.addEventListener("change", () => {
+    app.exactPackageId = "";
     app.type = elements.typeFilter.value;
     updateClearFilters();
     loadLibrary();
   });
 
   elements.stateFilter.addEventListener("change", () => {
+    app.exactPackageId = "";
     app.packageState = elements.stateFilter.value;
     updateClearFilters();
     loadLibrary();
@@ -3321,6 +3337,7 @@ function browseRelatedResource(model, fallbackQuery = "") {
     elements.resourceDetailDialog.close("browse");
   }
   const category = workspaceCategoryForResourceType(model?.type);
+  app.exactPackageId = "";
   app.query = query;
   app.packageState = "all";
   elements.searchInput.value = query;
@@ -3475,6 +3492,877 @@ function createRelatedResourceTile(model, ownerSearch) {
   return row;
 }
 
+function boundedDependencyText(value, fallback = "", limit = 240) {
+  const text = String(value ?? "")
+    .replace(/[\u0000-\u001f\u007f]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return text ? text.slice(0, limit) : fallback;
+}
+
+function dependencyIdentifier(value, fallback = "") {
+  if (!["string", "number"].includes(typeof value)) return fallback;
+  const identifier = boundedDependencyText(value, "", 500);
+  if (
+    !identifier ||
+    /^[a-z]:[\\/]/i.test(identifier) ||
+    /^[/\\]/.test(identifier) ||
+    /(?:^|[\\/])(?:Custom|AddonPackages)(?:[\\/]|$)/i.test(identifier) ||
+    /\.var(?::|[\\/]|$)/i.test(identifier)
+  ) {
+    return fallback;
+  }
+  return identifier;
+}
+
+function normalizeDependencyState(value) {
+  const state = String(value || "").trim().toLowerCase();
+  if (["enabled", "available", "local"].includes(state)) {
+    if (state === "enabled") return "active";
+    if (state === "available") return "hidden";
+    return "local";
+  }
+  if (["disabled", "inactive"].includes(state)) return "hidden";
+  if (state === "choice-stale") return "stale";
+  if (
+    ["active", "hidden", "missing", "conflict", "stale", "unknown"].includes(
+      state,
+    )
+  ) {
+    return state;
+  }
+  return "unknown";
+}
+
+function normalizeDependencyReport(payload) {
+  const envelope =
+    payload && typeof payload === "object" && !Array.isArray(payload)
+      ? payload
+      : {};
+  const source =
+    [envelope.details, envelope.report, envelope.dependency_report].find(
+      (candidate) =>
+        candidate &&
+        typeof candidate === "object" &&
+        !Array.isArray(candidate),
+    ) || envelope;
+  const rawConflicts = asArray(source.conflicts || envelope.conflicts);
+  const conflicts = rawConflicts
+    .slice(0, MAX_RENDERED_DEPENDENCIES)
+    .filter(
+      (entry) =>
+        entry && typeof entry === "object" && !Array.isArray(entry),
+    )
+    .map((entry) => {
+      const packageId = dependencyIdentifier(
+        entry.package_id || entry.id || entry.requested,
+        "Unknown package",
+      );
+      const selectedContentSha256 = boundedDependencyText(
+        entry.selected_content_sha256 || entry.selected_digest,
+        "",
+        160,
+      );
+      const copies = asArray(entry.copies)
+        .slice(0, 100)
+        .filter(
+          (copy) =>
+            copy && typeof copy === "object" && !Array.isArray(copy),
+        )
+        .map((copy) => {
+          const contentSha256 = boundedDependencyText(
+            copy.content_sha256 || copy.content_digest || copy.sha256,
+            "",
+            160,
+          );
+          const selected =
+            booleanValue(copy.selected, false) ||
+            Boolean(
+              selectedContentSha256 &&
+                contentSha256 &&
+                selectedContentSha256 === contentSha256,
+            );
+          return {
+            copyId: dependencyIdentifier(copy.copy_id || copy.id, ""),
+            relativePath: boundedDependencyText(
+              copy.relative_path || copy.logical_path || copy.path,
+              "Package path unavailable",
+              360,
+            ),
+            size: numberOr(copy.size, -1),
+            enabled: booleanValue(
+              copy.enabled,
+              booleanValue(copy.active, false),
+            ),
+            contentSha256,
+            selected,
+            dependencies: asArray(copy.dependencies)
+              .slice(0, 40)
+              .map((dependency) =>
+                dependencyIdentifier(
+                  typeof dependency === "object" && dependency
+                    ? dependency.requested ||
+                        dependency.package_id ||
+                        dependency.id
+                    : dependency,
+                  "",
+                ),
+              )
+              .filter(Boolean),
+          };
+        });
+      return {
+        packageId,
+        reportRevision: boundedDependencyText(
+          entry.report_revision,
+          "",
+          160,
+        ),
+        selectedContentSha256,
+        choiceStale: booleanValue(entry.choice_stale, false),
+        resolved: booleanValue(entry.resolved, Boolean(selectedContentSha256)),
+        requiresVamClose: booleanValue(entry.requires_vam_close, false),
+        copies,
+      };
+    });
+  const unresolvedConflictIds = new Set(
+    conflicts
+      .filter((entry) => !entry.resolved || entry.choiceStale)
+      .map((entry) => entry.packageId.toLowerCase()),
+  );
+  const dependencies = asArray(source.dependencies || envelope.dependencies)
+    .slice(0, MAX_RENDERED_DEPENDENCIES)
+    .filter(
+      (entry) =>
+        entry && typeof entry === "object" && !Array.isArray(entry),
+    )
+    .map((entry) => {
+      const requested = dependencyIdentifier(
+        entry.requested ||
+          entry.package_ref ||
+          entry.reference ||
+          entry.package_id,
+        "Unknown package",
+      );
+      const resolvedId = dependencyIdentifier(
+        entry.resolved_id ||
+          entry.resolved ||
+          entry.package_id ||
+          entry.identity,
+        "",
+      );
+      const packageId = resolvedId || requested;
+      let state = normalizeDependencyState(entry.state || entry.status);
+      if (
+        booleanValue(entry.choice_stale, false) ||
+        state === "stale"
+      ) {
+        state = "stale";
+      } else if (
+        (booleanValue(entry.conflict, false) &&
+          !booleanValue(entry.conflict_resolved, false)) ||
+        unresolvedConflictIds.has(packageId.toLowerCase())
+      ) {
+        state = "conflict";
+      }
+      const rawRequiredBy = Array.isArray(entry.required_by)
+        ? entry.required_by
+        : entry.required_by
+          ? [entry.required_by]
+          : [];
+      return {
+        requested,
+        resolvedId,
+        packageId,
+        state,
+        direct:
+          booleanValue(entry.direct, false) ||
+          numberOr(entry.depth, -1) === 0,
+        requiredBy: rawRequiredBy
+          .slice(0, 8)
+          .map((value) => dependencyIdentifier(value, ""))
+          .filter(Boolean),
+      };
+    })
+    .sort((left, right) => {
+      const stateOrder = {
+        conflict: 0,
+        missing: 1,
+        stale: 2,
+        active: 3,
+        local: 4,
+        hidden: 5,
+        unknown: 6,
+      };
+      return (
+        Number(right.direct) - Number(left.direct) ||
+        (stateOrder[left.state] ?? 9) - (stateOrder[right.state] ?? 9) ||
+        left.packageId.localeCompare(right.packageId, undefined, {
+          sensitivity: "base",
+        })
+      );
+    });
+  const suppliedCounts =
+    source.counts &&
+    typeof source.counts === "object" &&
+    !Array.isArray(source.counts)
+      ? source.counts
+      : {};
+  const direct = dependencies.filter((entry) => entry.direct).length;
+  const missing = dependencies.filter((entry) =>
+    ["missing", "stale"].includes(entry.state),
+  ).length;
+  const counts = {
+    total: Math.max(
+      0,
+      Math.floor(numberOr(suppliedCounts.total, dependencies.length)),
+    ),
+    direct: Math.max(
+      0,
+      Math.floor(numberOr(suppliedCounts.direct, direct)),
+    ),
+    transitive: Math.max(
+      0,
+      Math.floor(
+        numberOr(
+          suppliedCounts.transitive,
+          Math.max(0, dependencies.length - direct),
+        ),
+      ),
+    ),
+    missing: Math.max(
+      0,
+      Math.floor(numberOr(suppliedCounts.missing, missing)),
+    ),
+    conflicts: Math.max(
+      0,
+      Math.floor(
+        numberOr(
+          suppliedCounts.conflicts ?? suppliedCounts.conflict,
+          conflicts.length,
+        ),
+      ),
+    ),
+  };
+  return {
+    resource:
+      source.resource &&
+      typeof source.resource === "object" &&
+      !Array.isArray(source.resource)
+        ? source.resource
+        : {},
+    reportRevision: boundedDependencyText(
+      source.report_revision ||
+        source.revision ||
+        envelope.report_revision ||
+        envelope.revision,
+      "",
+      160,
+    ),
+    counts,
+    dependencies,
+    conflicts,
+    truncated: booleanValue(source.truncated ?? envelope.truncated, false),
+  };
+}
+
+function dependencyPaginationState(total, page) {
+  const safeTotal = Math.max(0, Math.floor(numberOr(total, 0)));
+  const pageCount = Math.max(
+    1,
+    Math.ceil(safeTotal / DEPENDENCY_PAGE_SIZE),
+  );
+  const safePage = Math.min(
+    pageCount,
+    Math.max(1, Math.floor(numberOr(page, 1))),
+  );
+  return {
+    page: safePage,
+    pageCount,
+    start: (safePage - 1) * DEPENDENCY_PAGE_SIZE,
+    hasPrevious: safePage > 1,
+    hasNext: safePage < pageCount,
+  };
+}
+
+function dependencyStateLabel(state) {
+  return (
+    {
+      active: "Active",
+      local: "Local",
+      hidden: "Available",
+      missing: "Missing",
+      stale: "Choice missing",
+      conflict: "Needs a choice",
+      unknown: "Unknown",
+    }[state] || "Unknown"
+  );
+}
+
+function browseDependencyPackage(packageId) {
+  const query = dependencyIdentifier(packageId, "");
+  if (!query) {
+    toast(
+      "Package identity unavailable",
+      "This dependency does not contain a safe package identity.",
+      "error",
+    );
+    return;
+  }
+  window.clearTimeout(app.searchTimer);
+  if (elements.resourceDetailDialog?.open) {
+    elements.resourceDetailDialog.close("browse");
+  }
+  app.exactPackageId = query;
+  app.query = query;
+  app.type = "";
+  app.packageState = "all";
+  elements.searchInput.value = query;
+  elements.typeFilter.value = "";
+  elements.stateFilter.value = "all";
+  if (app.view !== "packages") {
+    setView("packages");
+  } else {
+    loadLibrary();
+  }
+  elements.searchInput.focus({ preventScroll: true });
+}
+
+function dependencyCopyFingerprint(value) {
+  const fingerprint = boundedDependencyText(value, "");
+  if (!fingerprint) return "Fingerprint unavailable";
+  const withoutPrefix = fingerprint.replace(/^[^:]+:/, "");
+  return withoutPrefix.length > 18
+    ? `${withoutPrefix.slice(0, 12)}…${withoutPrefix.slice(-6)}`
+    : withoutPrefix;
+}
+
+function reportHasUnresolvedConflicts(report) {
+  return asArray(report?.conflicts).some(
+    (conflict) => !asArray(conflict.copies).some((copy) => copy.selected),
+  );
+}
+
+async function chooseDependencyPackageCopy(
+  report,
+  conflict,
+  copy,
+  sourceButton,
+  section,
+  item,
+) {
+  if (!conflict.packageId || !copy.copyId) return;
+  const key = `${conflict.packageId.toLowerCase()}:${copy.copyId}`;
+  if (app.packageChoiceInFlight.has(key)) return;
+  app.packageChoiceInFlight.add(key);
+  setButtonBusy(sourceButton, true, "Saving choice…");
+  try {
+    const result = await api("/api/package-copy-choice", {
+      method: "POST",
+      body: {
+        package_id: conflict.packageId,
+        copy_id: copy.copyId,
+        report_revision:
+          conflict.reportRevision || report.reportRevision || "",
+      },
+    });
+    const responseHasReport = Boolean(
+      result &&
+        typeof result === "object" &&
+        (Array.isArray(result.dependencies) ||
+          Array.isArray(result.conflicts) ||
+          result.details ||
+          result.report),
+    );
+    if (responseHasReport) {
+      const updated = normalizeDependencyReport(result);
+      app.resourceDependencyReport = updated;
+      renderResourceDependencyReport(section, item, updated);
+      if (!reportHasUnresolvedConflicts(updated)) {
+        dismissToast(app.packageConflictToast);
+        app.packageConflictToast = null;
+      }
+    } else {
+      await loadResourceDependencyDetails(section, item);
+      if (!reportHasUnresolvedConflicts(app.resourceDependencyReport)) {
+        dismissToast(app.packageConflictToast);
+        app.packageConflictToast = null;
+      }
+    }
+    const requiresVamClose = booleanValue(
+      result?.requires_vam_close || result?.conflict?.requires_vam_close,
+      false,
+    );
+    toast(
+      requiresVamClose
+        ? "Package choice saved — close VaM"
+        : "Package copy selected",
+      requiresVamClose
+        ? `VAM-PIP saved the choice for ${conflict.packageId}, but another copy is already active. Close VaM so it can safely switch content, then retry the asset.`
+        : `VAM-PIP will use this content for ${conflict.packageId}. Retry the asset after resolving every flagged package.`,
+      requiresVamClose ? "error" : "success",
+      { persistent: requiresVamClose },
+    );
+  } catch (error) {
+    const errorReport = normalizeDependencyReport(error?.payload);
+    if (errorReport.conflicts.length || errorReport.dependencies.length) {
+      app.resourceDependencyReport = errorReport;
+      renderResourceDependencyReport(section, item, errorReport);
+    }
+    toast(
+      "Could not save package choice",
+      errorMessage(error),
+      "error",
+      { persistent: true },
+    );
+  } finally {
+    app.packageChoiceInFlight.delete(key);
+    setButtonBusy(sourceButton, false);
+  }
+}
+
+function createDependencyConflictPanel(
+  report,
+  conflict,
+  section,
+  item,
+) {
+  const panel = createElement("article", "dependency-conflict-panel");
+  panel.tabIndex = -1;
+  const header = createElement("div", "dependency-conflict-header");
+  const copy = document.createElement("div");
+  const title = document.createElement("h4");
+  title.textContent = conflict.packageId;
+  const description = document.createElement("p");
+  description.textContent =
+    conflict.resolved && !conflict.choiceStale
+      ? "These files use the same package ID but contain different data. A saved content choice is active; review or change it below."
+      : "Installed files use the same package ID but contain different data. Choose the content this installation should use.";
+  copy.append(title, description);
+  const openPackage = button(
+    "Open package",
+    "quiet-button dependency-open-package",
+  );
+  openPackage.addEventListener("click", () =>
+    browseDependencyPackage(conflict.packageId),
+  );
+  header.append(copy, openPackage);
+  panel.append(header);
+  if (conflict.requiresVamClose) {
+    const closeWarning = createElement(
+      "p",
+      "dependency-conflict-close-warning",
+    );
+    closeWarning.textContent =
+      "A different copy is already active in VaM. This choice is saved, but VaM must close before VAM-PIP can safely switch the package.";
+    panel.append(closeWarning);
+  } else if (conflict.choiceStale) {
+    const staleWarning = createElement(
+      "p",
+      "dependency-conflict-close-warning",
+    );
+    staleWarning.textContent =
+      "The previously selected content is no longer installed. Choose an available copy before loading this asset.";
+    panel.append(staleWarning);
+  }
+
+  const choices = createElement("div", "dependency-copy-grid");
+  if (!conflict.copies.length) {
+    const empty = createElement("p", "dependency-copy-empty");
+    empty.textContent =
+      "The manager reported a conflict but did not provide safe copy identifiers. Rescan packages and reopen this detail.";
+    choices.append(empty);
+  }
+  for (const packageCopy of conflict.copies) {
+    const selected = packageCopy.selected;
+    const choice = createElement(
+      "div",
+      `dependency-copy-card${selected ? " is-selected" : ""}`,
+    );
+    const choiceHeading = createElement("div", "dependency-copy-heading");
+    const state = badge(
+      selected
+        ? "Selected"
+        : packageCopy.enabled
+          ? "Active copy"
+          : "Hidden copy",
+      `dependency-copy-state${selected ? " is-selected" : ""}`,
+    );
+    const size = createElement("span", "dependency-copy-size");
+    size.textContent =
+      packageCopy.size >= 0 ? formatBytes(packageCopy.size) : "Unknown size";
+    choiceHeading.append(state, size);
+
+    const path = createElement("p", "dependency-copy-path");
+    path.textContent = packageCopy.relativePath;
+    path.title = packageCopy.relativePath;
+    const fingerprint = createElement("p", "dependency-copy-fingerprint");
+    fingerprint.textContent = `Content ${dependencyCopyFingerprint(
+      packageCopy.contentSha256,
+    )}`;
+    fingerprint.title =
+      packageCopy.contentSha256 || "Fingerprint unavailable";
+
+    const dependencySummary = createElement(
+      "div",
+      "dependency-copy-dependencies",
+    );
+    const dependencyLabel = document.createElement("span");
+    dependencyLabel.textContent = packageCopy.dependencies.length
+      ? `Declares ${formatNumber(packageCopy.dependencies.length)} ${plural(
+          "dependency",
+          packageCopy.dependencies.length,
+        )}`
+      : "Declares no dependencies";
+    dependencySummary.append(dependencyLabel);
+    if (packageCopy.dependencies.length) {
+      const declared = document.createElement("div");
+      for (const dependency of packageCopy.dependencies.slice(0, 6)) {
+        declared.append(badge(dependency, "meta-pill"));
+      }
+      if (packageCopy.dependencies.length > 6) {
+        declared.append(
+          badge(
+            `+${formatNumber(packageCopy.dependencies.length - 6)} more`,
+            "meta-pill",
+          ),
+        );
+      }
+      dependencySummary.append(declared);
+    }
+
+    const choose = button(
+      selected ? "Using this content" : "Use this content",
+      selected
+        ? "secondary-button dependency-copy-select is-selected"
+        : "primary-button dependency-copy-select",
+    );
+    choose.disabled = selected || !packageCopy.copyId;
+    choose.title = !packageCopy.copyId
+      ? "This report did not include a safe copy identifier"
+      : selected
+        ? "This is the persistent package choice"
+        : `Use this content whenever ${conflict.packageId} is requested`;
+    choose.addEventListener("click", () =>
+      chooseDependencyPackageCopy(
+        report,
+        conflict,
+        packageCopy,
+        choose,
+        section,
+        item,
+      ),
+    );
+    choice.append(
+      choiceHeading,
+      path,
+      fingerprint,
+      dependencySummary,
+      choose,
+    );
+    choices.append(choice);
+  }
+  panel.append(choices);
+  return panel;
+}
+
+function createDependencyRow(entry) {
+  const row = createElement(
+    "li",
+    `dependency-row is-${entry.state}`,
+  );
+  const identity = createElement("div", "dependency-identity");
+  const heading = document.createElement("strong");
+  heading.textContent = entry.resolvedId || entry.requested;
+  heading.title = entry.resolvedId || entry.requested;
+  identity.append(heading);
+  if (entry.resolvedId && entry.requested !== entry.resolvedId) {
+    const requested = document.createElement("span");
+    requested.textContent = `${entry.requested} → ${entry.resolvedId}`;
+    requested.title = `${entry.requested} resolves to ${entry.resolvedId}`;
+    identity.append(requested);
+  }
+  if (entry.requiredBy.length) {
+    const requiredBy = document.createElement("span");
+    requiredBy.textContent = `Required by ${entry.requiredBy.join(", ")}`;
+    requiredBy.title = requiredBy.textContent;
+    identity.append(requiredBy);
+  }
+
+  const metadata = createElement("div", "dependency-row-meta");
+  metadata.append(
+    badge(
+      entry.direct ? "Direct" : "Transitive",
+      `dependency-depth${entry.direct ? " is-direct" : ""}`,
+    ),
+  );
+  metadata.append(
+    badge(
+      dependencyStateLabel(entry.state),
+      `dependency-state is-${entry.state}`,
+    ),
+  );
+  const browse = button(
+    "Open package",
+    "quiet-button dependency-open-package",
+  );
+  browse.addEventListener("click", () =>
+    browseDependencyPackage(entry.packageId),
+  );
+  row.append(identity, metadata, browse);
+  return row;
+}
+
+function renderResourceDependencyReport(section, item, rawReport) {
+  const report =
+    rawReport &&
+    Array.isArray(rawReport.dependencies) &&
+    Array.isArray(rawReport.conflicts)
+      ? rawReport
+      : normalizeDependencyReport(rawReport);
+  app.resourceDependencyReport = report;
+  const header = createElement("div", "resource-detail-section-heading");
+  const headingCopy = document.createElement("div");
+  const kicker = createElement("p", "eyebrow");
+  kicker.textContent = "Detected package graph";
+  const heading = document.createElement("h3");
+  heading.id = "resource-detail-dependencies-title";
+  heading.textContent = "Dependencies";
+  const explanation = document.createElement("p");
+  explanation.textContent =
+    "References detected in this resource plus their package dependencies. Package choices are global, persistent, and reversible.";
+  headingCopy.append(kicker, heading, explanation);
+  const count = createElement("span", "resource-detail-variant-count");
+  count.textContent = formatNumber(report.counts.total);
+  count.setAttribute(
+    "aria-label",
+    `${formatNumber(report.counts.total)} detected ${plural(
+      "dependency",
+      report.counts.total,
+    )}`,
+  );
+  header.append(headingCopy, count);
+
+  const summary = createElement("div", "dependency-summary");
+  for (const [label, value, kind] of [
+    ["Direct", report.counts.direct, "direct"],
+    ["Transitive", report.counts.transitive, "transitive"],
+    ["Missing", report.counts.missing, "missing"],
+    ["Conflicts", report.counts.conflicts, "conflict"],
+  ]) {
+    const stat = createElement("div", `dependency-stat is-${kind}`);
+    const statValue = document.createElement("strong");
+    statValue.textContent = formatNumber(value);
+    const statLabel = document.createElement("span");
+    statLabel.textContent = label;
+    stat.append(statValue, statLabel);
+    summary.append(stat);
+  }
+
+  const content = document.createDocumentFragment();
+  content.append(header, summary);
+  if (report.conflicts.length) {
+    const conflictRegion = createElement("div", "dependency-conflicts");
+    const warning = createElement("p", "dependency-conflict-warning");
+    warning.textContent = reportHasUnresolvedConflicts(report)
+      ? "Resolve each unselected package below before retrying the scene. VAM-PIP stores a content choice, not a fragile file path."
+      : "Every same-ID conflict has a saved content choice. You can review or change those choices below.";
+    conflictRegion.append(warning);
+    for (const conflict of report.conflicts) {
+      conflictRegion.append(
+        createDependencyConflictPanel(report, conflict, section, item),
+      );
+    }
+    content.append(conflictRegion);
+  }
+
+  if (report.dependencies.length) {
+    const page = dependencyPaginationState(
+      report.dependencies.length,
+      app.resourceDependencyPage,
+    );
+    app.resourceDependencyPage = page.page;
+    const listHeader = createElement("div", "dependency-list-header");
+    const pageLabel = document.createElement("strong");
+    pageLabel.textContent = `Packages ${formatNumber(
+      page.start + 1,
+    )}–${formatNumber(
+      Math.min(
+        report.dependencies.length,
+        page.start + DEPENDENCY_PAGE_SIZE,
+      ),
+    )} of ${formatNumber(report.dependencies.length)}`;
+    const pager = createElement("div", "dependency-pager");
+    const previous = button("←", "dependency-page-arrow");
+    previous.setAttribute("aria-label", "Previous dependency page");
+    previous.disabled = !page.hasPrevious;
+    const status = document.createElement("span");
+    status.textContent = `${formatNumber(page.page)} / ${formatNumber(
+      page.pageCount,
+    )}`;
+    status.setAttribute("aria-live", "polite");
+    const next = button("→", "dependency-page-arrow");
+    next.setAttribute("aria-label", "Next dependency page");
+    next.disabled = !page.hasNext;
+    previous.addEventListener("click", () => {
+      app.resourceDependencyPage = page.page - 1;
+      renderResourceDependencyReport(section, item, report);
+    });
+    next.addEventListener("click", () => {
+      app.resourceDependencyPage = page.page + 1;
+      renderResourceDependencyReport(section, item, report);
+    });
+    pager.append(previous, status, next);
+    listHeader.append(pageLabel, pager);
+    const list = createElement("ul", "dependency-list");
+    for (const dependency of report.dependencies.slice(
+      page.start,
+      page.start + DEPENDENCY_PAGE_SIZE,
+    )) {
+      list.append(createDependencyRow(dependency));
+    }
+    content.append(listHeader, list);
+  } else if (!report.conflicts.length) {
+    const empty = createElement("div", "dependency-empty");
+    const emptyTitle = document.createElement("strong");
+    emptyTitle.textContent = "No package references detected";
+    const emptyCopy = document.createElement("p");
+    emptyCopy.textContent =
+      "Loose or self-contained resources may not need any external VAR packages.";
+    empty.append(emptyTitle, emptyCopy);
+    content.append(empty);
+  }
+  if (report.truncated) {
+    const truncated = createElement("p", "dependency-truncated");
+    truncated.textContent =
+      "This graph reached its safety limit. The load check may discover additional transitive packages.";
+    content.append(truncated);
+  }
+  section.replaceChildren(content);
+  if (app.resourceDependencyFocus && report.conflicts.length) {
+    app.resourceDependencyFocus = false;
+    window.setTimeout(
+      () =>
+        section
+          .querySelector(".dependency-conflict-panel")
+          ?.focus({ preventScroll: false }),
+      0,
+    );
+  }
+}
+
+function renderResourceDependencyLoading(section) {
+  const header = createElement("div", "resource-detail-section-heading");
+  const headingCopy = document.createElement("div");
+  const kicker = createElement("p", "eyebrow");
+  kicker.textContent = "Detected package graph";
+  const heading = document.createElement("h3");
+  heading.id = "resource-detail-dependencies-title";
+  heading.textContent = "Dependencies";
+  const explanation = document.createElement("p");
+  explanation.textContent =
+    "Tracing direct references and their transitive packages…";
+  headingCopy.append(kicker, heading, explanation);
+  header.append(headingCopy);
+  const loading = createElement("div", "dependency-loading");
+  loading.setAttribute("role", "status");
+  loading.textContent = "Reading this resource’s package graph…";
+  section.replaceChildren(header, loading);
+}
+
+function renderResourceDependencyError(section, error) {
+  const state = createElement("div", "dependency-error");
+  const title = document.createElement("strong");
+  title.textContent = "Dependency details unavailable";
+  const detail = document.createElement("p");
+  detail.textContent = errorMessage(error);
+  const retry = button("Retry", "secondary-button");
+  retry.addEventListener("click", () =>
+    loadResourceDependencyDetails(section, app.resourceDetailItem),
+  );
+  state.append(title, detail, retry);
+  section.replaceChildren(state);
+}
+
+async function loadResourceDependencyDetails(
+  section,
+  item,
+  initialPayload = null,
+) {
+  const resourceId = normalizedResourceId(
+    Number(item?.id ?? item?.resource_id),
+  );
+  if (resourceId === null) {
+    renderResourceDependencyReport(section, item, {});
+    return;
+  }
+  if (app.resourceDependencyController) {
+    app.resourceDependencyController.abort();
+  }
+  const controller = new AbortController();
+  app.resourceDependencyController = controller;
+  const generation = ++app.resourceDependencyGeneration;
+  if (initialPayload) {
+    renderResourceDependencyReport(section, item, initialPayload);
+  } else {
+    renderResourceDependencyLoading(section);
+  }
+  try {
+    const packageVersion = equipmentPackageVersion(item);
+    const versionQuery =
+      packageVersion === null
+        ? ""
+        : `?package_version=${encodeURIComponent(packageVersion)}`;
+    const result = await api(
+      `/api/resources/${encodeURIComponent(resourceId)}/details${versionQuery}`,
+      { signal: controller.signal },
+    );
+    if (
+      generation !== app.resourceDependencyGeneration ||
+      Number(elements.resourceDetailDialog?.dataset.resourceId) !==
+        resourceId
+    ) {
+      return;
+    }
+    renderResourceDependencyReport(section, item, result);
+  } catch (error) {
+    if (error?.name === "AbortError") return;
+    if (
+      generation !== app.resourceDependencyGeneration ||
+      Number(elements.resourceDetailDialog?.dataset.resourceId) !==
+        resourceId
+    ) {
+      return;
+    }
+    if (!initialPayload) {
+      renderResourceDependencyError(section, error);
+    }
+  } finally {
+    if (app.resourceDependencyController === controller) {
+      app.resourceDependencyController = null;
+    }
+  }
+}
+
+function renderResourceDetailDependencies(
+  container,
+  item,
+  initialPayload = null,
+  { refresh = true } = {},
+) {
+  const section = createElement("section", "resource-detail-dependencies");
+  section.setAttribute(
+    "aria-labelledby",
+    "resource-detail-dependencies-title",
+  );
+  container.append(section);
+  if (initialPayload && !refresh) {
+    renderResourceDependencyReport(section, item, initialPayload);
+  } else {
+    loadResourceDependencyDetails(section, item, initialPayload);
+  }
+}
+
 function renderResourceDetailVariants(container, item) {
   const variants = normalizeRelatedResourceVariants(item);
   const variantCount = normalizedVariantCount(
@@ -3601,8 +4489,15 @@ function openResourceDetailDialog(item, opener) {
   const dialog = elements.resourceDetailDialog;
   const isNewOpen = !dialog.open;
   const model = normalizeResourceCardModel(item, { assumeHidden: true });
+  const previousResourceId = normalizedResourceId(
+    Number(dialog.dataset.resourceId),
+  );
+  if (previousResourceId !== model.id) {
+    app.resourceDependencyPage = 1;
+  }
   dialog.dataset.resourceId =
     model.id === null ? "" : String(model.id);
+  app.resourceDetailItem = item;
   app.resourceDetailOpener =
     opener instanceof HTMLElement ? opener : document.activeElement;
   elements.resourceDetailEyebrow.textContent = prettyType(model.type);
@@ -3727,8 +4622,27 @@ function openResourceDetailDialog(item, opener) {
   appendResourceActions(actions, item, model);
   if (actions.children.length) summary.append(actions);
   overview.append(summary);
-  layout.append(overview);
-  renderResourceDetailVariants(layout, item);
+  const catalogue = createElement("div", "resource-detail-catalogue");
+  layout.append(overview, catalogue);
+  const pendingConflict =
+    app.pendingResourceConflict &&
+    app.pendingResourceConflict.resourceId === model.id
+      ? app.pendingResourceConflict
+      : null;
+  const reusableDependencyReport =
+    !pendingConflict &&
+    previousResourceId === model.id &&
+    app.resourceDependencyReport
+      ? app.resourceDependencyReport
+      : null;
+  if (pendingConflict) app.pendingResourceConflict = null;
+  renderResourceDetailDependencies(
+    catalogue,
+    item,
+    pendingConflict?.payload || reusableDependencyReport,
+    { refresh: !reusableDependencyReport },
+  );
+  renderResourceDetailVariants(catalogue, item);
   elements.resourceDetailContent.replaceChildren(layout);
 
   if (isNewOpen) {
@@ -3751,6 +4665,15 @@ function handleResourceDetailBackdrop(event) {
 }
 
 function handleResourceDetailClose() {
+  if (app.resourceDependencyController) {
+    app.resourceDependencyController.abort();
+    app.resourceDependencyController = null;
+  }
+  app.resourceDependencyGeneration += 1;
+  app.resourceDependencyReport = null;
+  app.resourceDependencyFocus = false;
+  app.resourceDetailItem = null;
+  app.pendingResourceConflict = null;
   document.body.classList.remove("resource-detail-open");
   elements.resourceDetailContent.replaceChildren();
   const opener = app.resourceDetailOpener;
@@ -7158,6 +8081,52 @@ function libraryPageCount(total = app.total) {
   return libraryPaginationState(total, 1).pageCount;
 }
 
+function packageItemIdentity(item) {
+  return String(
+    item?.id ??
+      item?.package_id ??
+      item?.packageId ??
+      item?.root ??
+      "",
+  ).trim();
+}
+
+async function findExactPackage(
+  params,
+  exactPackageId,
+  controller,
+) {
+  const exactKey = String(exactPackageId || "").trim().toLowerCase();
+  if (!exactKey) return { items: [], total: 0 };
+
+  const pageParams = new URLSearchParams(params);
+  const batchSize = 500;
+  let offset = 0;
+  let total = 0;
+  pageParams.set("limit", String(batchSize));
+  pageParams.set("offset", "0");
+
+  do {
+    const result = await api(`/api/packages?${pageParams.toString()}`, {
+      signal: controller.signal,
+    });
+    const incoming = Array.isArray(result) ? result : result.items || [];
+    total = Math.max(
+      0,
+      Math.trunc(numberOr(result.total, incoming.length)),
+    );
+    const exact = incoming.find(
+      (item) => packageItemIdentity(item).toLowerCase() === exactKey,
+    );
+    if (exact) return { items: [exact], total: 1 };
+    if (!incoming.length) break;
+    offset += incoming.length;
+    pageParams.set("offset", String(offset));
+  } while (offset < total);
+
+  return { items: [], total: 0 };
+}
+
 function changeLibraryPage(page) {
   if (
     app.loading ||
@@ -7234,21 +8203,29 @@ async function loadLibrary({
   try {
     const endpoint =
       app.view === "packages" ? "/api/packages" : "/api/resources";
-    let result = await api(`${endpoint}?${params.toString()}`, {
-      signal: controller.signal,
-    });
-    let incoming = Array.isArray(result) ? result : result.items || [];
-    let total = Math.max(
-      0,
-      Math.trunc(numberOr(result.total, incoming.length)),
-    );
-    const lastPage = libraryPageCount(total);
-
-    if (total > 0 && resolvedPage > lastPage) {
-      resolvedPage = lastPage;
-      offset = (resolvedPage - 1) * PAGE_SIZE;
-      params.set("offset", String(offset));
-      result = await api(`${endpoint}?${params.toString()}`, {
+    const exactPackageId =
+      app.view === "packages" ? app.exactPackageId : "";
+    let incoming;
+    let total;
+    if (exactPackageId) {
+      const exactResult = await findExactPackage(
+        params,
+        exactPackageId,
+        controller,
+      );
+      if (
+        app.view !== "packages" ||
+        app.exactPackageId.toLowerCase() !==
+          exactPackageId.toLowerCase()
+      ) {
+        return;
+      }
+      incoming = exactResult.items;
+      total = exactResult.total;
+      resolvedPage = 1;
+      offset = 0;
+    } else {
+      let result = await api(`${endpoint}?${params.toString()}`, {
         signal: controller.signal,
       });
       incoming = Array.isArray(result) ? result : result.items || [];
@@ -7256,9 +8233,24 @@ async function loadLibrary({
         0,
         Math.trunc(numberOr(result.total, incoming.length)),
       );
-    } else if (total === 0) {
-      resolvedPage = 1;
-      offset = 0;
+      const lastPage = libraryPageCount(total);
+
+      if (total > 0 && resolvedPage > lastPage) {
+        resolvedPage = lastPage;
+        offset = (resolvedPage - 1) * PAGE_SIZE;
+        params.set("offset", String(offset));
+        result = await api(`${endpoint}?${params.toString()}`, {
+          signal: controller.signal,
+        });
+        incoming = Array.isArray(result) ? result : result.items || [];
+        total = Math.max(
+          0,
+          Math.trunc(numberOr(result.total, incoming.length)),
+        );
+      } else if (total === 0) {
+        resolvedPage = 1;
+        offset = 0;
+      }
     }
 
     app.items = incoming;
@@ -7542,6 +8534,28 @@ function renderLibrary() {
       );
     }
     elements.cardGrid.append(fragment);
+    if (app.view === "packages" && app.exactPackageId) {
+      const exactKey = app.exactPackageId.toLowerCase();
+      const exactCard = Array.from(
+        elements.cardGrid.querySelectorAll(".package-card"),
+      ).find(
+        (candidate) =>
+          String(candidate.dataset.packageId || "").toLowerCase() ===
+          exactKey,
+      );
+      if (exactCard) {
+        exactCard.tabIndex = -1;
+        window.requestAnimationFrame(() => {
+          if (
+            exactCard.isConnected &&
+            app.view === "packages" &&
+            app.exactPackageId.toLowerCase() === exactKey
+          ) {
+            exactCard.focus({ preventScroll: true });
+          }
+        });
+      }
+    }
   }
 
   if (detailWasOpen) {
@@ -8669,6 +9683,83 @@ async function confirmRiskyAssetLoad(item, category, merge) {
   });
 }
 
+function isPackageCopyConflictError(error) {
+  const payload =
+    error?.payload &&
+    typeof error.payload === "object" &&
+    !Array.isArray(error.payload)
+      ? error.payload
+      : {};
+  const code = String(
+    error?.code || payload.code || payload.error_code || "",
+  )
+    .trim()
+    .toLowerCase();
+  const report = normalizeDependencyReport(payload);
+  return (
+    [
+      "package_copy_conflict",
+      "package_conflict",
+      "same_id_package_conflict",
+    ].includes(code) ||
+    (numberOr(error?.status, 0) === 409 && report.conflicts.length > 0)
+  );
+}
+
+function presentPackageCopyConflict(
+  item,
+  error,
+  opener,
+  workspaceAction = null,
+) {
+  const resourceId = normalizedResourceId(
+    Number(item?.id ?? item?.resource_id),
+  );
+  const payload =
+    error?.payload &&
+    typeof error.payload === "object" &&
+    !Array.isArray(error.payload)
+      ? error.payload
+      : {};
+  const report = normalizeDependencyReport(payload);
+  if (workspaceAction) {
+    if (workspaceAction.dismissTimer) {
+      window.clearTimeout(workspaceAction.dismissTimer);
+    }
+    dismissToast(workspaceAction.toast);
+    if (app.workspaceAction === workspaceAction) {
+      app.workspaceAction = null;
+    }
+  }
+  app.pendingResourceConflict = { resourceId, payload };
+  app.resourceDependencyFocus = true;
+  openResourceDetailDialog(item, opener);
+
+  dismissToast(app.packageConflictToast);
+  const conflictCount = Math.max(
+    1,
+    report.conflicts.length,
+    report.counts.conflicts,
+  );
+  const message = `${errorMessage(error)} Choose the correct content below; the choice is global and reversible, then retry the asset.`;
+  app.packageConflictToast = toast(
+    conflictCount === 1
+      ? "Choose a package copy"
+      : `Resolve ${formatNumber(conflictCount)} package conflicts`,
+    message,
+    "error",
+    {
+      persistent: true,
+      actionLabel: "Review choices",
+      onAction: () => {
+        app.pendingResourceConflict = { resourceId, payload };
+        app.resourceDependencyFocus = true;
+        openResourceDetailDialog(item, opener);
+      },
+    },
+  );
+}
+
 async function applyWorkspaceResource(
   item,
   category,
@@ -8797,7 +9888,9 @@ async function applyWorkspaceResource(
     bindWorkspaceActionRequest(action, result, detail);
     await refreshAll({ force: true });
   } catch (error) {
-    if (action && !action.requestId) {
+    if (isPackageCopyConflictError(error)) {
+      presentPackageCopyConflict(item, error, sourceButton, action);
+    } else if (action && !action.requestId) {
       finishWorkspaceActionFeedback(action, false, errorMessage(error));
     } else {
       toast(
@@ -8822,6 +9915,7 @@ function createPackageCard(item) {
     `library-card package-card${itemIsValid(item) ? "" : " is-invalid"}`,
   );
   const id = String(item.id || item.package_id || packageRoot(item) || "Unknown package");
+  card.dataset.packageId = id;
   const root = String(item.id || packageRoot(item) || "");
   const active = itemIsActive(item);
   const valid = itemIsValid(item);
@@ -9626,6 +10720,7 @@ function setView(view) {
   ) {
     return;
   }
+  if (view !== "packages") app.exactPackageId = "";
   if (elements.resourceDetailDialog?.open) {
     elements.resourceDetailDialog.close("view-change");
   }
@@ -9717,6 +10812,7 @@ function configureStateFilter() {
 
 function clearFilters() {
   window.clearTimeout(app.searchTimer);
+  app.exactPackageId = "";
   app.query = "";
   app.type = "";
   app.packageState = "all";
@@ -9802,6 +10898,22 @@ async function api(path, options = {}) {
       `${response.status} ${response.statusText}`;
     const error = new Error(String(detail));
     error.status = response.status;
+    error.payload =
+      payload && typeof payload === "object" && !Array.isArray(payload)
+        ? payload
+        : { detail: String(detail) };
+    const payloadError =
+      error.payload.error &&
+      typeof error.payload.error === "object" &&
+      !Array.isArray(error.payload.error)
+        ? error.payload.error
+        : {};
+    error.code = String(
+      error.payload.code ||
+        error.payload.error_code ||
+        payloadError.code ||
+        "",
+    ).trim();
     throw error;
   }
   return payload || {};
@@ -9887,10 +10999,12 @@ function updateToast(item, title, message, kind = "success") {
   item.setAttribute("role", kind === "error" ? "alert" : "status");
   const heading = item.querySelector("strong");
   const detail = item.querySelector("p");
-  const close = item.querySelector("button");
+  const close = item.querySelector("[data-toast-close]");
+  const action = item.querySelector("[data-toast-action]");
   if (heading) heading.textContent = title;
   if (detail) detail.textContent = message || "";
   if (close) close.hidden = kind === "busy";
+  if (action) action.hidden = kind === "busy";
 }
 
 function toast(title, message, kind = "success", options = {}) {
@@ -9901,8 +11015,21 @@ function toast(title, message, kind = "success", options = {}) {
   const heading = document.createElement("strong");
   const detail = document.createElement("p");
   content.append(heading, detail);
+  if (
+    safePresentationLabel(options.actionLabel, "") &&
+    typeof options.onAction === "function"
+  ) {
+    const action = button(
+      safePresentationLabel(options.actionLabel, "Review"),
+      "toast-action",
+    );
+    action.dataset.toastAction = "true";
+    action.addEventListener("click", () => options.onAction(item));
+    content.append(action);
+  }
   const close = document.createElement("button");
   close.type = "button";
+  close.dataset.toastClose = "true";
   close.textContent = "×";
   close.setAttribute("aria-label", "Dismiss notification");
   close.addEventListener("click", () => dismissToast(item));

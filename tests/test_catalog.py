@@ -11,6 +11,7 @@ import zipfile
 
 from vampip.catalog import (
     CatalogImportError,
+    _ResourceResolver,
     catalog_facets,
     get_resource_thumbnail,
     import_browserassist,
@@ -1618,6 +1619,74 @@ class CatalogTests(unittest.TestCase):
             self.assertEqual(active["total"], 1)
             self.assertEqual(active["items"][0]["package"], "ActiveOnly")
             self.assertTrue(active["items"][0]["enabled"])
+
+    def test_resource_resolver_lazily_caches_only_requested_family(self) -> None:
+        resource_path = "Saves\\scene\\Wanted.json"
+        self.write_catalogue(
+            [
+                {
+                    "creatorName": "Creator",
+                    "packageName": "Wanted",
+                    "resourceFullFileName": resource_path,
+                    "resourceType": "Scene",
+                    "presetAtomType": "",
+                    "varVersions": ["1"],
+                }
+            ]
+        )
+        make_var(
+            self.addons / "Creator.Wanted.1.var",
+            creator="Creator",
+            package="Wanted",
+            members={"Saves/scene/Wanted.json": b"{}"},
+        )
+        make_var(
+            self.addons / "Other.Unrelated.1.var",
+            creator="Other",
+            package="Unrelated",
+            members={"Saves/scene/Unrelated.json": b"{}"},
+        )
+
+        with connect(self.state) as database:
+            scan(self.addons, database)
+            import_browserassist(database, self.vam_root)
+            resource = database.execute(
+                """
+                SELECT * FROM catalog_resources
+                WHERE root = ? AND resource_path = ?
+                """,
+                (str(self.vam_root), resource_path),
+            ).fetchone()
+            assert resource is not None
+            resolver = _ResourceResolver(
+                database,
+                self.vam_root,
+                addon_root=self.addons,
+            )
+            self.assertEqual(resolver.packages, {})
+
+            statements: list[str] = []
+            database.set_trace_callback(statements.append)
+            try:
+                first = resolver.candidates(resource)
+                second = resolver.candidates(resource)
+            finally:
+                database.set_trace_callback(None)
+
+        self.assertEqual([row["package_name"] for row in first], ["Wanted"])
+        self.assertEqual([row["package_name"] for row in second], ["Wanted"])
+        self.assertEqual(set(resolver.packages), {("creator", "wanted")})
+        family_queries = [
+            " ".join(statement.split()).casefold()
+            for statement in statements
+            if "from package_files" in statement.casefold()
+        ]
+        self.assertEqual(len(family_queries), 1)
+        self.assertIn("and creator = 'creator' collate nocase", family_queries[0])
+        self.assertIn(
+            "and package_name = 'wanted' collate nocase",
+            family_queries[0],
+        )
 
     def test_resolver_verifies_the_member_in_an_allowed_version(self) -> None:
         resource_path = "Saves\\scene\\Versioned.json"

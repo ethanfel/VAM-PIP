@@ -23,7 +23,7 @@ leaving managed mode restores that baseline.
 
 ## Current status
 
-Version 0.11.1 is functional but should still be treated as an early release.
+Version 0.12.0 is functional but should still be treated as an early release.
 Package switching is deliberately conservative:
 
 - entering managed mode requires explicit confirmation;
@@ -116,7 +116,11 @@ before package visibility changes.
 Selecting a packaged resource creates a lease containing its archive, declared
 `.var` dependencies, and package references found in supported scene/preset
 text. The lease stores exact resolved package versions, so a later catalogue
-change does not silently alter an active lease.
+change does not silently alter an active lease. It also records the exact
+catalogue resource and archive member. VAM-PIP will not change a same-ID
+content choice used by an active resource lease, because package-only
+dependency data cannot prove that another fork contains every referenced
+member. Release the lease, choose the content, and load the resource again.
 
 When BrowserAssist refreshes while managed packages are hidden, its new
 snapshot omits many resources it cannot currently see. VAM-PIP preserves the
@@ -318,7 +322,24 @@ disables its action.
 
 Selecting a resource card preview opens a centered inspector with a larger
 preview, package and version details, the same owner actions as the compact
-card, and a bounded **Styles & variants** gallery. The first release covers
+card, a lazy **Dependencies** catalogue, and a bounded **Styles & variants**
+gallery. Dependency details scan the selected resource for direct package
+references, follow installed `meta.json` dependencies transitively, label
+active, hidden, and missing packages, and paginate the result inside the
+inspector. **Open package** moves to the exact package in the Packages view.
+The graph is bounded and cycle-safe; it is loaded only when the inspector
+opens, so ordinary catalogue pages remain inexpensive.
+
+When physical VARs share an exact ID but contain different logical data, the
+inspector compares their relative locations, logical fingerprints, active
+state, and declared dependencies. VAM-PIP never guesses which fork is correct.
+**Use this content** stores an explicit choice by logical digest, then applies
+that choice consistently to dependency resolution, archive previews,
+thumbnails, activation, and loading. The choice survives path moves and
+enabled/hidden suffix changes. If another fork is already active while VaM is
+running, the choice is saved but the switch waits until VaM closes.
+
+The styles release covers
 clothing items with same-package `Clothing Item Presets`, plus same-type
 `Preset Hair`, `Preset Clothing`, and `Clothing Item Presets` families. A
 relationship requires the exact creator, package, case-sensitive folder,

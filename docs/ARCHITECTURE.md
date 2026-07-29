@@ -85,6 +85,7 @@ VAM-PIP separates observed state from desired state.
 | Permanent desired roots | `manager_pins` |
 | Default session-plugin intent | `<VaM>/Custom/PluginPresets/Plugins_UserDefaults.vap` |
 | Temporary exact closures | `manager_leases` and `manager_lease_packages` |
+| Lease origin and resource identity | `manager_lease_contexts` |
 | Pre-manager visibility | `manager_baseline` |
 | Resource catalogue | Last successfully imported BrowserAssist snapshot |
 | One switch's recovery record | JSON file under `manager-runs/` |
@@ -95,7 +96,7 @@ especially the baseline are persistent manager state and should be backed up.
 
 ## SQLite state
 
-[`database.py`](../src/vampip/database.py) currently defines schema version 5.
+[`database.py`](../src/vampip/database.py) currently defines schema version 7.
 An installed CLI defaults its state directory to:
 
 ```text
@@ -124,10 +125,14 @@ The main table groups are:
 - `manager_settings`: managed mode, automatic reconciliation, API token, and
   optional launch script;
 - `manager_pins`: permanent package roots;
-- `manager_leases`, `manager_lease_roots`, and `manager_lease_packages`:
-  temporary intent and the exact resolved snapshot;
+- `manager_leases`, `manager_lease_roots`, `manager_lease_packages`, and
+  `manager_lease_contexts`: temporary intent, the exact resolved snapshot, and
+  whether it came from generic package roots or a particular catalogue
+  resource;
 - `manager_baseline`: the first recorded visibility for each logical archive
   path;
+- `manager_package_choices`: an explicit per-root logical-content digest and
+  optional path hint for a same-ID package fork;
 - `catalog_resources`, `catalog_resource_versions`, and `catalog_sources`:
   imported BrowserAssist data.
 
@@ -159,8 +164,9 @@ abort the scan instead of producing an invalid row.
 
 ### Copy preference and conflict checks
 
-When several physical files claim one package ID,
-[`preferred()`](../src/vampip/profiles.py) selects deterministically by:
+When several physical files claim one package ID and no explicit content
+choice exists, [`preferred()`](../src/vampip/profiles.py) selects
+deterministically by:
 
 1. shallower relative path;
 2. canonical filename;
@@ -177,11 +183,47 @@ conflict. `meta.json` remains exact package data.
 
 Unreadable, encrypted, unsupported, corrupt, path-ambiguous, or concurrently
 changed archives fail closed. Different or unavailable logical fingerprints
-block pinning, leasing, and reconciliation rather than making an arbitrary
-content choice. A content fingerprint survives a manager visibility rename and
-is cleared when the scanner observes a changed archive identity. The separate
-raw-file SHA-256 remains the authority for byte-identical duplicate cleanup and
+produce a structured conflict rather than an arbitrary content choice. The
+resource inspector lets the user select one logical digest explicitly. That
+digest is authoritative everywhere an exact ID is chosen; the saved logical
+path is only a tie-breaker among harmless repacks with the same digest. A stale
+or insufficiently hashed choice fails closed. If a different fork is active,
+VaM must close before reconciliation can hide it.
+
+Changing a choice re-resolves every affected active generic package lease from
+its existing exact package snapshot and transactionally adds any newly
+required dependencies. Existing snapshot entries are retained until the lease
+expires, so changing a global choice can never silently remove a dependency
+still needed by the earlier snapshot.
+
+Resource leases additionally preserve the catalogue resource ID, exact
+installed version, owning package, logical path, and archive member. The
+current reference scanner retains package IDs but not every referenced member
+path, so VAM-PIP conservatively refuses any content-choice change affecting an
+active resource lease. Release the lease, make the choice, then load the
+resource again. Pre-context leases created by an older manager also fail
+closed and must be released and recreated before an affected content choice
+can change.
+
+A content fingerprint survives a manager visibility rename and is cleared
+when the scanner observes a changed archive identity. The separate raw-file
+SHA-256 remains the authority for byte-identical duplicate cleanup and
 quarantine evidence.
+
+## Resource dependency catalogue
+
+`GET /api/resources/{id}/details` resolves the selected catalogue resource,
+scans its bounded text payload for direct virtual package paths, and builds a
+bounded, cycle-safe graph from installed package metadata. The report keeps
+direct and transitive relationships, requiring packages, missing references,
+and same-ID conflicts. It is deliberately lazy so paged resource searches do
+not repeatedly read scene archives.
+
+Conflict reports contain opaque copy IDs and a revision. The authenticated
+`POST /api/package-copy-choice` mutation accepts only an exact package ID, one
+of those opaque IDs, and the matching revision; it never accepts a filesystem
+path. The server re-scans and re-hashes under the manager lock before saving
+the choice, preventing a stale report from selecting replaced content.
 
 ## Dependency resolution
 
@@ -261,6 +303,8 @@ A lease stores:
 - the user-facing roots;
 - creation and expiry times;
 - the exact package IDs in the resolved dependency closure.
+- an origin context identifying either a generic package lease or the exact
+  catalogue resource and installed version that produced it.
 
 The exact snapshot prevents a temporary scene from silently changing versions
 mid-lease. A package remains desired while at least one lease containing it has
@@ -291,6 +335,12 @@ reference scanning is bounded at 256 MiB. A packaged binary resource leases
 only its containing package and declared closure. A loose local resource with
 no discovered package reference needs no lease; references found in a
 supported loose text resource are leased normally.
+
+VAM-PIP does not change a same-ID content choice used by an active resource
+lease. Package-only dependency scanning cannot prove that every virtual member
+referenced by a scene or preset exists in another fork. Release the resource
+lease, choose the content, and load the resource again to create a newly
+verified exact snapshot.
 
 ## Managed-mode lifecycle
 

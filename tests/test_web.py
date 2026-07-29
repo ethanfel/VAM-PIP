@@ -249,8 +249,8 @@ class WebSecurityTests(unittest.TestCase):
             "frame-ancestors 'none'", response.getheader("Content-Security-Policy")
         )
         document = response.read().decode("utf-8")
-        self.assertIn("/styles.css?v=0.11.1", document)
-        self.assertIn("/app.js?v=0.11.1", document)
+        self.assertIn("/styles.css?v=0.12.0", document)
+        self.assertIn("/app.js?v=0.12.0", document)
 
     def test_session_plugin_endpoints_report_and_import_defaults(self) -> None:
         preset_path = write_web_session_defaults(self.vam_root)
@@ -895,6 +895,27 @@ class WebSecurityTests(unittest.TestCase):
             "X-VAMPIP-Token": self.token,
             "Content-Type": "application/json",
         }
+        details_result = {
+            "resource": {"id": 42, "selected_version": "4"},
+            "dependencies": [],
+            "conflicts": [],
+        }
+        self.server.service.resource_details = mock.Mock(
+            return_value=details_result
+        )
+        self.connection.request(
+            "GET",
+            "/api/resources/42/details?package_version=4",
+            headers={"X-VAMPIP-Token": self.token},
+        )
+        response = self.connection.getresponse()
+        self.assertEqual(response.status, 200)
+        self.assertEqual(self.response_json(response), details_result)
+        self.server.service.resource_details.assert_called_once_with(
+            42,
+            package_version=4,
+        )
+
         lease_result = {
             "resource_id": 42,
             "selected_version": "4",

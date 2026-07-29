@@ -18,7 +18,7 @@ import uuid
 
 from vampip.analysis import package_id
 from vampip.models import DISABLED_SUFFIX
-from vampip.profiles import preferred
+from vampip.profiles import PackageCopyChoice, preferred
 
 
 _RUN_NAME = re.compile(r"[^A-Za-z0-9_.-]+")
@@ -64,6 +64,7 @@ def build_switch_plan(
     desired_ids: list[str] | tuple[str, ...],
     *,
     disable_unselected: bool,
+    choices: Mapping[str, PackageCopyChoice] | None = None,
 ) -> SwitchPlan:
     """Build a package switch without modifying the filesystem.
 
@@ -82,6 +83,9 @@ def build_switch_plan(
         by_id.setdefault(key, []).append(row)
         display_ids.setdefault(key, identity)
 
+    normalized_choices = {
+        key.casefold(): choice for key, choice in (choices or {}).items()
+    }
     desired_paths: set[str] = set()
     missing: list[str] = []
     normalized_ids: list[str] = []
@@ -95,7 +99,7 @@ def build_switch_plan(
         if not candidates:
             missing.append(identity)
             continue
-        selected = preferred(candidates)
+        selected = preferred(candidates, normalized_choices.get(key))
         desired_paths.add(selected["path"])
         normalized_ids.append(display_ids[key])
     if missing:

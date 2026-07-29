@@ -1,13 +1,15 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import datetime, timedelta, timezone
 import json
+from pathlib import Path
 import secrets
 import sqlite3
 import uuid
 
 from vampip.analysis import package_id
-from vampip.profiles import Resolution, resolve
+from vampip.profiles import PackageCopyChoice, Resolution, resolve
 from vampip.switching import logical_relative_path
 
 
@@ -67,6 +69,115 @@ def get_or_create_api_token(connection: sqlite3.Connection) -> str:
     token = secrets.token_urlsafe(32)
     set_setting(connection, "api_token", token)
     return token
+
+
+def get_package_choice(
+    connection: sqlite3.Connection,
+    root: str | Path,
+    package_identity: str,
+) -> PackageCopyChoice | None:
+    row = connection.execute(
+        """
+        SELECT package_id, selected_content_sha256, preferred_logical_path
+        FROM manager_package_choices
+        WHERE root = ? AND package_id = ? COLLATE NOCASE
+        """,
+        (str(root), package_identity),
+    ).fetchone()
+    if row is None:
+        return None
+    return PackageCopyChoice(
+        package_id=row["package_id"],
+        selected_content_sha256=row["selected_content_sha256"],
+        preferred_logical_path=row["preferred_logical_path"],
+    )
+
+
+def list_package_choices(
+    connection: sqlite3.Connection,
+    root: str | Path,
+) -> dict[str, PackageCopyChoice]:
+    choices: dict[str, PackageCopyChoice] = {}
+    for row in connection.execute(
+        """
+        SELECT package_id, selected_content_sha256, preferred_logical_path
+        FROM manager_package_choices
+        WHERE root = ?
+        ORDER BY package_id COLLATE NOCASE
+        """,
+        (str(root),),
+    ):
+        choice = PackageCopyChoice(
+            package_id=row["package_id"],
+            selected_content_sha256=row["selected_content_sha256"],
+            preferred_logical_path=row["preferred_logical_path"],
+        )
+        choices[choice.package_id.casefold()] = choice
+    return choices
+
+
+def set_package_choice(
+    connection: sqlite3.Connection,
+    root: str | Path,
+    package_identity: str,
+    selected_content_sha256: str,
+    *,
+    preferred_logical_path: str | None = None,
+    now: datetime | None = None,
+) -> PackageCopyChoice:
+    normalized_root = str(root)
+    normalized_identity = package_identity.strip()
+    normalized_digest = selected_content_sha256.strip()
+    if not normalized_root.strip():
+        raise ValueError("package-choice root cannot be empty")
+    if not normalized_identity:
+        raise ValueError("package ID cannot be empty")
+    if not normalized_digest:
+        raise ValueError("selected package content hash cannot be empty")
+    logical_path = (
+        preferred_logical_path
+        if preferred_logical_path and preferred_logical_path.strip()
+        else None
+    )
+    connection.execute(
+        """
+        INSERT INTO manager_package_choices(
+            root, package_id, selected_content_sha256,
+            preferred_logical_path, selected_utc
+        ) VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(root, package_id) DO UPDATE SET
+            selected_content_sha256 = excluded.selected_content_sha256,
+            preferred_logical_path = excluded.preferred_logical_path,
+            selected_utc = excluded.selected_utc
+        """,
+        (
+            normalized_root,
+            normalized_identity,
+            normalized_digest,
+            logical_path,
+            _as_utc(now or utc_now()).isoformat(),
+        ),
+    )
+    return PackageCopyChoice(
+        package_id=normalized_identity,
+        selected_content_sha256=normalized_digest,
+        preferred_logical_path=logical_path,
+    )
+
+
+def remove_package_choice(
+    connection: sqlite3.Connection,
+    root: str | Path,
+    package_identity: str,
+) -> bool:
+    cursor = connection.execute(
+        """
+        DELETE FROM manager_package_choices
+        WHERE root = ? AND package_id = ? COLLATE NOCASE
+        """,
+        (str(root), package_identity.strip()),
+    )
+    return cursor.rowcount > 0
 
 
 def add_pin(
@@ -151,6 +262,93 @@ def create_lease(
         ((lease_id, package_id(row)) for row in resolution.selected),
     )
     return lease_id
+
+
+def set_lease_context(
+    connection: sqlite3.Connection,
+    lease_id: str,
+    *,
+    kind: str,
+    resource_id: int | None = None,
+    package_version: str | None = None,
+    owner_package_id: str | None = None,
+    resource_path: str | None = None,
+    archive_member: str | None = None,
+) -> None:
+    """Record whether a lease is generic or tied to an exact catalog asset."""
+
+    if kind not in {"generic", "resource"}:
+        raise ValueError("lease context kind must be generic or resource")
+    if kind == "generic":
+        if any(
+            value is not None
+            for value in (
+                resource_id,
+                package_version,
+                owner_package_id,
+                resource_path,
+                archive_member,
+            )
+        ):
+            raise ValueError("generic lease context cannot contain resource data")
+    else:
+        if (
+            isinstance(resource_id, bool)
+            or not isinstance(resource_id, int)
+            or resource_id < 1
+        ):
+            raise ValueError("resource lease context needs a positive resource ID")
+        if not isinstance(resource_path, str) or not resource_path:
+            raise ValueError("resource lease context needs a resource path")
+        if owner_package_id is not None and (
+            not package_version or not archive_member
+        ):
+            raise ValueError(
+                "packaged resource lease context needs an exact version and member"
+            )
+
+    connection.execute(
+        """
+        INSERT INTO manager_lease_contexts(
+            lease_id, kind, resource_id, package_version,
+            owner_package_id, resource_path, archive_member
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            lease_id,
+            kind,
+            resource_id,
+            package_version,
+            owner_package_id,
+            resource_path,
+            archive_member,
+        ),
+    )
+
+
+def get_lease_context(
+    connection: sqlite3.Connection,
+    lease_id: str,
+) -> dict[str, object] | None:
+    row = connection.execute(
+        """
+        SELECT kind, resource_id, package_version, owner_package_id,
+               resource_path, archive_member
+        FROM manager_lease_contexts
+        WHERE lease_id = ?
+        """,
+        (lease_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    return {
+        "kind": row["kind"],
+        "resource_id": row["resource_id"],
+        "package_version": row["package_version"],
+        "owner_package_id": row["owner_package_id"],
+        "resource_path": row["resource_path"],
+        "archive_member": row["archive_member"],
+    }
 
 
 def renew_lease(
@@ -249,6 +447,7 @@ def resolve_managed_set(
     rows: list[sqlite3.Row],
     *,
     extra_roots: list[str] | tuple[str, ...] = (),
+    choices: Mapping[str, PackageCopyChoice] | None = None,
     now: datetime | None = None,
 ) -> tuple[list[str], tuple[tuple[str, str], ...]]:
     """Resolve pins and union them with exact snapshots from active leases."""
@@ -266,7 +465,7 @@ def resolve_managed_set(
         if normalized and normalized.casefold() not in known_roots:
             pin_roots.append(normalized)
             known_roots.add(normalized.casefold())
-    pin_resolution = resolve(pin_roots, rows)
+    pin_resolution = resolve(pin_roots, rows, choices=choices)
     desired = {
         package_id(row).casefold(): package_id(row) for row in pin_resolution.selected
     }

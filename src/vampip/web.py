@@ -14,7 +14,11 @@ import webbrowser
 
 from vampip.database import connect
 from vampip.manager_state import get_or_create_api_token
-from vampip.service import LiveActionBusyError, ManagerService
+from vampip.service import (
+    LiveActionBusyError,
+    ManagerService,
+    PackageConflictError,
+)
 
 
 MAX_REQUEST_BYTES = 1024 * 1024
@@ -23,6 +27,7 @@ _LEASE_RENEW = re.compile(r"^/api/leases/([A-Fa-f0-9]{32})/renew$")
 _LEASE_ITEM = re.compile(r"^/api/leases/([A-Fa-f0-9]{32})$")
 _RESOURCE_THUMBNAIL = re.compile(r"^/api/resources/([0-9]+)/thumbnail$")
 _RESOURCE_LEASE = re.compile(r"^/api/resources/([0-9]+)/lease$")
+_RESOURCE_DETAILS = re.compile(r"^/api/resources/([0-9]+)/details$")
 _TOKEN_IN_LOG = re.compile(r"([?&]token=)[^&\s\"]+")
 
 
@@ -361,6 +366,37 @@ class ManagerRequestHandler(BaseHTTPRequestHandler):
             if parsed.path == "/api/catalog/facets":
                 self._json(HTTPStatus.OK, self.server.service.catalog_facets())
                 return
+            details = _RESOURCE_DETAILS.fullmatch(parsed.path)
+            if details:
+                unexpected_fields = sorted(
+                    set(query) - {"package_version", "token"}
+                )
+                if unexpected_fields:
+                    raise ValueError(
+                        "unsupported resource-details query field(s): "
+                        + ", ".join(unexpected_fields)
+                    )
+                raw_versions = query.get("package_version", [])
+                package_version = None
+                if raw_versions:
+                    if len(raw_versions) != 1:
+                        raise ValueError(
+                            "package_version must be supplied at most once"
+                        )
+                    try:
+                        package_version = int(raw_versions[0])
+                    except ValueError as exc:
+                        raise ValueError(
+                            "package_version must be an integer"
+                        ) from exc
+                self._json(
+                    HTTPStatus.OK,
+                    self.server.service.resource_details(
+                        int(details.group(1)),
+                        package_version=package_version,
+                    ),
+                )
+                return
             thumbnail = _RESOURCE_THUMBNAIL.fullmatch(parsed.path)
             if thumbnail:
                 result = self.server.service.resource_thumbnail(int(thumbnail.group(1)))
@@ -377,6 +413,8 @@ class ManagerRequestHandler(BaseHTTPRequestHandler):
                 )
                 return
             self._error(HTTPStatus.NOT_FOUND, "API route not found")
+        except PackageConflictError as exc:
+            self._json(HTTPStatus.CONFLICT, exc.document())
         except (ValueError, TypeError) as exc:
             self._error(HTTPStatus.BAD_REQUEST, str(exc))
         except FileNotFoundError as exc:
@@ -422,6 +460,34 @@ class ManagerRequestHandler(BaseHTTPRequestHandler):
                 return
             if method == "POST" and parsed.path == "/api/catalog/import":
                 self._json(HTTPStatus.OK, service.import_catalog())
+                return
+            if method == "POST" and parsed.path == "/api/package-copy-choice":
+                unexpected_fields = sorted(
+                    set(document)
+                    - {"package_id", "copy_id", "report_revision"}
+                )
+                if unexpected_fields:
+                    raise ValueError(
+                        "unsupported package-copy choice field(s): "
+                        + ", ".join(unexpected_fields)
+                    )
+                package_identity = document.get("package_id")
+                copy_id = document.get("copy_id")
+                report_revision = document.get("report_revision")
+                if not isinstance(package_identity, str):
+                    raise ValueError("package_id must be a string")
+                if not isinstance(copy_id, str):
+                    raise ValueError("copy_id must be a string")
+                if not isinstance(report_revision, str):
+                    raise ValueError("report_revision must be a string")
+                self._json(
+                    HTTPStatus.OK,
+                    service.choose_package_copy(
+                        package_identity,
+                        copy_id,
+                        report_revision,
+                    ),
+                )
                 return
             if method == "POST" and parsed.path == "/api/session-plugins/import":
                 include_disabled = document.get("include_disabled", False)
@@ -834,6 +900,8 @@ class ManagerRequestHandler(BaseHTTPRequestHandler):
                 self._json(HTTPStatus.OK, service.select_atom(target_uid))
                 return
             self._error(HTTPStatus.NOT_FOUND, "API route not found")
+        except PackageConflictError as exc:
+            self._json(HTTPStatus.CONFLICT, exc.document())
         except (ValueError, TypeError) as exc:
             self._error(HTTPStatus.BAD_REQUEST, str(exc))
         except FileNotFoundError as exc:

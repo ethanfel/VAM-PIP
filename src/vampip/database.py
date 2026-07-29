@@ -7,7 +7,7 @@ import sqlite3
 from typing import Iterator
 
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 7
 
 
 SCHEMA = """
@@ -80,6 +80,31 @@ CREATE TABLE IF NOT EXISTS manager_lease_packages (
 CREATE INDEX IF NOT EXISTS idx_manager_lease_packages_id
     ON manager_lease_packages(package_id);
 
+CREATE TABLE IF NOT EXISTS manager_lease_contexts (
+    lease_id TEXT PRIMARY KEY
+        REFERENCES manager_leases(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL CHECK(kind IN ('generic', 'resource')),
+    resource_id INTEGER,
+    package_version TEXT,
+    owner_package_id TEXT COLLATE NOCASE,
+    resource_path TEXT,
+    archive_member TEXT,
+    CHECK(
+        (kind = 'generic'
+         AND resource_id IS NULL
+         AND package_version IS NULL
+         AND owner_package_id IS NULL
+         AND resource_path IS NULL
+         AND archive_member IS NULL)
+        OR
+        (kind = 'resource'
+         AND resource_id IS NOT NULL
+         AND resource_path IS NOT NULL)
+    )
+);
+CREATE INDEX IF NOT EXISTS idx_manager_lease_context_owner
+    ON manager_lease_contexts(owner_package_id);
+
 CREATE TABLE IF NOT EXISTS manager_baseline (
     root TEXT NOT NULL,
     logical_relative_path TEXT NOT NULL,
@@ -87,6 +112,15 @@ CREATE TABLE IF NOT EXISTS manager_baseline (
     baseline_enabled INTEGER NOT NULL,
     recorded_utc TEXT NOT NULL,
     PRIMARY KEY (root, logical_relative_path)
+);
+
+CREATE TABLE IF NOT EXISTS manager_package_choices (
+    root TEXT NOT NULL,
+    package_id TEXT NOT NULL COLLATE NOCASE,
+    selected_content_sha256 TEXT NOT NULL,
+    preferred_logical_path TEXT,
+    selected_utc TEXT NOT NULL,
+    PRIMARY KEY (root, package_id)
 );
 
 CREATE TABLE IF NOT EXISTS catalog_resources (
@@ -219,6 +253,9 @@ def connect(state_dir: Path) -> Iterator[sqlite3.Connection]:
         """,
         (str(SCHEMA_VERSION),),
     )
+    # Schema setup is shared by read and write callers. Do not keep its write
+    # transaction open while a caller performs potentially slow archive reads.
+    connection.commit()
     try:
         yield connection
         connection.commit()

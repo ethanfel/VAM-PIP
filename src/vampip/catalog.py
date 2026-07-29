@@ -10,10 +10,12 @@ from pathlib import Path, PurePosixPath
 import re
 import sqlite3
 import tempfile
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping
 import uuid
 import zipfile
 
+from vampip.analysis import package_id
+from vampip.profiles import preferred
 
 BROWSERASSIST_SOURCE = "browserassist"
 _SUPPORTED_STORE_FORMAT = 3
@@ -1232,6 +1234,7 @@ def search_resources(
     addon_root: Path | str | None = None,
     package_state: str | None = None,
     include_package_state: bool = True,
+    package_choices: Mapping[str, object] | None = None,
     limit: int = 100,
     offset: int = 0,
 ) -> dict[str, object]:
@@ -1372,6 +1375,7 @@ def search_resources(
                 connection,
                 Path(vam_root).expanduser().resolve(),
                 addon_root=addon_root,
+                package_choices=package_choices,
             )
             exact_hidden_ids: set[int] = set()
             exact_non_active_ids: set[int] = set()
@@ -1459,6 +1463,7 @@ def search_resources(
                 connection,
                 Path(vam_root).expanduser().resolve(),
                 addon_root=addon_root,
+                package_choices=package_choices,
             )
         for row, item in zip(rows, items):
             item.update(resolver.resource_state(row))
@@ -1652,28 +1657,17 @@ class _ResourceResolver:
         vam_root: Path,
         *,
         addon_root: Path | str | None,
+        package_choices: Mapping[str, object] | None = None,
     ) -> None:
         self.vam_root = vam_root
-        packages_root = (
+        self.package_choices = package_choices or {}
+        self._connection = connection
+        self._packages_root = str(
             Path(addon_root).expanduser().resolve()
             if addon_root is not None
             else (vam_root / "AddonPackages").resolve()
         )
         self.packages: dict[tuple[str, str], list[sqlite3.Row]] = {}
-        for row in connection.execute(
-            """
-            SELECT * FROM package_files
-            WHERE root = ? AND valid = 1 AND version_text IS NOT NULL
-            """,
-            (str(packages_root),),
-        ):
-            key = (
-                str(row["creator"]).casefold(),
-                str(row["package_name"]).casefold(),
-            )
-            self.packages.setdefault(key, []).append(row)
-        for rows in self.packages.values():
-            rows.sort(key=_copy_sort_key)
         self.archive_indexes: dict[
             Path,
             tuple[
@@ -1683,19 +1677,43 @@ class _ResourceResolver:
             | None,
         ] = {}
 
+    def _family_packages(
+        self,
+        creator: str,
+        package_name: str,
+    ) -> list[sqlite3.Row]:
+        key = (creator.casefold(), package_name.casefold())
+        cached = self.packages.get(key)
+        if cached is not None:
+            return cached
+        rows = list(
+            self._connection.execute(
+                """
+                SELECT * FROM package_files
+                WHERE root = ? AND valid = 1 AND version_text IS NOT NULL
+                  AND creator = ? COLLATE NOCASE
+                  AND package_name = ? COLLATE NOCASE
+                """,
+                (self._packages_root, creator, package_name),
+            )
+        )
+        rows.sort(key=_copy_sort_key)
+        self.packages[key] = rows
+        return rows
+
     def candidates(self, row: sqlite3.Row) -> list[sqlite3.Row]:
         allowed = _allowed_versions(row)
         if not allowed:
             return []
         numeric_allowed = {int(value) for value in allowed if value.isdecimal()}
         newest_declared = max(numeric_allowed) if numeric_allowed else None
-        key = (
-            str(row["creator"]).casefold(),
-            str(row["package_name"]).casefold(),
+        family = self._family_packages(
+            str(row["creator"]),
+            str(row["package_name"]),
         )
-        return [
+        candidates = [
             package_row
-            for package_row in self.packages.get(key, ())
+            for package_row in family
             if (
                 str(package_row["version_text"]).casefold() in allowed
                 or (
@@ -1705,6 +1723,26 @@ class _ResourceResolver:
                 )
             )
         ]
+        # A package identity may exist at several physical paths. Only one
+        # physical copy is allowed to represent each exact ID, otherwise a
+        # thumbnail could come from one archive while activation and dependency
+        # traversal use another. A stored content choice is authoritative.
+        grouped: dict[str, list[sqlite3.Row]] = {}
+        for package_row in candidates:
+            grouped.setdefault(
+                package_id(package_row).casefold(),
+                [],
+            ).append(package_row)
+        selected: list[sqlite3.Row] = []
+        for identity, copies in grouped.items():
+            choice = self.package_choices.get(identity)
+            try:
+                selected.append(preferred(copies, choice))
+            except ValueError:
+                # A stale content choice fails closed for this exact package.
+                # Other eligible versions remain available for update browsing.
+                continue
+        return sorted(selected, key=_copy_sort_key)
 
     def _archive_index(
         self, archive_path: Path
@@ -1888,6 +1926,7 @@ def resolve_resource_archive(
     *,
     addon_root: Path | str | None = None,
     version_text: str | None = None,
+    package_choices: Mapping[str, object] | None = None,
 ) -> ResourceLocation | None:
     """Resolve a resource to a real loose file or matching archive member.
 
@@ -1911,6 +1950,7 @@ def resolve_resource_archive(
         connection,
         root,
         addon_root=addon_root,
+        package_choices=package_choices,
     ).resolve_row(row, version_text=version_text)
 
 
@@ -2029,6 +2069,7 @@ def get_resource_thumbnail(
     cache_dir: Path | str,
     *,
     addon_root: Path | str | None = None,
+    package_choices: Mapping[str, object] | None = None,
     max_bytes: int = DEFAULT_MAX_THUMBNAIL_BYTES,
 ) -> ThumbnailResult | None:
     """Return a bounded, lazily cached sibling-JPG thumbnail."""
@@ -2041,6 +2082,7 @@ def get_resource_thumbnail(
         vam_root,
         resource_id,
         addon_root=addon_root,
+        package_choices=package_choices,
     )
     if location is None:
         return None

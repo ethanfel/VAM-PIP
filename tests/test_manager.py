@@ -1361,6 +1361,20 @@ class ManagerServiceTests(unittest.TestCase):
 
 
 class DatabaseMigrationTests(unittest.TestCase):
+    def test_connect_finishes_schema_transaction_before_yield(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory)
+            with connect(state) as connection:
+                self.assertFalse(connection.in_transaction)
+                connection.execute(
+                    """
+                    INSERT INTO manager_settings(
+                        key, value_json, updated_utc
+                    ) VALUES ('test', 'true', '2026-01-01T00:00:00+00:00')
+                    """
+                )
+                self.assertTrue(connection.in_transaction)
+
     def test_newer_schema_is_rejected_before_local_schema_changes(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             state = Path(directory)
@@ -1460,6 +1474,15 @@ class DatabaseMigrationTests(unittest.TestCase):
                         """
                         SELECT name FROM sqlite_master
                         WHERE type = 'table' AND name = 'manager_leases'
+                        """
+                    ).fetchone()
+                )
+                self.assertIsNotNone(
+                    migrated.execute(
+                        """
+                        SELECT name FROM sqlite_master
+                        WHERE type = 'table'
+                          AND name = 'manager_lease_contexts'
                         """
                     ).fetchone()
                 )
