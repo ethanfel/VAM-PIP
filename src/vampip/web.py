@@ -395,6 +395,7 @@ class ManagerRequestHandler(BaseHTTPRequestHandler):
                         "person_index",
                         "fit_strength",
                         "regions",
+                        "references",
                         "token",
                     }
                 )
@@ -409,10 +410,12 @@ class ManagerRequestHandler(BaseHTTPRequestHandler):
                 person_values = query.get("person_index", ["0"])
                 strength_values = query.get("fit_strength", ["0.5"])
                 region_values = query.get("regions", [])
+                reference_values = query.get("references", [])
                 if (
                     len(person_values) != 1
                     or len(strength_values) != 1
                     or len(region_values) > 1
+                    or len(reference_values) > 1
                 ):
                     raise ValueError(
                         "body-proportion query fields may be supplied only once"
@@ -430,6 +433,9 @@ class ManagerRequestHandler(BaseHTTPRequestHandler):
                     sam3d_body.group(1),
                     target_uid=target_values[0],
                     person_index=int(person_values[0]),
+                    references=(
+                        reference_values[0] if reference_values else None
+                    ),
                     strength=float(strength_values[0]),
                     regions=regions,
                 )
@@ -912,6 +918,7 @@ class ManagerRequestHandler(BaseHTTPRequestHandler):
                     "person_index",
                     "regions",
                     "fit_strength",
+                    "references",
                 }
                 action_fields = {
                     "analyze": common_fields,
@@ -964,6 +971,7 @@ class ManagerRequestHandler(BaseHTTPRequestHandler):
                     sam3d_body.group(1),
                     target_uid=document["target_uid"],
                     person_index=person_index,
+                    references=document.get("references"),
                     strength=strength,
                     regions=regions,
                 )
@@ -991,6 +999,7 @@ class ManagerRequestHandler(BaseHTTPRequestHandler):
                     ],
                     target_uid=document["target_uid"],
                     person_index=person_index,
+                    references=document.get("references"),
                     strength=strength,
                     regions=regions,
                 )

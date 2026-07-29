@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import re
+from statistics import median
 from typing import Iterable
 
 
@@ -77,6 +78,8 @@ _MORPH_TARGETS = (
 _MAX_VALUE_CHANGE = 0.25
 _MAX_RATIO_CHANGE = 0.15
 _MIN_RATIO_CHANGE = 0.015
+_MAX_CONSENSUS_SIGNATURES = 8
+_CONSENSUS_SPACE = "mhr-neutral-bind"
 
 
 def _finite_number(
@@ -250,6 +253,289 @@ def _validated_embedded_signature(value: object) -> dict[str, object] | None:
         )
     except ValueError:
         return None
+
+
+def _consensus_weight(confidence: float) -> float:
+    # Confidence is a bounded geometric-consistency hint, not a probability.
+    # Retaining a 0.25 floor prevents one model's heuristic score from silently
+    # removing an otherwise valid completed result.
+    return 0.25 + 0.75 * confidence
+
+
+def _robust_weighted_value(
+    values: list[float],
+    confidences: list[float],
+) -> tuple[float, dict[str, object]]:
+    if not values or len(values) != len(confidences):
+        raise ValueError("body-proportion consensus values are incomplete")
+    center = median(values)
+    scale = max(abs(center), 1e-8)
+    deviations = [abs(value - center) for value in values]
+    relative_mad = median(deviations) / scale
+    relative_range = (max(values) - min(values)) / scale
+
+    accepted = list(range(len(values)))
+    if len(values) >= 3:
+        # Three robust-sigma equivalents, bounded to reject only obvious
+        # outliers. The 8% floor avoids overreacting to near-identical inputs;
+        # the 25% ceiling prevents one extreme estimate from widening its own
+        # acceptance gate.
+        threshold = max(0.08, min(0.25, 4.4478 * relative_mad))
+        accepted = [
+            index
+            for index, deviation in enumerate(deviations)
+            if deviation / scale <= threshold
+        ]
+        if len(accepted) < 2:
+            accepted = sorted(
+                range(len(values)),
+                key=lambda index: (deviations[index], index),
+            )[:2]
+    rejected = [
+        index for index in range(len(values)) if index not in accepted
+    ]
+    weights = [
+        _consensus_weight(confidences[index])
+        for index in accepted
+    ]
+    total_weight = sum(weights)
+    combined = sum(
+        values[index] * weight
+        for index, weight in zip(accepted, weights)
+    ) / total_weight
+    variance = sum(
+        weight * (values[index] - combined) ** 2
+        for index, weight in zip(accepted, weights)
+    ) / total_weight
+    relative_disagreement = math.sqrt(max(0.0, variance)) / max(
+        abs(combined),
+        1e-8,
+    )
+    return combined, {
+        "inputCount": len(values),
+        "usedCount": len(accepted),
+        "usedSourceIndices": accepted,
+        "rejectedSourceIndices": rejected,
+        "relativeDisagreement": relative_disagreement,
+        "inputRelativeMad": relative_mad,
+        "inputRelativeRange": relative_range,
+    }
+
+
+def _consensus_confidence(
+    confidences: list[float],
+    report: dict[str, object],
+) -> float:
+    accepted = report["usedSourceIndices"]
+    assert isinstance(accepted, list)
+    weights = [_consensus_weight(confidences[index]) for index in accepted]
+    combined = sum(
+        confidences[index] * weight
+        for index, weight in zip(accepted, weights)
+    ) / sum(weights)
+    disagreement = float(report["relativeDisagreement"])
+    disagreement_factor = 1.0 - min(0.5, disagreement * 2.0)
+    coverage_factor = 0.75 + 0.25 * len(accepted) / len(confidences)
+    return max(
+        0.0,
+        min(1.0, combined * disagreement_factor * coverage_factor),
+    )
+
+
+def consensus_body_signatures(
+    signatures: Iterable[dict[str, object]],
+    *,
+    source_ids: Iterable[str] | None = None,
+) -> dict[str, object]:
+    """Combine 1–8 neutral MHR signatures without mutating any input.
+
+    Per-metric structural ratios are filtered around their median and then
+    averaged using bounded geometric-consistency weights. Confidence remains a
+    quality/consistency hint; the returned provenance states that it is not a
+    learned probability.
+
+    A single input is returned unchanged so existing single-image behavior,
+    values, optional fields, and object identity remain exact.
+    """
+
+    if isinstance(signatures, dict):
+        raise TypeError("signatures must be a list of neutral body signatures")
+    raw_signatures = list(signatures)
+    if not 1 <= len(raw_signatures) <= _MAX_CONSENSUS_SIGNATURES:
+        raise ValueError("body-proportion consensus requires 1 to 8 signatures")
+
+    normalized_source_ids: list[str] | None = None
+    if source_ids is not None:
+        if isinstance(source_ids, (str, bytes)):
+            raise TypeError("source_ids must be a list of SAM3D job IDs")
+        normalized_source_ids = list(source_ids)
+        if len(normalized_source_ids) != len(raw_signatures):
+            raise ValueError("source_ids must match the signature count")
+        if (
+            any(
+                not isinstance(source_id, str)
+                or _OPAQUE_TOKEN.fullmatch(source_id) is None
+                for source_id in normalized_source_ids
+            )
+            or len(set(normalized_source_ids)) != len(normalized_source_ids)
+        ):
+            raise ValueError("source_ids must be unique lowercase SAM3D job IDs")
+
+    if len(raw_signatures) == 1:
+        return raw_signatures[0]
+
+    signatures_validated: list[dict[str, object]] = []
+    for signature in raw_signatures:
+        validated = _validated_embedded_signature(signature)
+        if validated is None or validated.get("space") != _CONSENSUS_SPACE:
+            raise ValueError(
+                "consensus inputs must be validated neutral MHR signatures"
+            )
+        signatures_validated.append(validated)
+
+    normalizer_values: list[float] = []
+    normalizer_confidences: list[float] = []
+    for signature in signatures_validated:
+        normalizer = signature["normalizer"]
+        measurements = signature["measurements"]
+        assert isinstance(normalizer, dict)
+        assert isinstance(measurements, dict)
+        normalizer_values.append(float(normalizer["meters"]))
+        normalizer_confidences.append(
+            sum(
+                float(measurements[metric]["confidence"])
+                for metric in BODY_PROPORTION_METRICS
+            )
+            / len(BODY_PROPORTION_METRICS)
+        )
+    consensus_normalizer, normalizer_report = _robust_weighted_value(
+        normalizer_values,
+        normalizer_confidences,
+    )
+
+    ratios: dict[str, float] = {}
+    measurement_confidences: dict[str, float] = {}
+    side_ratios: dict[str, dict[str, float]] = {}
+    metric_reports: dict[str, dict[str, object]] = {}
+    for metric in BODY_PROPORTION_METRICS:
+        items = [
+            signature["measurements"][metric]
+            for signature in signatures_validated
+        ]
+        assert all(isinstance(item, dict) for item in items)
+        values = [float(item["ratio"]) for item in items]  # type: ignore[index]
+        confidences = [
+            float(item["confidence"]) for item in items  # type: ignore[index]
+        ]
+        combined, report = _robust_weighted_value(values, confidences)
+        ratios[metric] = combined
+        measurement_confidences[metric] = _consensus_confidence(
+            confidences,
+            report,
+        )
+        metric_reports[metric] = report
+
+        accepted = report["usedSourceIndices"]
+        assert isinstance(accepted, list)
+        if metric in _KEYPOINT_SEGMENTS and all(
+            "leftMeters" in items[index]  # type: ignore[operator]
+            and "rightMeters" in items[index]  # type: ignore[operator]
+            for index in accepted
+        ):
+            accepted_confidences = [
+                confidences[index] for index in accepted
+            ]
+            accepted_weights = [
+                _consensus_weight(confidence)
+                for confidence in accepted_confidences
+            ]
+            total_weight = sum(accepted_weights)
+            sides: dict[str, float] = {}
+            for side in ("leftMeters", "rightMeters"):
+                sides[side] = sum(
+                    (
+                        float(items[index][side])  # type: ignore[index]
+                        / float(
+                            signatures_validated[index]["normalizer"][  # type: ignore[index]
+                                "meters"
+                            ]
+                        )
+                    )
+                    * weight
+                    for index, weight in zip(accepted, accepted_weights)
+                ) / total_weight
+            side_ratios[metric] = sides
+
+    # torso + thigh + shin define the existing structural-length normalizer.
+    # Renormalizing those independently aggregated ratios keeps that invariant
+    # exact even when per-metric outlier sets differ.
+    structural_ratio = sum(
+        ratios[metric] for metric in ("torso", "thigh", "shin")
+    )
+    if not math.isfinite(structural_ratio) or structural_ratio <= 1e-8:
+        raise ValueError("body-proportion consensus structure is invalid")
+    ratios = {
+        metric: value / structural_ratio
+        for metric, value in ratios.items()
+    }
+    side_ratios = {
+        metric: {
+            side: value / structural_ratio
+            for side, value in sides.items()
+        }
+        for metric, sides in side_ratios.items()
+    }
+
+    measurements: dict[str, dict[str, float]] = {}
+    for metric in BODY_PROPORTION_METRICS:
+        sides = side_ratios.get(metric, {})
+        measurements[metric] = _measurement(
+            ratios[metric] * consensus_normalizer,
+            measurement_confidences[metric],
+            left=(
+                sides["leftMeters"] * consensus_normalizer
+                if "leftMeters" in sides
+                else None
+            ),
+            right=(
+                sides["rightMeters"] * consensus_normalizer
+                if "rightMeters" in sides
+                else None
+            ),
+        )
+    result = _finalize_signature(
+        measurements,
+        space=_CONSENSUS_SPACE,
+    )
+
+    sources: list[dict[str, object]] = []
+    for index in range(len(signatures_validated)):
+        source: dict[str, object] = {"index": index}
+        if normalized_source_ids is not None:
+            source["jobId"] = normalized_source_ids[index]
+        sources.append(source)
+    disagreements = [
+        float(report["relativeDisagreement"])
+        for report in metric_reports.values()
+    ]
+    result["consensus"] = {
+        "schema": 1,
+        "method": "median-gated-bounded-confidence-weighted-mean",
+        "confidenceSemantics": (
+            "geometric consistency weight; not a learned probability"
+        ),
+        "sourceCount": len(signatures_validated),
+        "sources": sources,
+        "normalizer": normalizer_report,
+        "measurements": metric_reports,
+        "overallRelativeDisagreement": sum(disagreements) / len(disagreements),
+        "maximumRelativeDisagreement": max(disagreements),
+        "rejectedMeasurementCount": sum(
+            len(report["rejectedSourceIndices"])
+            for report in metric_reports.values()
+        ),
+    }
+    return result
 
 
 def signature_from_manifest(

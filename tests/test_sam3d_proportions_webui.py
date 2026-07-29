@@ -73,13 +73,18 @@ class Sam3dBodyProportionsWebUITests(unittest.TestCase):
             "sam3d-profile-new",
             "sam3d-profile-save",
             "sam3d-profile-delete",
-            "sam3d-profile-reference-job",
-            "sam3d-profile-use-reference",
+            "sam3d-morph-reference-gallery",
+            "sam3d-morph-reference-count",
+            "sam3d-morph-reference-note",
         ):
             with self.subTest(control_id=control_id):
                 self.assertIn(f'id="{control_id}"', self.html)
         self.assertIn(
             'const SAM3D_BODY_PROFILE_STORAGE_KEY = '
+            '"vampip-sam3d-body-profiles-v2"',
+            self.javascript,
+        )
+        self.assertIn(
             '"vampip-sam3d-body-profiles-v1"',
             self.javascript,
         )
@@ -94,7 +99,9 @@ class Sam3dBodyProportionsWebUITests(unittest.TestCase):
             "name:",
             "regions:",
             "strength:",
-            "reference_job_id:",
+            "reference_jobs:",
+            "job_id:",
+            "person_index:",
         ):
             with self.subTest(safe_field=safe_field):
                 self.assertIn(safe_field, persist)
@@ -107,7 +114,373 @@ class Sam3dBodyProportionsWebUITests(unittest.TestCase):
         ):
             with self.subTest(unsafe_field=unsafe_field):
                 self.assertNotIn(unsafe_field, persist)
+        self.assertNotIn("reference_job_id:", persist)
+        self.assertIn("JSON.stringify({ schema: 2, profiles })", persist)
+        normalize_start = self.javascript.index(
+            "function normalizeSam3dBodyProfile("
+        )
+        normalize_end = self.javascript.index(
+            "function loadSam3dBodyProfiles(", normalize_start
+        )
+        normalize = self.javascript[normalize_start:normalize_end]
+        self.assertIn("raw.reference_job_id", normalize)
+        self.assertIn("raw.reference_person_index", normalize)
         self.assertIn("never live morph values or revisions", self.html)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is not installed")
+    def test_profile_reference_migration_is_deduplicated_and_bounded(self) -> None:
+        helpers_start = self.javascript.index(
+            "function normalizeSam3dBodyReference("
+        )
+        helpers_end = self.javascript.index(
+            "function sam3dBodyReferenceCandidates(", helpers_start
+        )
+        profile_start = self.javascript.index(
+            "function normalizeSam3dBodyProfile("
+        )
+        profile_end = self.javascript.index(
+            "function loadSam3dBodyProfiles(", profile_start
+        )
+        script = (
+            '"use strict";\n'
+            "const SAM3D_JOB_ID_PATTERN = /^[0-9a-f]{32}$/i;\n"
+            "const SAM3D_BODY_REFERENCE_MAX_COUNT = 8;\n"
+            'const SAM3D_BODY_PROPORTION_REGIONS = ["arms", "legs", "torso", "widths"];\n'
+            "const asArray = (value) => Array.isArray(value) ? value : [];\n"
+            "const integerValue = (value) => {\n"
+            "  const number = Number(value);\n"
+            "  return Number.isInteger(number) ? number : null;\n"
+            "};\n"
+            f"{self.javascript[helpers_start:helpers_end]}\n"
+            f"{self.javascript[profile_start:profile_end]}\n"
+            """
+const legacyJobId = "a".repeat(32);
+const legacy = normalizeSam3dBodyProfile({
+  id: "f".repeat(32),
+  name: "Legacy",
+  regions: ["arms"],
+  strength: 65,
+  reference_job_id: legacyJobId,
+  reference_person_index: 3,
+});
+const candidates = Array.from({ length: 10 }, (_, index) => ({
+  job_id: index.toString(16).padStart(32, "0"),
+  person_index: index,
+}));
+candidates.splice(2, 0, {
+  ...candidates[0],
+  person_index: 99,
+});
+candidates.splice(3, 0, {
+  job_id: "e".repeat(32),
+  person_index: -1,
+});
+const current = normalizeSam3dBodyProfile({
+  id: "d".repeat(32),
+  name: "Current",
+  regions: ["legs"],
+  strength: 80,
+  reference_jobs: candidates,
+});
+process.stdout.write(JSON.stringify({
+  legacyReferences: legacy.referenceJobs,
+  currentCount: current.referenceJobs.length,
+  currentTokens: serializeSam3dBodyReferences(current.referenceJobs),
+}));
+"""
+        )
+        completed = subprocess.run(
+            ["node", "-"],
+            input=script,
+            text=True,
+            capture_output=True,
+            check=True,
+            timeout=10,
+        )
+        result = json.loads(completed.stdout)
+
+        self.assertEqual(
+            result["legacyReferences"],
+            [{"jobId": "a" * 32, "personIndex": 3}],
+        )
+        self.assertEqual(result["currentCount"], 8)
+        tokens = result["currentTokens"].split(",")
+        self.assertEqual(len(tokens), 8)
+        self.assertEqual(len(set(tokens)), 8)
+        self.assertEqual(len({token.split(":")[0] for token in tokens}), 8)
+        self.assertTrue(all(":" in token for token in tokens))
+
+    def test_morph_reference_gallery_is_independent_from_pose_selection(self) -> None:
+        self.assertIn(
+            'id="sam3d-morph-reference-gallery"',
+            self.html,
+        )
+        self.assertIn('aria-multiselectable="true"', self.html)
+        self.assertIn("Choose up to eight completed bodies", self.html)
+        for selector in (
+            ".sam3d-morph-reference-picker",
+            ".sam3d-morph-reference-gallery",
+            ".sam3d-morph-reference-card",
+            ".sam3d-morph-reference-card.is-selected",
+            ".sam3d-morph-reference-card.is-solo-only",
+            ".sam3d-morph-reference-compatibility",
+        ):
+            with self.subTest(selector=selector):
+                self.assertIn(selector, self.styles)
+        for function_name in (
+            "normalizeSam3dBodyReferenceSupport",
+            "sam3dBodyReferenceCandidates",
+            "sam3dBodyReferenceSetIssue",
+            "toggleSam3dBodyReference",
+            "renderSam3dBodyReferenceGallery",
+            "sam3dBodyProportionJob",
+        ):
+            with self.subTest(function_name=function_name):
+                self.assertIn(f"function {function_name}(", self.javascript)
+        self.assertIn("raw.body_reference_support", self.javascript)
+        self.assertIn("bodyReferenceSupport,", self.javascript)
+        self.assertIn("Legacy · solo only", self.javascript)
+        self.assertIn(
+            "Legacy result is solo-only; rerun image to combine.",
+            self.javascript,
+        )
+
+        select_job_start = self.javascript.index(
+            "async function selectSam3dJob("
+        )
+        select_job_end = self.javascript.index(
+            "function sam3dFileContentType(", select_job_start
+        )
+        select_job = self.javascript[select_job_start:select_job_end]
+        self.assertNotIn("sam3dBodyReferences", select_job)
+        self.assertNotIn("resetSam3dBodyProportions", select_job)
+        self.assertNotIn("loadSam3dBodyProportions", select_job)
+
+        select_body_start = self.javascript.index(
+            "function selectSam3dBody("
+        )
+        select_body_end = self.javascript.index(
+            "function normalizeSam3dBodyReference(", select_body_start
+        )
+        select_body = self.javascript[select_body_start:select_body_end]
+        self.assertNotIn("sam3dBodyReferences", select_body)
+        self.assertNotIn("resetSam3dBodyProportions", select_body)
+
+        morph_start = self.javascript.index(
+            "async function analyzeSam3dBodyProportions("
+        )
+        morph_end = self.javascript.index(
+            "function sam3dTargetEntries(", morph_start
+        )
+        morph_actions = self.javascript[morph_start:morph_end]
+        self.assertIn("sam3dBodyProportionJob(settings)", morph_actions)
+
+        pose_start = self.javascript.index("async function applySam3dResult(")
+        pose_end = self.javascript.index(
+            "async function undoSam3dApply(", pose_start
+        )
+        pose_apply = self.javascript[pose_start:pose_end]
+        self.assertIn("const job = app.sam3dSelectedJob;", pose_apply)
+        self.assertIn("app.sam3dSelectedBodyIndex", pose_apply)
+        self.assertNotIn("sam3dBodyReferences", pose_apply)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is not installed")
+    def test_legacy_morph_references_are_solo_only(self) -> None:
+        support_start = self.javascript.index(
+            "function normalizeSam3dBodyReferenceSupport("
+        )
+        support_end = self.javascript.index(
+            "function normalizeSam3dJob(", support_start
+        )
+        helpers_start = self.javascript.index(
+            "function normalizeSam3dBodyReference("
+        )
+        helpers_end = self.javascript.index(
+            "function initializeSam3dBodyReferences(", helpers_start
+        )
+        toggle_start = self.javascript.index(
+            "function toggleSam3dBodyReference("
+        )
+        toggle_end = self.javascript.index(
+            "function createSam3dBodyReferenceCard(", toggle_start
+        )
+        script = (
+            '"use strict";\n'
+            "const SAM3D_JOB_ID_PATTERN = /^[0-9a-f]{32}$/i;\n"
+            "const SAM3D_BODY_REFERENCE_MAX_COUNT = 8;\n"
+            "const SAM3D_BODY_LEGACY_SOLO_MESSAGE = "
+            '"Legacy result is solo-only; rerun image to combine.";\n'
+            "const asArray = (value) => Array.isArray(value) ? value : [];\n"
+            "const integerValue = (value) => {\n"
+            "  const number = Number(value);\n"
+            "  return Number.isInteger(number) ? number : null;\n"
+            "};\n"
+            "const sam3dJobSucceeded = () => true;\n"
+            f"{self.javascript[support_start:support_end]}\n"
+            f"{self.javascript[helpers_start:helpers_end]}\n"
+            """
+const legacyId = "a".repeat(32);
+const firstNeutralId = "b".repeat(32);
+const secondNeutralId = "c".repeat(32);
+const app = {
+  sam3dBodyReferences: [],
+  sam3dJobs: [
+    {
+      id: legacyId,
+      bodies: [{}, {}],
+      bodyReferenceSupport: normalizeSam3dBodyReferenceSupport([
+        {
+          person_index: 0,
+          space: "legacy-camera",
+          multi_reference: false,
+        },
+        {
+          person_index: 1,
+          space: "neutral-body",
+          multi_reference: true,
+        },
+      ]),
+    },
+    {
+      id: firstNeutralId,
+      bodies: [{}],
+      bodyReferenceSupport: normalizeSam3dBodyReferenceSupport([
+        {
+          person_index: 0,
+          space: "neutral-body",
+          multi_reference: true,
+        },
+      ]),
+    },
+    {
+      id: secondNeutralId,
+      bodies: [{}],
+      bodyReferenceSupport: normalizeSam3dBodyReferenceSupport([
+        {
+          person_index: 0,
+          space: "neutral-body",
+          multi_reference: true,
+        },
+      ]),
+    },
+  ],
+};
+const legacy = { jobId: legacyId, personIndex: 0 };
+const replacement = { jobId: legacyId, personIndex: 1 };
+const firstNeutral = { jobId: firstNeutralId, personIndex: 0 };
+const secondNeutral = { jobId: secondNeutralId, personIndex: 0 };
+const toasts = [];
+const changes = [];
+const toast = (title, message, kind) => {
+  toasts.push({ title, message, kind });
+};
+const setSam3dBodyReferences = (references) => {
+  app.sam3dBodyReferences = normalizeSam3dBodyReferences(references);
+  changes.push(serializeSam3dBodyReferences(app.sam3dBodyReferences));
+};
+"""
+            f"{self.javascript[toggle_start:toggle_end]}\n"
+            """
+const soloIssue = sam3dBodyReferenceSetIssue([legacy]);
+const mixedIssue = sam3dBodyReferenceSetIssue([legacy, firstNeutral]);
+const neutralIssue =
+  sam3dBodyReferenceSetIssue([firstNeutral, secondNeutral]);
+
+app.sam3dBodyReferences = [legacy];
+toggleSam3dBodyReference(firstNeutral);
+const legacyThenNeutral = serializeSam3dBodyReferences(
+  app.sam3dBodyReferences,
+);
+
+app.sam3dBodyReferences = [firstNeutral];
+toggleSam3dBodyReference(legacy);
+const neutralThenLegacy = serializeSam3dBodyReferences(
+  app.sam3dBodyReferences,
+);
+
+app.sam3dBodyReferences = [];
+toggleSam3dBodyReference(legacy);
+const legacyAlone = serializeSam3dBodyReferences(
+  app.sam3dBodyReferences,
+);
+toggleSam3dBodyReference(legacy);
+const legacyRemoved = serializeSam3dBodyReferences(
+  app.sam3dBodyReferences,
+);
+
+app.sam3dBodyReferences = [legacy];
+toggleSam3dBodyReference(replacement);
+const replacementToken = serializeSam3dBodyReferences(
+  app.sam3dBodyReferences,
+);
+
+app.sam3dBodyReferences = [firstNeutral];
+toggleSam3dBodyReference(secondNeutral);
+const neutralPair = serializeSam3dBodyReferences(
+  app.sam3dBodyReferences,
+);
+
+process.stdout.write(JSON.stringify({
+  support: app.sam3dJobs[0].bodyReferenceSupport,
+  soloIssue,
+  mixedIssue,
+  neutralIssue,
+  legacyThenNeutral,
+  neutralThenLegacy,
+  legacyAlone,
+  legacyRemoved,
+  replacementToken,
+  neutralPair,
+  toasts,
+  changes,
+}));
+"""
+        )
+        completed = subprocess.run(
+            ["node", "-"],
+            input=script,
+            text=True,
+            capture_output=True,
+            check=True,
+            timeout=10,
+        )
+        result = json.loads(completed.stdout)
+        message = "Legacy result is solo-only; rerun image to combine."
+
+        self.assertEqual(
+            result["support"],
+            [
+                {
+                    "personIndex": 0,
+                    "space": "legacy-camera",
+                    "multiReference": False,
+                },
+                {
+                    "personIndex": 1,
+                    "space": "neutral-body",
+                    "multiReference": True,
+                },
+            ],
+        )
+        self.assertEqual(result["soloIssue"], "")
+        self.assertEqual(result["mixedIssue"], message)
+        self.assertEqual(result["neutralIssue"], "")
+        self.assertEqual(result["legacyThenNeutral"], f"{'a' * 32}:0")
+        self.assertEqual(result["neutralThenLegacy"], f"{'b' * 32}:0")
+        self.assertEqual(result["legacyAlone"], f"{'a' * 32}:0")
+        self.assertEqual(result["legacyRemoved"], "")
+        self.assertEqual(result["replacementToken"], f"{'a' * 32}:1")
+        self.assertEqual(
+            result["neutralPair"],
+            f"{'b' * 32}:0,{'c' * 32}:0",
+        )
+        self.assertEqual(len(result["toasts"]), 2)
+        self.assertTrue(
+            all(toast["message"] == message for toast in result["toasts"])
+        )
+        self.assertTrue(
+            all(toast["kind"] == "error" for toast in result["toasts"])
+        )
 
     def test_fit_controls_are_bounded_and_safe_by_default(self) -> None:
         for region in ("arms", "legs", "torso", "widths"):
@@ -144,6 +517,15 @@ class Sam3dBodyProportionsWebUITests(unittest.TestCase):
         self.assertIn("/body-proportions", client)
         self.assertIn("bodyProportionsAction(jobId, action, request = {})", client)
         self.assertIn("body: { action, ...request }", client)
+        self.assertIn(
+            "normalizeSam3dBodyReferences(\n      references,\n"
+            "      normalizedJobId,\n      normalizedPersonIndex,",
+            client,
+        )
+        self.assertIn(
+            "references: serializeSam3dBodyReferences(normalizedReferences)",
+            client,
+        )
 
         request_start = self.javascript.index(
             "function sam3dBodyProportionRequest("
@@ -156,6 +538,7 @@ class Sam3dBodyProportionsWebUITests(unittest.TestCase):
             "expected_job_revision",
             "target_uid",
             "person_index",
+            "references",
             "regions",
             "fit_strength",
             "expected_analysis_revision",
@@ -172,6 +555,7 @@ class Sam3dBodyProportionsWebUITests(unittest.TestCase):
         undo = self.javascript[undo_start:undo_end]
         self.assertIn("target_uid", undo)
         self.assertIn("expected_apply_revision", undo)
+        self.assertNotIn("references", undo)
 
     def test_reports_percentages_confidence_disagreement_and_stale_state(self) -> None:
         for function_name in (
@@ -184,7 +568,13 @@ class Sam3dBodyProportionsWebUITests(unittest.TestCase):
         ):
             with self.subTest(function_name=function_name):
                 self.assertIn(f"function {function_name}(", self.javascript)
-        self.assertIn("model_disagreement", self.javascript)
+        self.assertIn("reference_disagreement", self.javascript)
+        self.assertIn("reference_consensus", self.javascript)
+        self.assertIn("Reference disagreement", self.html)
+        self.assertIn(
+            "selected references or views disagree substantially",
+            self.javascript,
+        )
         self.assertIn("Analysis settings changed", self.javascript)
         self.assertIn("Current VaM → image target", self.html)
         self.assertIn("Proposed morph changes", self.html)
@@ -219,6 +609,7 @@ class Sam3dBodyProportionsWebUITests(unittest.TestCase):
             '  analyze: "analyze", apply: "apply", undo: "undo",\n'
             "});\n"
             "const SAM3D_BODY_PROPORTION_POLL_ATTEMPTS = 300;\n"
+            "const SAM3D_BODY_REFERENCE_MAX_COUNT = 8;\n"
             "const jobId = \"a\".repeat(32);\n"
             "const applyRevision = \"b\".repeat(32);\n"
             """
@@ -249,7 +640,9 @@ const app = {
   sam3dHandoffTab: "morph",
   sam3dSelectedJobId: jobId,
   sam3dSelectedJob: { id: jobId, revision: jobId },
+  sam3dJobs: [{ id: jobId, revision: jobId }],
   sam3dSelectedBodyIndex: 0,
+  sam3dBodyReferences: [{ jobId, personIndex: 0 }],
   sam3dBodyProportionsJobId: jobId,
   sam3dBodyProportions: {
     available: true,
@@ -258,6 +651,7 @@ const app = {
     message: "Waiting for VaM confirmation.",
     targetUid: "Person",
     personIndex: 0,
+    references: [{ jobId, personIndex: 0 }],
     analysisRevision: jobId,
     applyRevision: "",
     confidence: 90,
@@ -285,15 +679,24 @@ const resetSam3dBodyProportions = () => {};
 const sam3dBodyProportionSettings = () => ({
   targetUid: "Person",
   personIndex: 0,
+  referenceJobId: jobId,
+  references: [{ jobId, personIndex: 0 }],
   regions: [...SAM3D_BODY_PROPORTION_REGIONS],
   strength: 75,
 });
+const sam3dBodyProportionJob = () => app.sam3dSelectedJob;
+const sam3dBodyReferencesReady = () => true;
+const sam3dBodyReferenceSetIssue = () => "";
+const serializeSam3dBodyReferences = (references) =>
+  references.map((reference) =>
+    `${reference.jobId}:${reference.personIndex}`).join(",");
 const sam3dBodyProportionRegionControl = () => makeElement();
 const snapshotBridgeBusy = () => false;
 const sam3dJobIsApplied = () => false;
 const sam3dBodyConfidenceLabel = () => "90% · high";
 const renderSam3dBodyMeasurements = () => {};
 const renderSam3dMorphChanges = () => {};
+const renderSam3dBodyProfileActionState = () => {};
 const errorMessage = (error) => String(error?.message || error || "");
 const toast = (title) => { toasts.push(title); };
 const startSam3dBodyProportionPolling = () => { rescheduled += 1; };

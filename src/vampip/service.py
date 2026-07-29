@@ -46,6 +46,7 @@ from vampip.bridge import (
 )
 from vampip.body_proportions import (
     build_analysis as build_body_proportion_analysis,
+    consensus_body_signatures,
     normalize_regions as normalize_body_proportion_regions,
     normalize_strength as normalize_body_proportion_strength,
     signature_from_live as live_body_proportion_signature,
@@ -134,6 +135,9 @@ _SAM3D_CAPTURE_CONTENT_TYPES = {
     "jpg": "image/jpeg",
     "png": "image/png",
 }
+_SAM3D_BODY_REFERENCE = re.compile(r"^([0-9a-f]{32}):([0-9]{1,2})$")
+_SAM3D_BODY_REFERENCE_LIMIT = 8
+_SAM3D_BODY_INDEX_LIMIT = 31
 
 
 class LiveActionBusyError(RuntimeError):
@@ -160,6 +164,56 @@ class PackageConflictError(ValueError):
             "error": str(self),
             "conflicts": self.conflicts,
         }
+
+
+def _normalize_sam3d_body_references(
+    job_id: str,
+    person_index: int,
+    references: object,
+) -> tuple[tuple[str, int], ...]:
+    """Validate a bounded ordered set of immutable SAM3D body references."""
+
+    job_id = validate_sam3d_job_id(job_id)
+    if (
+        isinstance(person_index, bool)
+        or not isinstance(person_index, int)
+        or not 0 <= person_index <= _SAM3D_BODY_INDEX_LIMIT
+    ):
+        raise ValueError("person_index is outside its supported range")
+    if references is None:
+        return ((job_id, person_index),)
+    if not isinstance(references, str):
+        raise TypeError("references must be a comma-separated string")
+    if not references or len(references) > 512:
+        raise ValueError("references is empty or exceeds its supported size")
+    raw_tokens = references.split(",")
+    if not 1 <= len(raw_tokens) <= _SAM3D_BODY_REFERENCE_LIMIT:
+        raise ValueError(
+            f"references must contain between 1 and "
+            f"{_SAM3D_BODY_REFERENCE_LIMIT} jobs"
+        )
+    normalized: list[tuple[str, int]] = []
+    seen_jobs: set[str] = set()
+    for raw_token in raw_tokens:
+        token = raw_token.strip().casefold()
+        match = _SAM3D_BODY_REFERENCE.fullmatch(token)
+        if match is None:
+            raise ValueError(
+                "references must contain only <32hex-job-id>:<body-index> tokens"
+            )
+        reference_job_id = match.group(1)
+        reference_index = int(match.group(2))
+        if reference_index > _SAM3D_BODY_INDEX_LIMIT:
+            raise ValueError("a reference body index exceeds its supported range")
+        if reference_job_id in seen_jobs:
+            raise ValueError("references contains a duplicate SAM3D job")
+        seen_jobs.add(reference_job_id)
+        normalized.append((reference_job_id, reference_index))
+    if normalized[0] != (job_id, person_index):
+        raise ValueError(
+            "the first body reference must match the request job and person_index"
+        )
+    return tuple(normalized)
 
 
 def _choice_digest(choice: object | None) -> str | None:
@@ -1934,13 +1988,83 @@ class ManagerService:
             else ""
         )
 
+    @staticmethod
+    def _sam3d_body_reference_support_from_manifest(
+        manifest: object,
+    ) -> list[dict[str, object]]:
+        """Return bounded, fail-closed body-reference compatibility metadata."""
+
+        if not isinstance(manifest, dict):
+            return []
+        people = manifest.get("people")
+        if not isinstance(people, list):
+            return []
+        support: list[dict[str, object]] = []
+        for person_index, person in enumerate(
+            people[: _SAM3D_BODY_INDEX_LIMIT + 1]
+        ):
+            space = "unavailable"
+            multi_reference = False
+            if isinstance(person, dict):
+                try:
+                    signature = sam3d_body_proportion_signature(
+                        manifest,
+                        person_index,
+                    )
+                except (KeyError, TypeError, ValueError):
+                    pass
+                else:
+                    raw_space = signature.get("space")
+                    if isinstance(raw_space, str) and 0 < len(raw_space) <= 64:
+                        space = raw_space
+                    multi_reference = bool(
+                        space == "mhr-neutral-bind"
+                        and isinstance(person.get("bodyProportions"), dict)
+                    )
+            support.append(
+                {
+                    "person_index": person_index,
+                    "space": space,
+                    "multi_reference": multi_reference,
+                }
+            )
+        return support
+
+    def _sam3d_body_reference_support(
+        self,
+        document: dict[str, object],
+    ) -> list[dict[str, object]]:
+        if document.get("state") != "succeeded":
+            return []
+        job_id = document.get("id")
+        if (
+            not isinstance(job_id, str)
+            or re.fullmatch(r"[0-9a-f]{32}", job_id) is None
+        ):
+            return []
+        try:
+            manifest = self._sam3d().manifest(job_id)
+        except (
+            FileNotFoundError,
+            OSError,
+            RuntimeError,
+            Sam3dJobError,
+            TypeError,
+            ValueError,
+        ):
+            return []
+        return self._sam3d_body_reference_support_from_manifest(manifest)
+
     def _decorate_sam3d_job(
         self,
         document: dict[str, object],
         scene: dict[str, object],
+        *,
+        include_body_reference_support: bool = True,
     ) -> dict[str, object]:
         result = dict(document)
         result.pop("settlement", None)
+        result.pop("body_reference_support", None)
         job_id = str(result.get("id") or "")
         raw_action = result.get("last_vam_action")
         action = dict(raw_action) if isinstance(raw_action, dict) else {}
@@ -2086,6 +2210,13 @@ class ManagerService:
             settlement = _public_sam3d_settlement(live.get("settlement"))
             if settlement is not None:
                 result["settlement"] = settlement
+        if (
+            include_body_reference_support
+            and result.get("state") == "succeeded"
+        ):
+            result["body_reference_support"] = (
+                self._sam3d_body_reference_support(result)
+            )
         return result
 
     def _sam3d_capture_roots(self) -> tuple[Path, Path]:
@@ -2230,7 +2361,11 @@ class ManagerService:
         scene = self._scene_snapshot(include_clothing_refs=False)
         # Reconcile a just-finished bridge request before scanning. Direct final
         # writes from a still-running capture are deliberately not backfilled.
-        self._decorate_sam3d_job(document, scene)
+        self._decorate_sam3d_job(
+            document,
+            scene,
+            include_body_reference_support=False,
+        )
         document = self._sync_sam3d_capture_history(job_id)
         return self._decorate_sam3d_job(document, scene)
 
@@ -2581,12 +2716,16 @@ class ManagerService:
         *,
         target_uid: object,
         person_index: int = 0,
+        references: object = None,
         strength: object = 0.5,
         regions: object = None,
     ) -> dict[str, object]:
         job_id = validate_sam3d_job_id(job_id)
-        if isinstance(person_index, bool) or not isinstance(person_index, int):
-            raise TypeError("person_index must be an integer")
+        reference_values = _normalize_sam3d_body_references(
+            job_id,
+            person_index,
+            references,
+        )
         strength_value = normalize_body_proportion_strength(strength)
         region_values = normalize_body_proportion_regions(regions)
         scene = self._require_live_capability(
@@ -2601,12 +2740,81 @@ class ManagerService:
         )
         body_status = self._live_body_proportion_status(scene, target_uid)
         manager = self._sam3d()
-        job = manager.get(job_id)
-        if job["state"] != "succeeded":
-            raise Sam3dJobError("SAM3D job has not completed successfully")
-        manifest = manager.manifest(job_id)
-        job_revision = str(manifest["revision"])
-        target = sam3d_body_proportion_signature(manifest, person_index)
+        signatures: list[dict[str, object]] = []
+        reference_jobs: list[dict[str, object]] = []
+        incompatible_jobs: list[str] = []
+        multi_reference = len(reference_values) > 1
+        for reference_job_id, reference_index in reference_values:
+            job = manager.get(reference_job_id)
+            if job["state"] != "succeeded":
+                raise Sam3dJobError(
+                    "every body reference must be a successfully completed "
+                    "SAM3D job"
+                )
+            manifest = manager.manifest(reference_job_id)
+            reference_revision = str(manifest["revision"])
+            support = self._sam3d_body_reference_support_from_manifest(
+                manifest
+            )
+            selected_support = next(
+                (
+                    item
+                    for item in support
+                    if item["person_index"] == reference_index
+                ),
+                None,
+            )
+            if (
+                multi_reference
+                and (
+                    selected_support is None
+                    or selected_support["multi_reference"] is not True
+                )
+            ):
+                incompatible_jobs.append(reference_job_id)
+                continue
+            signature = sam3d_body_proportion_signature(
+                manifest,
+                reference_index,
+            )
+            signatures.append(signature)
+            reference_jobs.append(
+                {
+                    "job_id": reference_job_id,
+                    "person_index": reference_index,
+                    "job_revision": reference_revision,
+                    "confidence": signature["overallConfidence"],
+                }
+            )
+        if incompatible_jobs:
+            raise ValueError(
+                "Multi-reference body fitting requires neutral MHR body "
+                "signatures. Incompatible SAM3D job IDs: "
+                + ", ".join(incompatible_jobs)
+            )
+        target = consensus_body_signatures(
+            signatures,
+            source_ids=[item[0] for item in reference_values],
+        )
+        consensus = target.get("consensus")
+        reference_disagreement = (
+            float(consensus["overallRelativeDisagreement"])
+            if isinstance(consensus, dict)
+            and isinstance(
+                consensus.get("overallRelativeDisagreement"),
+                (int, float),
+            )
+            else None
+        )
+        job_revision = str(reference_jobs[0]["job_revision"])
+        reference_set_revision = hashlib.sha256(
+            json.dumps(
+                reference_jobs,
+                ensure_ascii=True,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("ascii")
+        ).hexdigest()[:32]
         current = live_body_proportion_signature(body_status)
         analysis = build_body_proportion_analysis(
             target,
@@ -2625,11 +2833,16 @@ class ManagerService:
             **analysis,
             "job_id": job_id,
             "job_revision": job_revision,
+            "reference_jobs": reference_jobs,
+            "reference_count": len(reference_jobs),
+            "reference_set_revision": reference_set_revision,
             "target_uid": target_uid,
             "person_index": person_index,
             "proposed_morphs": analysis["changes"],
             "confidence": target["overallConfidence"],
             "model_disagreement": None,
+            "reference_disagreement": reference_disagreement,
+            "reference_consensus": consensus,
             # The bridge owns one exact undo snapshot per Person, independent
             # of whichever reconstruction happens to be open in the UI.
             "applied": person_fit_active,
@@ -2693,6 +2906,7 @@ class ManagerService:
         expected_analysis_revision: object,
         target_uid: object,
         person_index: int = 0,
+        references: object = None,
         strength: object = 0.5,
         regions: object = None,
     ) -> dict[str, object]:
@@ -2708,6 +2922,7 @@ class ManagerService:
             job_id,
             target_uid=target_uid,
             person_index=person_index,
+            references=references,
             strength=strength,
             regions=regions,
         )
@@ -2743,6 +2958,9 @@ class ManagerService:
         return {
             "job_id": job_id,
             "job_revision": expected_job_revision,
+            "reference_jobs": analysis["reference_jobs"],
+            "reference_count": analysis["reference_count"],
+            "reference_set_revision": analysis["reference_set_revision"],
             "analysis_revision": expected_analysis_revision,
             "apply_revision": None,
             "bridge_request": request_id,

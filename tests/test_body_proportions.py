@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import unittest
 from pathlib import Path
 import json
@@ -8,6 +9,7 @@ from unittest import mock
 
 from vampip.body_proportions import (
     build_analysis,
+    consensus_body_signatures,
     normalize_regions,
     signature_from_live,
     signature_from_manifest,
@@ -17,6 +19,7 @@ from vampip.bridge import (
     request_person_body_proportions,
     request_undo_person_body_proportions,
 )
+from vampip.sam3d import Sam3dJobError
 from vampip.service import ManagerService
 
 
@@ -83,6 +86,53 @@ def _live_status() -> dict[str, object]:
         ],
         "undoAvailable": False,
     }
+
+
+def _neutral_signature(
+    *,
+    values: dict[str, float] | None = None,
+    confidences: dict[str, float] | None = None,
+    scale: float = 1.0,
+) -> dict[str, object]:
+    meters = {
+        "upperArm": 0.30,
+        "forearm": 0.25,
+        "thigh": 0.45,
+        "shin": 0.45,
+        "torso": 0.60,
+        "shoulderSpan": 0.40,
+        "hipSpan": 0.30,
+    }
+    meters.update(values or {})
+    quality = {metric: 0.8 for metric in meters}
+    quality.update(confidences or {})
+    measurements: dict[str, dict[str, float]] = {}
+    for metric, value in meters.items():
+        item = {
+            "meters": value * scale,
+            "confidence": quality[metric],
+        }
+        if metric in {"upperArm", "forearm", "thigh", "shin"}:
+            item["leftMeters"] = value * scale
+            item["rightMeters"] = value * scale
+        measurements[metric] = item
+    person = _person()
+    person["bodyProportions"] = {
+        "schema": 1,
+        "space": "mhr-neutral-bind",
+        "normalizer": {"id": "stature", "meters": 1.70 * scale},
+        "measurements": measurements,
+        "overallConfidence": sum(quality.values()) / len(quality),
+    }
+    return signature_from_manifest({"people": [person]}, 0)
+
+
+def _person_with_body_signature(
+    signature: dict[str, object],
+) -> dict[str, object]:
+    person = _person()
+    person["bodyProportions"] = signature
+    return person
 
 
 class BodyProportionTests(unittest.TestCase):
@@ -197,6 +247,109 @@ class BodyProportionTests(unittest.TestCase):
             signature_from_live(status)
         with self.assertRaises(ValueError):
             normalize_regions(["face"])
+
+    def test_single_signature_consensus_preserves_exact_behavior(self) -> None:
+        signature = _neutral_signature()
+
+        consensus = consensus_body_signatures(
+            [signature],
+            source_ids=["1" * 32],
+        )
+
+        self.assertIs(consensus, signature)
+        self.assertNotIn("consensus", consensus)
+
+    def test_consensus_rejects_an_obvious_metric_outlier_and_tracks_sources(
+        self,
+    ) -> None:
+        signatures = [
+            _neutral_signature(values={"upperArm": 0.300}),
+            _neutral_signature(values={"upperArm": 0.306}),
+            _neutral_signature(
+                values={"upperArm": 0.720},
+                confidences={"upperArm": 1.0},
+            ),
+        ]
+        original = json.dumps(signatures, sort_keys=True)
+
+        consensus = consensus_body_signatures(
+            signatures,
+            source_ids=["1" * 32, "2" * 32, "3" * 32],
+        )
+
+        self.assertEqual(json.dumps(signatures, sort_keys=True), original)
+        self.assertEqual(consensus["schema"], 1)
+        self.assertEqual(consensus["space"], "mhr-neutral-bind")
+        self.assertAlmostEqual(
+            consensus["measurements"]["upperArm"]["meters"],
+            0.303,
+            places=6,
+        )
+        report = consensus["consensus"]
+        self.assertEqual(report["sourceCount"], 3)
+        self.assertEqual(
+            [source["jobId"] for source in report["sources"]],
+            ["1" * 32, "2" * 32, "3" * 32],
+        )
+        upper_arm = report["measurements"]["upperArm"]
+        self.assertEqual(upper_arm["usedSourceIndices"], [0, 1])
+        self.assertEqual(upper_arm["rejectedSourceIndices"], [2])
+        self.assertEqual(upper_arm["usedCount"], 2)
+        self.assertGreater(upper_arm["inputRelativeRange"], 1.0)
+        self.assertEqual(report["rejectedMeasurementCount"], 1)
+        self.assertIn("not a learned probability", report["confidenceSemantics"])
+
+    def test_consensus_uses_bounded_confidence_weight_and_reports_disagreement(
+        self,
+    ) -> None:
+        consensus = consensus_body_signatures(
+            [
+                _neutral_signature(
+                    values={"upperArm": 0.30},
+                    confidences={"upperArm": 0.0},
+                ),
+                _neutral_signature(
+                    values={"upperArm": 0.40},
+                    confidences={"upperArm": 1.0},
+                ),
+            ]
+        )
+
+        upper_arm = consensus["measurements"]["upperArm"]
+        self.assertGreater(upper_arm["meters"], 0.35)
+        self.assertLess(upper_arm["meters"], 0.40)
+        report = consensus["consensus"]["measurements"]["upperArm"]
+        self.assertEqual(report["usedSourceIndices"], [0, 1])
+        self.assertEqual(report["rejectedSourceIndices"], [])
+        self.assertGreater(report["relativeDisagreement"], 0.0)
+        self.assertGreater(
+            consensus["consensus"]["maximumRelativeDisagreement"],
+            0.0,
+        )
+
+    def test_consensus_is_scale_invariant_and_bounds_input_contract(self) -> None:
+        baseline = _neutral_signature()
+        consensus = consensus_body_signatures(
+            [baseline, _neutral_signature(scale=1.25)]
+        )
+
+        for metric in baseline["measurements"]:
+            self.assertAlmostEqual(
+                consensus["measurements"][metric]["ratio"],
+                baseline["measurements"][metric]["ratio"],
+            )
+        with self.assertRaisesRegex(ValueError, "1 to 8"):
+            consensus_body_signatures([])
+        with self.assertRaisesRegex(ValueError, "1 to 8"):
+            consensus_body_signatures([baseline] * 9)
+        with self.assertRaisesRegex(ValueError, "unique"):
+            consensus_body_signatures(
+                [baseline, baseline],
+                source_ids=["1" * 32, "1" * 32],
+            )
+        non_neutral = signature_from_live(_live_status())
+        with self.assertRaisesRegex(ValueError, "neutral"):
+            consensus_body_signatures([baseline, non_neutral])
 
 
 class BodyProportionBridgeRequestTests(unittest.TestCase):
@@ -326,6 +479,36 @@ class BodyProportionServiceTests(unittest.TestCase):
                 strength=0.5,
             )
 
+    def multi_reference_analysis(
+        self,
+        manifests: dict[str, dict[str, object]],
+        references: str,
+    ) -> dict[str, object]:
+        self.manager.get.side_effect = lambda job_id: {
+            "id": job_id,
+            "state": "succeeded",
+            "revision": manifests[job_id]["revision"],
+        }
+        self.manager.manifest.side_effect = lambda job_id: manifests[job_id]
+        with (
+            mock.patch.object(
+                self.service,
+                "_require_live_capability",
+                return_value=self.scene,
+            ),
+            mock.patch.object(
+                self.service,
+                "_sam3d",
+                return_value=self.manager,
+            ),
+        ):
+            return self.service.sam3d_body_proportions(
+                self.job_id,
+                target_uid="Person",
+                references=references,
+                strength=0.5,
+            )
+
     def test_analysis_is_revision_bound_and_keeps_physics_out(self) -> None:
         result = self.analysis()
 
@@ -334,6 +517,289 @@ class BodyProportionServiceTests(unittest.TestCase):
         self.assertNotIn("preserveHeight", result)
         self.assertIn("physics", result["warning"])
         self.assertEqual(result["proposed_morphs"], result["changes"])
+
+    def test_succeeded_job_list_and_detail_publish_body_reference_support(
+        self,
+    ) -> None:
+        neutral = _person_with_body_signature(_neutral_signature())
+        manifest = {
+            "jobId": self.job_id,
+            "revision": self.job_revision,
+            "people": [neutral, _person()],
+        }
+        job = {
+            "id": self.job_id,
+            "state": "succeeded",
+            "revision": self.job_revision,
+        }
+        self.manager.list.return_value = {
+            "items": [job],
+            "limit": 30,
+            "offset": 0,
+        }
+        self.manager.get.return_value = job
+        self.manager.manifest.return_value = manifest
+        expected = [
+            {
+                "person_index": 0,
+                "space": "mhr-neutral-bind",
+                "multi_reference": True,
+            },
+            {
+                "person_index": 1,
+                "space": "mhr-landmark-distance-fallback",
+                "multi_reference": False,
+            },
+        ]
+
+        with (
+            mock.patch.object(
+                self.service,
+                "_sam3d",
+                return_value=self.manager,
+            ),
+            mock.patch.object(
+                self.service,
+                "_scene_snapshot",
+                return_value={},
+            ),
+        ):
+            listed = self.service.sam3d_jobs()["items"][0]
+            with mock.patch.object(
+                self.service,
+                "_sync_sam3d_capture_history",
+                return_value=job,
+            ):
+                detailed = self.service.sam3d_job(self.job_id)
+
+        self.assertEqual(listed["body_reference_support"], expected)
+        self.assertEqual(detailed["body_reference_support"], expected)
+        self.assertEqual(self.manager.manifest.call_count, 2)
+
+    def test_body_reference_support_is_bounded_and_fails_closed(self) -> None:
+        oversized = {
+            "people": [
+                _person_with_body_signature(_neutral_signature())
+                for _ in range(40)
+            ]
+        }
+        support = self.service._sam3d_body_reference_support_from_manifest(
+            oversized
+        )
+        self.assertEqual(len(support), 32)
+        self.assertTrue(all(item["multi_reference"] for item in support))
+
+        job = {
+            "id": self.job_id,
+            "state": "succeeded",
+            "revision": self.job_revision,
+        }
+        self.manager.list.return_value = {"items": [job]}
+        self.manager.manifest.side_effect = Sam3dJobError("unreadable")
+        with (
+            mock.patch.object(
+                self.service,
+                "_sam3d",
+                return_value=self.manager,
+            ),
+            mock.patch.object(
+                self.service,
+                "_scene_snapshot",
+                return_value={},
+            ),
+        ):
+            listed = self.service.sam3d_jobs()["items"][0]
+        self.assertEqual(listed["body_reference_support"], [])
+
+    def test_multi_reference_validation_rejects_bad_reference_sets(self) -> None:
+        other_job_id = "f" * 32
+        cases = (
+            (
+                "malformed",
+                "not-a-reference",
+                "only <32hex-job-id>:<body-index>",
+            ),
+            (
+                "duplicate job",
+                f"{self.job_id}:0,{self.job_id}:1",
+                "duplicate SAM3D job",
+            ),
+            (
+                "non-primary first reference",
+                f"{other_job_id}:0,{self.job_id}:0",
+                "first body reference must match",
+            ),
+        )
+
+        for label, references, expected_error in cases:
+            with self.subTest(label=label):
+                with self.assertRaisesRegex(ValueError, expected_error):
+                    self.service.sam3d_body_proportions(
+                        self.job_id,
+                        target_uid="Person",
+                        references=references,
+                    )
+
+    def test_multi_reference_names_every_incompatible_legacy_job(self) -> None:
+        secondary_job_id = "f" * 32
+        manifests = {
+            self.job_id: {
+                "jobId": self.job_id,
+                "revision": self.job_revision,
+                "people": [_person()],
+            },
+            secondary_job_id: {
+                "jobId": secondary_job_id,
+                "revision": "1" * 32,
+                "people": [_person()],
+            },
+        }
+        references = f"{self.job_id}:0,{secondary_job_id}:0"
+
+        with self.assertRaisesRegex(
+            ValueError,
+            (
+                "Incompatible SAM3D job IDs: "
+                f"{self.job_id}, {secondary_job_id}"
+            ),
+        ):
+            self.multi_reference_analysis(manifests, references)
+
+    def test_two_reference_analysis_reports_canonical_provenance(self) -> None:
+        secondary_job_id = "f" * 32
+        secondary_revision = "1" * 32
+        primary_signature = _neutral_signature(
+            values={"upperArm": 0.30},
+        )
+        secondary_signature = _neutral_signature(
+            values={"upperArm": 0.33},
+        )
+        manifests = {
+            self.job_id: {
+                "jobId": self.job_id,
+                "revision": self.job_revision,
+                "people": [_person_with_body_signature(primary_signature)],
+            },
+            secondary_job_id: {
+                "jobId": secondary_job_id,
+                "revision": secondary_revision,
+                "people": [
+                    _person(),
+                    _person_with_body_signature(secondary_signature),
+                ],
+            },
+        }
+        references = f"{self.job_id}:0,{secondary_job_id}:1"
+
+        result = self.multi_reference_analysis(manifests, references)
+
+        provenance = [
+            {
+                "job_id": item["job_id"],
+                "person_index": item["person_index"],
+                "job_revision": item["job_revision"],
+            }
+            for item in result["reference_jobs"]
+        ]
+        self.assertEqual(
+            provenance,
+            [
+                {
+                    "job_id": self.job_id,
+                    "person_index": 0,
+                    "job_revision": self.job_revision,
+                },
+                {
+                    "job_id": secondary_job_id,
+                    "person_index": 1,
+                    "job_revision": secondary_revision,
+                },
+            ],
+        )
+        self.assertEqual(result["reference_count"], 2)
+        self.assertTrue(
+            all(
+                isinstance(item["confidence"], float)
+                for item in result["reference_jobs"]
+            )
+        )
+        expected_reference_revision = hashlib.sha256(
+            json.dumps(
+                result["reference_jobs"],
+                ensure_ascii=True,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("ascii")
+        ).hexdigest()[:32]
+        self.assertEqual(
+            result["reference_set_revision"],
+            expected_reference_revision,
+        )
+        self.assertEqual(result["job_revision"], self.job_revision)
+        self.assertEqual(result["target"]["consensus"]["sourceCount"], 2)
+        self.assertEqual(
+            [
+                item["jobId"]
+                for item in result["target"]["consensus"]["sources"]
+            ],
+            [self.job_id, secondary_job_id],
+        )
+        self.assertRegex(result["analysis_revision"], r"^[0-9a-f]{32}$")
+
+    def test_any_reference_revision_invalidates_the_analysis(self) -> None:
+        secondary_job_id = "f" * 32
+        references = f"{self.job_id}:0,{secondary_job_id}:1"
+        people = {
+            self.job_id: [
+                _person_with_body_signature(_neutral_signature()),
+            ],
+            secondary_job_id: [
+                _person(),
+                _person_with_body_signature(
+                    _neutral_signature(values={"forearm": 0.27}),
+                ),
+            ],
+        }
+
+        def manifests(
+            primary_revision: str,
+            secondary_revision: str,
+        ) -> dict[str, dict[str, object]]:
+            return {
+                self.job_id: {
+                    "jobId": self.job_id,
+                    "revision": primary_revision,
+                    "people": people[self.job_id],
+                },
+                secondary_job_id: {
+                    "jobId": secondary_job_id,
+                    "revision": secondary_revision,
+                    "people": people[secondary_job_id],
+                },
+            }
+
+        baseline = self.multi_reference_analysis(
+            manifests(self.job_revision, "1" * 32),
+            references,
+        )
+        changed_revisions = (
+            ("primary", "2" * 32, "1" * 32),
+            ("secondary", self.job_revision, "3" * 32),
+        )
+        for label, primary_revision, secondary_revision in changed_revisions:
+            with self.subTest(reference=label):
+                changed = self.multi_reference_analysis(
+                    manifests(primary_revision, secondary_revision),
+                    references,
+                )
+                self.assertNotEqual(
+                    changed["reference_set_revision"],
+                    baseline["reference_set_revision"],
+                )
+                self.assertNotEqual(
+                    changed["analysis_revision"],
+                    baseline["analysis_revision"],
+                )
 
     def test_apply_recomputes_analysis_and_queues_only_opaque_changes(self) -> None:
         analysis = self.analysis()

@@ -39,8 +39,13 @@ const SAM3D_BODY_PROPORTION_ACTIONS = Object.freeze({
   undo: "undo",
 });
 const SAM3D_BODY_PROPORTION_POLL_ATTEMPTS = 300;
-const SAM3D_BODY_PROFILE_STORAGE_KEY = "vampip-sam3d-body-profiles-v1";
+const SAM3D_BODY_PROFILE_STORAGE_KEY = "vampip-sam3d-body-profiles-v2";
+const SAM3D_BODY_PROFILE_LEGACY_STORAGE_KEY =
+  "vampip-sam3d-body-profiles-v1";
 const SAM3D_BODY_PROFILE_MAX_COUNT = 24;
+const SAM3D_BODY_REFERENCE_MAX_COUNT = 8;
+const SAM3D_BODY_LEGACY_SOLO_MESSAGE =
+  "Legacy result is solo-only; rerun image to combine.";
 const SAM3D_RENDERER_RESOLUTIONS = Object.freeze({
   "36:9": Object.freeze(["1600x400", "3200x800", "6400x1600"]),
   "32:9": Object.freeze([
@@ -900,7 +905,8 @@ const app = {
   sam3dHandoffTab: "morph",
   sam3dBodyProfiles: [],
   sam3dSelectedBodyProfileId: "",
-  sam3dBodyProfileDraftReferenceJobId: "",
+  sam3dBodyReferences: [],
+  sam3dBodyReferencesInitialized: false,
 };
 
 const elements = {};
@@ -1053,9 +1059,10 @@ function cacheElements() {
     "sam3d-profile-new",
     "sam3d-profile-save",
     "sam3d-profile-delete",
-    "sam3d-profile-reference-job",
-    "sam3d-profile-use-reference",
     "sam3d-profile-note",
+    "sam3d-morph-reference-gallery",
+    "sam3d-morph-reference-count",
+    "sam3d-morph-reference-note",
     "sam3d-apply-panel",
     "sam3d-revision",
     "sam3d-person-target",
@@ -1442,17 +1449,14 @@ function bindEvents() {
     "click",
     deleteSam3dBodyProfile,
   );
-  elements.sam3dProfileReferenceJob.addEventListener(
-    "change",
-    () => {
-      app.sam3dBodyProfileDraftReferenceJobId =
-        elements.sam3dProfileReferenceJob.value;
-      renderSam3dBodyProfileActionState();
-    },
-  );
-  elements.sam3dProfileUseReference.addEventListener(
+  elements.sam3dMorphReferenceGallery.addEventListener(
     "click",
-    openSam3dBodyProfileReference,
+    (event) => {
+      const candidate = event.target.closest("[data-sam3d-body-reference]");
+      if (candidate && !candidate.disabled) {
+        toggleSam3dBodyReference(candidate.dataset.sam3dBodyReference);
+      }
+    },
   );
   elements.sam3dProportionsAnalyze.addEventListener(
     "click",
@@ -7342,14 +7346,26 @@ const Sam3dClient = Object.freeze({
       personIndex = 0,
       strength = 50,
       regions = SAM3D_BODY_PROPORTION_REGIONS,
+      references = [],
     } = {},
     signal,
   ) {
+    const normalizedJobId = sam3dJobId(jobId);
+    const normalizedPersonIndex = Math.max(
+      0,
+      integerValue(personIndex) || 0,
+    );
+    const normalizedReferences = normalizeSam3dBodyReferences(
+      references,
+      normalizedJobId,
+      normalizedPersonIndex,
+    );
     const query = new URLSearchParams({
-      person_index: String(Math.max(0, integerValue(personIndex) || 0)),
+      person_index: String(normalizedPersonIndex),
       fit_strength: String(
         Math.max(0, Math.min(100, Number(strength) || 0)) / 100,
       ),
+      references: serializeSam3dBodyReferences(normalizedReferences),
     });
     if (targetUid) query.set("target_uid", targetUid);
     const selectedRegions = asArray(regions).filter((region) =>
@@ -7358,7 +7374,9 @@ const Sam3dClient = Object.freeze({
     if (selectedRegions.length) {
       query.set("regions", selectedRegions.join(","));
     }
-    return api(`${this.paths.bodyProportions(jobId)}?${query}`, { signal });
+    return api(`${this.paths.bodyProportions(normalizedJobId)}?${query}`, {
+      signal,
+    });
   },
 
   bodyProportionsAction(jobId, action, request = {}) {
@@ -7631,6 +7649,40 @@ function normalizeSam3dCapture(raw) {
   };
 }
 
+function normalizeSam3dBodyReferenceSupport(raw) {
+  const seen = new Set();
+  return asArray(raw)
+    .map((item) => {
+      if (!item || typeof item !== "object" || Array.isArray(item)) {
+        return null;
+      }
+      const personIndex = integerValue(
+        item.person_index ?? item.personIndex,
+      );
+      if (
+        personIndex === null ||
+        personIndex < 0 ||
+        seen.has(personIndex)
+      ) {
+        return null;
+      }
+      seen.add(personIndex);
+      const space = String(item.space || "legacy")
+        .trim()
+        .toLowerCase()
+        .slice(0, 48);
+      return {
+        personIndex,
+        space: space || "legacy",
+        multiReference:
+          item.multi_reference === true ||
+          item.multiReference === true,
+      };
+    })
+    .filter(Boolean)
+    .slice(0, 32);
+}
+
 function normalizeSam3dJob(raw) {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
   let id;
@@ -7697,6 +7749,12 @@ function normalizeSam3dJob(raw) {
         result.selected_body_index ??
         0,
     ) || 0,
+  );
+  const bodyReferenceSupport = normalizeSam3dBodyReferenceSupport(
+    raw.body_reference_support ||
+      raw.bodyReferenceSupport ||
+      result.body_reference_support ||
+      result.bodyReferenceSupport,
   );
   const revision = String(
     raw.revision ||
@@ -7774,6 +7832,7 @@ function normalizeSam3dJob(raw) {
     ),
     revision,
     bodies,
+    bodyReferenceSupport,
     selectedBodyIndex,
     model: {
       id: /^[a-z0-9][a-z0-9_.+-]{0,63}$/.test(modelId) ? modelId : "",
@@ -7952,16 +8011,18 @@ async function loadSam3dWorkspace({ force = false, quiet = false } = {}) {
       ) || app.sam3dSelectedJob;
   }
 
+  initializeSam3dBodyReferences();
   renderSam3dWorkspace();
   if (app.sam3dSelectedJobId) {
-    const selectedJob = await loadSam3dJob(app.sam3dSelectedJobId, {
+    await loadSam3dJob(app.sam3dSelectedJobId, {
       quiet: true,
     });
-    if (sam3dJobSucceeded(selectedJob)) {
-      await loadSam3dBodyProportions(app.sam3dSelectedJobId, {
-        quiet: true,
-      });
-    }
+  }
+  const morphJob = sam3dBodyProportionJob();
+  if (morphJob) {
+    await loadSam3dBodyProportions(morphJob.id, {
+      quiet: true,
+    });
   }
   if (app.sam3dJobs.some(sam3dJobNeedsPolling)) {
     startSam3dPolling();
@@ -8066,7 +8127,10 @@ async function pollSam3dJob() {
       sam3dJobSucceeded(job) &&
       !app.sam3dBodyProportionsPendingAction
     ) {
-      await loadSam3dBodyProportions(job.id, { quiet: true });
+      const morphJob = sam3dBodyProportionJob();
+      if (morphJob) {
+        await loadSam3dBodyProportions(morphJob.id, { quiet: true });
+      }
     }
     if (actionState === "succeeded") {
       toast(
@@ -8382,19 +8446,12 @@ async function selectSam3dJob(jobId) {
     app.sam3dSelectedJob?.applied
       ? app.sam3dSelectedJob.solutionRevision
       : "";
-  app.sam3dHandoffTab = "morph";
-  if (!app.sam3dSelectedBodyProfileId) {
-    app.sam3dBodyProfileDraftReferenceJobId = normalizedId;
-  }
-  resetSam3dBodyProportions(normalizedId);
   app.sam3dPreviewKind = sam3dJobSucceeded(app.sam3dSelectedJob)
     ? "overlay"
     : "source";
   renderSam3dWorkspace();
   const job = await loadSam3dJob(normalizedId);
-  if (sam3dJobSucceeded(job)) {
-    await loadSam3dBodyProportions(normalizedId, { quiet: true });
-  }
+  if (sam3dJobSucceeded(job)) renderSam3dBodyReferenceGallery();
 }
 
 function sam3dFileContentType(file) {
@@ -9426,10 +9483,396 @@ function selectSam3dBody(value) {
     return;
   }
   app.sam3dSelectedBodyIndex = bodyIndex;
-  resetSam3dBodyProportions(job.id);
   app.sam3dPreviewKind = "overlay";
   renderSam3dJob();
   renderSam3dApplyState();
+}
+
+function normalizeSam3dBodyReference(raw) {
+  let document = raw;
+  if (typeof raw === "string") {
+    const value = raw.trim().toLowerCase();
+    const tokenMatch = value.match(/^([0-9a-f]{32}):([0-9]+)$/);
+    document = tokenMatch
+      ? { job_id: tokenMatch[1], person_index: tokenMatch[2] }
+      : { job_id: value, person_index: 0 };
+  }
+  if (!document || typeof document !== "object" || Array.isArray(document)) {
+    return null;
+  }
+  const jobId = String(
+    document.job_id ||
+      document.jobId ||
+      document.reference_job_id ||
+      document.referenceJobId ||
+      "",
+  )
+    .trim()
+    .toLowerCase();
+  const personIndex = integerValue(
+    document.person_index ??
+      document.personIndex ??
+      document.reference_person_index ??
+      document.referencePersonIndex ??
+      0,
+  );
+  if (
+    !SAM3D_JOB_ID_PATTERN.test(jobId) ||
+    personIndex === null ||
+    personIndex < 0
+  ) {
+    return null;
+  }
+  return { jobId, personIndex };
+}
+
+function normalizeSam3dBodyReferences(
+  raw,
+  legacyReferenceJobId = "",
+  legacyPersonIndex = 0,
+) {
+  let candidates = raw;
+  if (typeof raw === "string") {
+    candidates = raw
+      .split(",")
+      .map((value) => value.trim())
+      .filter(Boolean);
+  }
+  candidates = asArray(candidates);
+  if (!candidates.length && legacyReferenceJobId) {
+    candidates = [
+      {
+        job_id: legacyReferenceJobId,
+        person_index: legacyPersonIndex,
+      },
+    ];
+  }
+  const seen = new Set();
+  const references = [];
+  for (const candidate of candidates) {
+    const reference = normalizeSam3dBodyReference(candidate);
+    if (!reference) continue;
+    if (seen.has(reference.jobId)) continue;
+    seen.add(reference.jobId);
+    references.push(reference);
+    if (references.length >= SAM3D_BODY_REFERENCE_MAX_COUNT) break;
+  }
+  return references;
+}
+
+function sam3dBodyReferenceToken(reference) {
+  const normalized = normalizeSam3dBodyReference(reference);
+  return normalized
+    ? `${normalized.jobId}:${normalized.personIndex}`
+    : "";
+}
+
+function serializeSam3dBodyReferences(references) {
+  return normalizeSam3dBodyReferences(references)
+    .map(sam3dBodyReferenceToken)
+    .filter(Boolean)
+    .join(",");
+}
+
+function sam3dBodyReferenceSupport(job, personIndex) {
+  return (
+    asArray(job?.bodyReferenceSupport).find(
+      (support) => support.personIndex === personIndex,
+    ) || {
+      personIndex,
+      space: "legacy",
+      multiReference: false,
+    }
+  );
+}
+
+function sam3dBodyReferenceCandidates() {
+  const candidates = [];
+  for (const job of app.sam3dJobs.filter(sam3dJobSucceeded)) {
+    const bodies = job.bodies.length ? job.bodies : [{}];
+    for (let personIndex = 0; personIndex < bodies.length; personIndex += 1) {
+      candidates.push({
+        job,
+        body: bodies[personIndex],
+        support: sam3dBodyReferenceSupport(job, personIndex),
+        reference: { jobId: job.id, personIndex },
+      });
+    }
+  }
+  return candidates;
+}
+
+function sam3dBodyReferenceCandidate(reference) {
+  const token = sam3dBodyReferenceToken(reference);
+  return (
+    sam3dBodyReferenceCandidates().find(
+      (candidate) => sam3dBodyReferenceToken(candidate.reference) === token,
+    ) || null
+  );
+}
+
+function sam3dBodyReferenceAvailable(reference) {
+  return Boolean(sam3dBodyReferenceCandidate(reference));
+}
+
+function sam3dBodyReferenceSetIssue(references) {
+  const normalized = normalizeSam3dBodyReferences(references);
+  if (normalized.length < 2) return "";
+  const soloOnly = normalized.some((reference) => {
+    const candidate = sam3dBodyReferenceCandidate(reference);
+    return candidate && candidate.support.multiReference !== true;
+  });
+  return soloOnly ? SAM3D_BODY_LEGACY_SOLO_MESSAGE : "";
+}
+
+function initializeSam3dBodyReferences() {
+  if (app.sam3dBodyReferencesInitialized) return;
+  const job =
+    app.sam3dSelectedJob && sam3dJobSucceeded(app.sam3dSelectedJob)
+      ? app.sam3dSelectedJob
+      : app.sam3dJobs.find(sam3dJobSucceeded);
+  if (!job) return;
+  app.sam3dBodyReferences = normalizeSam3dBodyReferences([
+    {
+      jobId: job.id,
+      personIndex:
+        job.id === app.sam3dSelectedJobId
+          ? app.sam3dSelectedBodyIndex
+          : job.selectedBodyIndex,
+    },
+  ]);
+  app.sam3dBodyReferencesInitialized = true;
+}
+
+function setSam3dBodyReferences(references, { dirty = true } = {}) {
+  const previous = normalizeSam3dBodyReferences(app.sam3dBodyReferences);
+  const next = normalizeSam3dBodyReferences(references);
+  const previousTokens = serializeSam3dBodyReferences(previous);
+  const nextTokens = serializeSam3dBodyReferences(next);
+  app.sam3dBodyReferences = next;
+  app.sam3dBodyReferencesInitialized = true;
+  if (previousTokens === nextTokens) return false;
+  const previousJobId = previous[0]?.jobId || "";
+  const nextJobId = next[0]?.jobId || "";
+  if (previousJobId !== nextJobId) {
+    resetSam3dBodyProportions(nextJobId);
+  } else if (dirty) {
+    markSam3dBodyProportionsDirty();
+  }
+  renderSam3dBodyReferenceGallery();
+  renderSam3dBodyProfileActionState();
+  renderSam3dBodyProportions();
+  return true;
+}
+
+function toggleSam3dBodyReference(value) {
+  const reference = normalizeSam3dBodyReference(value);
+  if (!reference) return;
+  const token = sam3dBodyReferenceToken(reference);
+  const current = normalizeSam3dBodyReferences(app.sam3dBodyReferences);
+  const index = current.findIndex(
+    (candidate) => sam3dBodyReferenceToken(candidate) === token,
+  );
+  if (index >= 0) {
+    current.splice(index, 1);
+    setSam3dBodyReferences(current);
+    return;
+  }
+  const referenceCandidate = sam3dBodyReferenceCandidate(reference);
+  if (!referenceCandidate) return;
+  const sameJobIndex = current.findIndex(
+    (candidate) => candidate.jobId === reference.jobId,
+  );
+  if (sameJobIndex >= 0) {
+    const replacement = [...current];
+    replacement.splice(sameJobIndex, 1, reference);
+    if (sam3dBodyReferenceSetIssue(replacement)) {
+      toast(
+        "Cannot combine this Morph reference",
+        SAM3D_BODY_LEGACY_SOLO_MESSAGE,
+        "error",
+      );
+      return;
+    }
+    setSam3dBodyReferences(replacement);
+    return;
+  }
+  const selectedSoloOnly = current.some((candidate) => {
+    const selectedCandidate = sam3dBodyReferenceCandidate(candidate);
+    return (
+      selectedCandidate &&
+      selectedCandidate.support.multiReference !== true
+    );
+  });
+  if (
+    current.length &&
+    (selectedSoloOnly ||
+      referenceCandidate.support.multiReference !== true)
+  ) {
+    toast(
+      "Cannot combine this Morph reference",
+      SAM3D_BODY_LEGACY_SOLO_MESSAGE,
+      "error",
+    );
+    return;
+  }
+  if (current.length >= SAM3D_BODY_REFERENCE_MAX_COUNT) {
+    toast(
+      "Morph reference limit reached",
+      `Choose at most ${SAM3D_BODY_REFERENCE_MAX_COUNT} completed bodies.`,
+      "error",
+    );
+    return;
+  }
+  current.push(reference);
+  setSam3dBodyReferences(current);
+}
+
+function createSam3dBodyReferenceCard(
+  reference,
+  { job = null, body = null, support = null, missing = false } = {},
+) {
+  const token = sam3dBodyReferenceToken(reference);
+  const selected = app.sam3dBodyReferences.some(
+    (candidate) => sam3dBodyReferenceToken(candidate) === token,
+  );
+  const atLimit =
+    app.sam3dBodyReferences.length >= SAM3D_BODY_REFERENCE_MAX_COUNT;
+  const replacesSelectedJob = app.sam3dBodyReferences.some(
+    (candidate) => candidate.jobId === reference.jobId,
+  );
+  const card = button(
+    "",
+    `sam3d-morph-reference-card${selected ? " is-selected" : ""}${
+      missing ? " is-missing" : ""
+    }${
+      !missing && support?.multiReference !== true
+        ? " is-solo-only"
+        : ""
+    }`,
+  );
+  card.dataset.sam3dBodyReference = token;
+  card.setAttribute("role", "option");
+  card.setAttribute("aria-selected", String(selected));
+  card.disabled =
+    app.sam3dBodyProportionsInFlight ||
+    Boolean(app.sam3dBodyProportionsPendingAction) ||
+    Boolean(app.sam3dBodyProportions?.applied) ||
+    (!selected && atLimit && !replacesSelectedJob);
+
+  if (!missing) {
+    const thumb = createElement("span", "sam3d-morph-reference-thumb");
+    const sourceUrl = sam3dArtifactUrl(job, "source");
+    if (sourceUrl) {
+      const image = document.createElement("img");
+      image.alt = "";
+      image.loading = "lazy";
+      image.addEventListener("error", () => image.remove());
+      image.src = sourceUrl;
+      thumb.append(image);
+    } else {
+      thumb.textContent = "3D";
+    }
+    card.append(thumb);
+  }
+
+  const copy = createElement("span", "sam3d-morph-reference-copy");
+  const title = document.createElement("strong");
+  title.textContent = missing
+    ? `Saved job ${reference.jobId.slice(0, 8)}…`
+    : job.sourceName;
+  const detail = document.createElement("span");
+  detail.textContent = missing
+    ? `Body ${reference.personIndex + 1} · not in recent completed jobs`
+    : `${sam3dModelDisplayName(job)} · ${sam3dBodyLabel(
+        body,
+        reference.personIndex,
+      )}`;
+  copy.append(title, detail);
+  if (!missing && support?.multiReference !== true) {
+    const compatibility = createElement(
+      "span",
+      "sam3d-morph-reference-compatibility",
+    );
+    compatibility.textContent = "Legacy · solo only";
+    compatibility.title = SAM3D_BODY_LEGACY_SOLO_MESSAGE;
+    copy.append(compatibility);
+  }
+  const state = createElement("span", "sam3d-morph-reference-state");
+  state.textContent = selected ? "✓" : "+";
+  card.append(copy, state);
+  return card;
+}
+
+function renderSam3dBodyReferenceGallery() {
+  initializeSam3dBodyReferences();
+  app.sam3dBodyReferences = normalizeSam3dBodyReferences(
+    app.sam3dBodyReferences,
+  );
+  elements.sam3dMorphReferenceGallery.replaceChildren();
+  const fragment = document.createDocumentFragment();
+  const availableTokens = new Set();
+  for (const candidate of sam3dBodyReferenceCandidates()) {
+    availableTokens.add(sam3dBodyReferenceToken(candidate.reference));
+    fragment.append(
+      createSam3dBodyReferenceCard(candidate.reference, candidate),
+    );
+  }
+  for (const reference of app.sam3dBodyReferences) {
+    if (!availableTokens.has(sam3dBodyReferenceToken(reference))) {
+      fragment.append(
+        createSam3dBodyReferenceCard(reference, { missing: true }),
+      );
+    }
+  }
+  if (!fragment.childNodes.length) {
+    const empty = createElement("div", "inline-empty");
+    const message = document.createElement("p");
+    message.textContent = "No completed reconstruction bodies yet.";
+    empty.append(message);
+    fragment.append(empty);
+  }
+  elements.sam3dMorphReferenceGallery.append(fragment);
+  elements.sam3dMorphReferenceCount.value =
+    `${app.sam3dBodyReferences.length} / ${SAM3D_BODY_REFERENCE_MAX_COUNT}`;
+  elements.sam3dMorphReferenceCount.textContent =
+    elements.sam3dMorphReferenceCount.value;
+  const missingCount = app.sam3dBodyReferences.filter(
+    (reference) => !availableTokens.has(sam3dBodyReferenceToken(reference)),
+  ).length;
+  const combinationIssue = sam3dBodyReferenceSetIssue(
+    app.sam3dBodyReferences,
+  );
+  const singleCandidate =
+    app.sam3dBodyReferences.length === 1
+      ? sam3dBodyReferenceCandidate(app.sam3dBodyReferences[0])
+      : null;
+  const soloLegacy =
+    singleCandidate &&
+    singleCandidate.support.multiReference !== true;
+  elements.sam3dMorphReferenceNote.classList.toggle(
+    "is-error",
+    missingCount > 0 ||
+      Boolean(combinationIssue) ||
+      !app.sam3dBodyReferences.length,
+  );
+  elements.sam3dMorphReferenceNote.classList.toggle(
+    "is-warning",
+    Boolean(soloLegacy) && !missingCount && !combinationIssue,
+  );
+  elements.sam3dMorphReferenceNote.textContent = missingCount
+    ? `${missingCount} saved reference${
+        missingCount === 1 ? " is" : "s are"
+      } unavailable. Remove or replace ${
+        missingCount === 1 ? "it" : "them"
+      } before analyzing.`
+    : combinationIssue
+      ? combinationIssue
+      : soloLegacy
+        ? `${SAM3D_BODY_LEGACY_SOLO_MESSAGE} It remains usable alone.`
+        : app.sam3dBodyReferences.length
+          ? "These bodies drive only Morph analysis. Pose + camera stays bound to the separately selected current job."
+          : "Select at least one completed body for Morph analysis.";
 }
 
 function normalizeSam3dBodyProfile(raw) {
@@ -9449,9 +9892,11 @@ function normalizeSam3dBodyProfile(raw) {
     0,
     Math.min(100, Math.round(Number(raw.strength) || 0)),
   );
-  const referenceJobId = String(
-    raw.reference_job_id || raw.referenceJobId || "",
-  ).trim().toLowerCase();
+  const referenceJobs = normalizeSam3dBodyReferences(
+    raw.reference_jobs || raw.referenceJobs,
+    raw.reference_job_id || raw.referenceJobId,
+    raw.reference_person_index ?? raw.referencePersonIndex ?? 0,
+  );
   return {
     id,
     name,
@@ -9459,19 +9904,22 @@ function normalizeSam3dBodyProfile(raw) {
       ? regions
       : [...SAM3D_BODY_PROPORTION_REGIONS],
     strength,
-    referenceJobId: SAM3D_JOB_ID_PATTERN.test(referenceJobId)
-      ? referenceJobId
-      : "",
+    referenceJobs,
     updatedAt: Math.max(0, Number(raw.updated_at || raw.updatedAt) || 0),
   };
 }
 
 function loadSam3dBodyProfiles() {
   let parsed = [];
+  let importedLegacyProfiles = false;
   try {
-    const stored = window.localStorage.getItem(
-      SAM3D_BODY_PROFILE_STORAGE_KEY,
-    );
+    let stored = window.localStorage.getItem(SAM3D_BODY_PROFILE_STORAGE_KEY);
+    if (!stored) {
+      stored = window.localStorage.getItem(
+        SAM3D_BODY_PROFILE_LEGACY_STORAGE_KEY,
+      );
+      importedLegacyProfiles = Boolean(stored);
+    }
     if (stored) {
       const document = JSON.parse(stored);
       parsed = Array.isArray(document)
@@ -9491,6 +9939,9 @@ function loadSam3dBodyProfiles() {
     })
     .sort((left, right) => right.updatedAt - left.updatedAt)
     .slice(0, SAM3D_BODY_PROFILE_MAX_COUNT);
+  if (importedLegacyProfiles && app.sam3dBodyProfiles.length) {
+    persistSam3dBodyProfiles();
+  }
 }
 
 function persistSam3dBodyProfiles() {
@@ -9503,7 +9954,10 @@ function persistSam3dBodyProfiles() {
       name: profile.name,
       regions: profile.regions,
       strength: profile.strength,
-      reference_job_id: profile.referenceJobId,
+      reference_jobs: profile.referenceJobs.map((reference) => ({
+        job_id: reference.jobId,
+        person_index: reference.personIndex,
+      })),
       updated_at: profile.updatedAt,
     }));
   app.sam3dBodyProfiles = profiles
@@ -9512,7 +9966,7 @@ function persistSam3dBodyProfiles() {
   try {
     window.localStorage.setItem(
       SAM3D_BODY_PROFILE_STORAGE_KEY,
-      JSON.stringify({ schema: 1, profiles }),
+      JSON.stringify({ schema: 2, profiles }),
     );
     return true;
   } catch (error) {
@@ -9535,42 +9989,32 @@ function selectedSam3dBodyProfile() {
 
 function currentSam3dBodyProfilePreferences() {
   const settings = sam3dBodyProportionSettings();
-  const referenceJobId = String(
-    elements.sam3dProfileReferenceJob.value ||
-      app.sam3dBodyProfileDraftReferenceJobId ||
-      app.sam3dSelectedJobId ||
-      "",
-  ).trim().toLowerCase();
   return {
     regions: settings.regions,
     strength: settings.strength,
-    referenceJobId: SAM3D_JOB_ID_PATTERN.test(referenceJobId)
-      ? referenceJobId
-      : "",
+    referenceJobs: normalizeSam3dBodyReferences(settings.references),
   };
-}
-
-function sam3dBodyProfileJobLabel(job) {
-  const source = String(job?.sourceName || "SAM 3D job").trim();
-  return `${source} · ${sam3dModelDisplayName(job)}`;
 }
 
 function renderSam3dBodyProfileActionState() {
   const profile = selectedSam3dBodyProfile();
-  const referenceJobId = elements.sam3dProfileReferenceJob.value;
-  const referenceAvailable = app.sam3dJobs.some(
-    (job) => job.id === referenceJobId && sam3dJobSucceeded(job),
-  );
-  elements.sam3dProfileSave.disabled = !profile;
-  elements.sam3dProfileDelete.disabled = !profile;
-  elements.sam3dProfileUseReference.disabled =
-    !referenceAvailable || referenceJobId === app.sam3dSelectedJobId;
+  const locked =
+    app.sam3dBodyProportionsInFlight ||
+    Boolean(app.sam3dBodyProportionsPendingAction) ||
+    Boolean(app.sam3dBodyProportions?.applied);
+  elements.sam3dProfileSelect.disabled = locked;
+  elements.sam3dProfileNew.disabled = locked;
+  elements.sam3dProfileSave.disabled = locked || !profile;
+  elements.sam3dProfileDelete.disabled = locked || !profile;
+  const referenceCount = app.sam3dBodyReferences.length;
   if (profile) {
     elements.sam3dProfileNote.textContent =
-      `“${profile.name}” is local to this browser. Save updates only regions, fit strength, and its reference job—never morph values or revisions.`;
+      `“${profile.name}” is local to this browser. Save updates regions, fit strength, and ${referenceCount} Morph reference${
+        referenceCount === 1 ? "" : "s"
+      }—never morph values or revisions.`;
   } else {
     elements.sam3dProfileNote.textContent =
-      "Profiles stay in this browser and store regions, fit strength, and a reference job—never live morph values or revisions.";
+      "Profiles stay in this browser and store regions, fit strength, and up to eight Morph references—never live morph values or revisions.";
   }
 }
 
@@ -9583,43 +10027,7 @@ function renderSam3dBodyProfiles() {
     ),
   );
   elements.sam3dProfileSelect.value = selectedId;
-
-  const profile = selectedSam3dBodyProfile();
-  let referenceJobId =
-    app.sam3dBodyProfileDraftReferenceJobId ||
-    profile?.referenceJobId ||
-    app.sam3dSelectedJobId;
-  elements.sam3dProfileReferenceJob.replaceChildren();
-  for (const job of app.sam3dJobs.filter(sam3dJobSucceeded)) {
-    elements.sam3dProfileReferenceJob.append(
-      new Option(sam3dBodyProfileJobLabel(job), job.id),
-    );
-  }
-  if (
-    SAM3D_JOB_ID_PATTERN.test(referenceJobId) &&
-    !app.sam3dJobs.some((job) => job.id === referenceJobId)
-  ) {
-    const missing = new Option(
-      `Saved job ${referenceJobId.slice(0, 8)}… · not in recent history`,
-      referenceJobId,
-    );
-    missing.disabled = true;
-    elements.sam3dProfileReferenceJob.append(missing);
-  }
-  if (!elements.sam3dProfileReferenceJob.options.length) {
-    elements.sam3dProfileReferenceJob.append(
-      new Option("No completed reconstruction jobs", ""),
-    );
-    referenceJobId = "";
-  }
-  const referenceExists = Array.from(
-    elements.sam3dProfileReferenceJob.options,
-  ).some((option) => option.value === referenceJobId);
-  elements.sam3dProfileReferenceJob.value = referenceExists
-    ? referenceJobId
-    : app.sam3dSelectedJobId;
-  app.sam3dBodyProfileDraftReferenceJobId =
-    elements.sam3dProfileReferenceJob.value;
+  renderSam3dBodyReferenceGallery();
   renderSam3dBodyProfileActionState();
 }
 
@@ -9630,8 +10038,6 @@ function selectSam3dBodyProfile() {
     null;
   app.sam3dSelectedBodyProfileId = profile?.id || "";
   if (!profile) {
-    app.sam3dBodyProfileDraftReferenceJobId =
-      app.sam3dSelectedJobId || "";
     renderSam3dBodyProfiles();
     return;
   }
@@ -9641,8 +10047,7 @@ function selectSam3dBodyProfile() {
   }
   elements.sam3dFitStrength.value = String(profile.strength);
   elements.sam3dFitStrengthValue.value = `${profile.strength}%`;
-  app.sam3dBodyProfileDraftReferenceJobId =
-    profile.referenceJobId || app.sam3dSelectedJobId;
+  setSam3dBodyReferences(profile.referenceJobs);
   markSam3dBodyProportionsDirty();
   renderSam3dBodyProfiles();
 }
@@ -9685,7 +10090,6 @@ async function createSam3dBodyProfile() {
   if (!profile) return;
   app.sam3dBodyProfiles.unshift(profile);
   app.sam3dSelectedBodyProfileId = profile.id;
-  app.sam3dBodyProfileDraftReferenceJobId = profile.referenceJobId;
   if (persistSam3dBodyProfiles()) {
     toast("Person profile created", `${profile.name} was saved locally.`);
   }
@@ -9728,28 +10132,23 @@ async function deleteSam3dBodyProfile() {
     (candidate) => candidate.id !== profile.id,
   );
   app.sam3dSelectedBodyProfileId = "";
-  app.sam3dBodyProfileDraftReferenceJobId =
-    app.sam3dSelectedJobId || "";
   persistSam3dBodyProfiles();
   renderSam3dBodyProfiles();
   toast("Person profile deleted", `${profile.name} was removed locally.`);
 }
 
-function openSam3dBodyProfileReference() {
-  const jobId = String(elements.sam3dProfileReferenceJob.value || "");
+function setSam3dHandoffTab(tab) {
+  if (!["morph", "pose"].includes(tab)) return;
+  if (tab === "morph" && !app.sam3dJobs.some(sam3dJobSucceeded)) return;
   if (
-    jobId === app.sam3dSelectedJobId ||
-    !app.sam3dJobs.some(
-      (job) => job.id === jobId && sam3dJobSucceeded(job),
+    tab === "pose" &&
+    !(
+      app.sam3dSelectedJob &&
+      sam3dJobSucceeded(app.sam3dSelectedJob)
     )
   ) {
     return;
   }
-  selectSam3dJob(jobId);
-}
-
-function setSam3dHandoffTab(tab) {
-  if (!["morph", "pose"].includes(tab)) return;
   app.sam3dHandoffTab = tab;
   renderSam3dHandoff();
   if (tab === "morph") renderSam3dBodyProportions();
@@ -9757,12 +10156,19 @@ function setSam3dHandoffTab(tab) {
 }
 
 function renderSam3dHandoff() {
-  const visible = Boolean(
+  const morphAvailable = app.sam3dJobs.some(sam3dJobSucceeded);
+  const poseAvailable = Boolean(
     app.sam3dSelectedJob && sam3dJobSucceeded(app.sam3dSelectedJob),
   );
+  const visible = morphAvailable || poseAvailable;
   elements.sam3dHandoff.hidden = !visible;
   if (!visible) return;
+  if (app.sam3dHandoffTab === "pose" && !poseAvailable) {
+    app.sam3dHandoffTab = "morph";
+  }
   const morphActive = app.sam3dHandoffTab === "morph";
+  elements.sam3dHandoffMorphTab.disabled = !morphAvailable;
+  elements.sam3dHandoffPoseTab.disabled = !poseAvailable;
   elements.sam3dHandoffMorphTab.classList.toggle("active", morphActive);
   elements.sam3dHandoffMorphTab.setAttribute(
     "aria-selected",
@@ -9799,6 +10205,7 @@ function resetSam3dBodyProportions(jobId = "") {
 }
 
 function sam3dBodyProportionSettings() {
+  initializeSam3dBodyReferences();
   const regions = SAM3D_BODY_PROPORTION_REGIONS.filter(
     (region) => sam3dBodyProportionRegionControl(region)?.checked,
   );
@@ -9806,12 +10213,42 @@ function sam3dBodyProportionSettings() {
     0,
     Math.min(100, Math.round(Number(elements.sam3dFitStrength.value) || 0)),
   );
+  const references = normalizeSam3dBodyReferences(
+    app.sam3dBodyReferences,
+  );
+  const primaryReference = references[0] || null;
   return {
     targetUid: String(elements.sam3dPersonTarget.value || "").trim(),
-    personIndex: app.sam3dSelectedBodyIndex,
+    personIndex: primaryReference?.personIndex || 0,
+    referenceJobId: primaryReference?.jobId || "",
+    references,
     regions,
     strength,
   };
+}
+
+function sam3dBodyProportionJob(settings = sam3dBodyProportionSettings()) {
+  const job = app.sam3dJobs.find(
+    (candidate) =>
+      candidate.id === settings.referenceJobId &&
+      sam3dJobSucceeded(candidate),
+  );
+  if (job) return job;
+  if (
+    app.sam3dSelectedJob?.id === settings.referenceJobId &&
+    sam3dJobSucceeded(app.sam3dSelectedJob)
+  ) {
+    return app.sam3dSelectedJob;
+  }
+  return null;
+}
+
+function sam3dBodyReferencesReady(references) {
+  const normalized = normalizeSam3dBodyReferences(references);
+  return (
+    normalized.length > 0 &&
+    normalized.every(sam3dBodyReferenceAvailable)
+  );
 }
 
 function sam3dBodyProportionRequest(
@@ -9825,6 +10262,7 @@ function sam3dBodyProportionRequest(
     expected_job_revision: job.revision,
     target_uid: settings.targetUid,
     person_index: settings.personIndex,
+    references: serializeSam3dBodyReferences(settings.references),
     regions: settings.regions,
     fit_strength: settings.strength / 100,
   };
@@ -9938,7 +10376,9 @@ function normalizeSam3dBodyMeasurement(raw, fallbackId = "") {
       raw.confidence ?? raw.score,
     ),
     disagreement: sam3dBodyProportionConfidence(
-      raw.model_disagreement ??
+      raw.reference_disagreement ??
+        raw.referenceDisagreement ??
+        raw.model_disagreement ??
         raw.model_disagreement_percent ??
         raw.disagreement,
     ),
@@ -10053,6 +10493,13 @@ function normalizeSam3dBodyProportions(payload) {
   const state = String(
     document.state || document.status || "",
   ).trim().toLowerCase();
+  const references = normalizeSam3dBodyReferences(
+    document.reference_jobs ||
+      document.referenceJobs ||
+      document.references,
+    document.reference_job_id || document.referenceJobId,
+    document.person_index ?? document.personIndex ?? 0,
+  );
   const unavailable =
     document.available === false ||
     ["unavailable", "unsupported", "disabled"].includes(state);
@@ -10082,6 +10529,7 @@ function normalizeSam3dBodyProportions(payload) {
     targetUid: String(
       document.target_uid || document.targetUid || "",
     ).trim(),
+    references,
     personIndex: Math.max(
       0,
       integerValue(document.person_index ?? document.personIndex) || 0,
@@ -10095,10 +10543,18 @@ function normalizeSam3dBodyProportions(payload) {
         document.target?.overallConfidence,
     ),
     disagreement: sam3dBodyProportionConfidence(
-      document.model_disagreement ??
+      document.reference_disagreement ??
+        document.referenceDisagreement ??
+        document.model_disagreement ??
         document.model_disagreement_percent ??
         document.disagreement,
     ),
+    referenceConsensus:
+      document.reference_consensus &&
+      typeof document.reference_consensus === "object" &&
+      !Array.isArray(document.reference_consensus)
+        ? document.reference_consensus
+        : null,
     measurements,
     morphs,
     unavailable: unavailableRegions,
@@ -10135,7 +10591,26 @@ async function loadSam3dBodyProportions(
     return null;
   }
   if (app.sam3dBodyProportionsInFlight) return null;
-  const targetUid = String(elements.sam3dPersonTarget.value || "").trim();
+  const settings = sam3dBodyProportionSettings();
+  const referenceSignature = serializeSam3dBodyReferences(
+    settings.references,
+  );
+  const requestStillCurrent = () => {
+    const current = sam3dBodyProportionSettings();
+    return (
+      current.referenceJobId === normalizedId &&
+      serializeSam3dBodyReferences(current.references) ===
+        referenceSignature
+    );
+  };
+  if (
+    settings.referenceJobId !== normalizedId ||
+    !sam3dBodyReferencesReady(settings.references) ||
+    sam3dBodyReferenceSetIssue(settings.references)
+  ) {
+    return null;
+  }
+  const targetUid = settings.targetUid;
   if (!targetUid) {
     app.sam3dBodyProportions = null;
     app.sam3dBodyProportionsError = null;
@@ -10143,7 +10618,6 @@ async function loadSam3dBodyProportions(
     renderSam3dBodyProportions();
     return null;
   }
-  const settings = sam3dBodyProportionSettings();
   app.sam3dBodyProportionsInFlight = true;
   app.sam3dBodyProportionsError = null;
   app.sam3dBodyProportionsJobId = normalizedId;
@@ -10153,17 +10627,20 @@ async function loadSam3dBodyProportions(
       normalizedId,
       {
         targetUid,
-        personIndex: app.sam3dSelectedBodyIndex,
+        personIndex: settings.personIndex,
         strength: settings.strength,
         regions: settings.regions,
+        references: settings.references,
       },
     );
-    if (app.sam3dSelectedJobId !== normalizedId) return null;
+    if (!requestStillCurrent()) return null;
     app.sam3dBodyProportions = normalizeSam3dBodyProportions(payload);
+    app.sam3dBodyProportions.references = settings.references;
+    app.sam3dBodyProportions.personIndex = settings.personIndex;
     app.sam3dBodyProportionsDirty = false;
     return app.sam3dBodyProportions;
   } catch (error) {
-    if (app.sam3dSelectedJobId !== normalizedId) return null;
+    if (!requestStillCurrent()) return null;
     if (error.status === 404 || error.status === 501) {
       app.sam3dBodyProportions = {
         available: false,
@@ -10183,10 +10660,8 @@ async function loadSam3dBodyProportions(
     }
     return null;
   } finally {
-    if (app.sam3dSelectedJobId === normalizedId) {
-      app.sam3dBodyProportionsInFlight = false;
-      renderSam3dBodyProportions();
-    }
+    app.sam3dBodyProportionsInFlight = false;
+    renderSam3dBodyProportions();
   }
 }
 
@@ -10214,13 +10689,13 @@ function stopSam3dBodyProportionPolling() {
 async function pollSam3dBodyProportions() {
   app.sam3dBodyProportionPollTimer = null;
   const action = app.sam3dBodyProportionsPendingAction;
-  const jobId = app.sam3dSelectedJobId;
+  const jobId = sam3dBodyProportionJob()?.id || "";
   if (!action || !jobId || app.view !== "sam3d") return;
   app.sam3dBodyProportionPollAttempts += 1;
   const analysis = await loadSam3dBodyProportions(jobId, { quiet: true });
   if (
     action !== app.sam3dBodyProportionsPendingAction ||
-    jobId !== app.sam3dSelectedJobId
+    jobId !== sam3dBodyProportionJob()?.id
   ) {
     return;
   }
@@ -10342,7 +10817,7 @@ function renderSam3dBodyMeasurements(analysis) {
       ? `Confidence ${Math.round(measurement.confidence)}%`
       : "Confidence not reported";
     const disagreement = Number.isFinite(measurement.disagreement)
-      ? ` · models differ ${Math.round(measurement.disagreement)}%`
+      ? ` · references differ ${Math.round(measurement.disagreement)}%`
       : "";
     meta.textContent = `${confidence}${disagreement}`;
     item.append(heading, values, meta);
@@ -10416,40 +10891,59 @@ function renderSam3dMorphChanges(analysis) {
 }
 
 function renderSam3dBodyProportions() {
-  const job = app.sam3dSelectedJob;
-  const visible = Boolean(job && sam3dJobSucceeded(job));
+  const settings = sam3dBodyProportionSettings();
+  const job = sam3dBodyProportionJob(settings);
+  const visible = Boolean(
+    job || app.sam3dJobs.some(sam3dJobSucceeded),
+  );
   elements.sam3dProportionsPanel.hidden =
     !visible || app.sam3dHandoffTab !== "morph";
   if (!visible) return;
-  if (app.sam3dBodyProportionsJobId !== job.id) {
+  if (job && app.sam3dBodyProportionsJobId !== job.id) {
     resetSam3dBodyProportions(job.id);
   }
 
   const analysis = app.sam3dBodyProportions;
   const error = app.sam3dBodyProportionsError;
-  const settings = sam3dBodyProportionSettings();
   const busy =
     app.sam3dBodyProportionsInFlight ||
     Boolean(app.sam3dBodyProportionsPendingAction) ||
     app.sam3dMutationInFlight ||
     snapshotBridgeBusy();
-  const revisionReady = SAM3D_JOB_ID_PATTERN.test(job.revision);
+  renderSam3dBodyProfileActionState();
+  const referencesReady = sam3dBodyReferencesReady(settings.references);
+  const referenceCombinationIssue = sam3dBodyReferenceSetIssue(
+    settings.references,
+  );
+  const revisionReady = Boolean(
+    job && SAM3D_JOB_ID_PATTERN.test(job.revision),
+  );
   const targetReady = Boolean(settings.targetUid);
   const regionsReady = settings.regions.length > 0;
   const unavailable = analysis?.available === false;
   const analyzed = Boolean(analysis?.ready);
-  const poseApplied = sam3dJobIsApplied(job) || Boolean(analysis?.poseApplied);
+  const poseApplied =
+    sam3dJobIsApplied(app.sam3dSelectedJob) ||
+    Boolean(analysis?.poseApplied);
   const targetChanged =
     analyzed &&
     Boolean(analysis.targetUid) &&
     analysis.targetUid !== settings.targetUid;
-  const bodyChanged =
+  const analyzedReferenceSignature = serializeSam3dBodyReferences(
+    analysis?.references,
+  );
+  const referenceChanged =
     analyzed &&
-    Number.isFinite(analysis.personIndex) &&
-    analysis.personIndex !== settings.personIndex;
+    (analyzedReferenceSignature
+      ? analyzedReferenceSignature !==
+        serializeSam3dBodyReferences(settings.references)
+      : Number.isFinite(analysis.personIndex) &&
+        analysis.personIndex !== settings.personIndex);
   const dirty =
     analyzed &&
-    (app.sam3dBodyProportionsDirty || targetChanged || bodyChanged);
+    (app.sam3dBodyProportionsDirty ||
+      targetChanged ||
+      referenceChanged);
 
   elements.sam3dFitStrengthValue.value = `${settings.strength}%`;
   elements.sam3dProportionsState.className =
@@ -10469,6 +10963,8 @@ function renderSam3dBodyProportions() {
   elements.sam3dProportionsAnalyze.disabled =
     busy ||
     unavailable ||
+    !referencesReady ||
+    Boolean(referenceCombinationIssue) ||
     !revisionReady ||
     !targetReady ||
     !regionsReady;
@@ -10477,6 +10973,26 @@ function renderSam3dBodyProportions() {
     sam3dBodyProportionRegionControl(region).disabled = busy;
   }
   elements.sam3dFitStrength.disabled = busy;
+  for (const card of Array.from(
+    elements.sam3dMorphReferenceGallery.querySelectorAll?.(
+      "[data-sam3d-body-reference]",
+    ) || [],
+  )) {
+    const selected = card.getAttribute("aria-selected") === "true";
+    const reference = normalizeSam3dBodyReference(
+      card.dataset.sam3dBodyReference,
+    );
+    const replacesSelectedJob = settings.references.some(
+      (candidate) => candidate.jobId === reference?.jobId,
+    );
+    card.disabled =
+      busy ||
+      Boolean(analysis?.applied) ||
+      (!selected &&
+        settings.references.length >=
+          SAM3D_BODY_REFERENCE_MAX_COUNT &&
+        !replacesSelectedJob);
+  }
 
   if (app.sam3dBodyProportionsPendingAction) {
     const undoing =
@@ -10502,6 +11018,21 @@ function renderSam3dBodyProportions() {
     elements.sam3dProportionsStateMessage.textContent =
       analysis.message ||
       "Install the manager and bridge version that supports bounded body morph fitting.";
+  } else if (!settings.references.length) {
+    elements.sam3dProportionsStateTitle.textContent =
+      "Choose Morph references";
+    elements.sam3dProportionsStateMessage.textContent =
+      "Select at least one completed body in the reference gallery.";
+  } else if (!referencesReady) {
+    elements.sam3dProportionsStateTitle.textContent =
+      "A Morph reference is unavailable";
+    elements.sam3dProportionsStateMessage.textContent =
+      "Remove or replace references that are no longer in completed job history.";
+  } else if (referenceCombinationIssue) {
+    elements.sam3dProportionsStateTitle.textContent =
+      "Legacy reference cannot be combined";
+    elements.sam3dProportionsStateMessage.textContent =
+      referenceCombinationIssue;
   } else if (!targetReady) {
     elements.sam3dProportionsStateTitle.textContent =
       "Choose a target Person";
@@ -10553,6 +11084,8 @@ function renderSam3dBodyProportions() {
     analysis.applied ||
     !analysis.canApply ||
     !analysis.analysisRevision ||
+    !referencesReady ||
+    Boolean(referenceCombinationIssue) ||
     !targetReady ||
     !regionsReady;
   const undoReady =
@@ -10573,8 +11106,20 @@ function renderSam3dBodyProportions() {
 
   elements.sam3dProportionsNote.classList.remove("is-error");
   let note =
-    "Arms, legs, torso, and widths are geometric fits. Soft-body physics is not inferred.";
-  if (!revisionReady) {
+    `${settings.references.length} Morph reference${
+      settings.references.length === 1 ? "" : "s"
+    } selected. Arms, legs, torso, and widths are geometric fits; soft-body physics is not inferred.`;
+  if (!settings.references.length) {
+    note = "Select one to eight completed bodies before analyzing.";
+    elements.sam3dProportionsNote.classList.add("is-error");
+  } else if (!referencesReady) {
+    note =
+      "Every Morph reference must still be available in completed job history.";
+    elements.sam3dProportionsNote.classList.add("is-error");
+  } else if (referenceCombinationIssue) {
+    note = referenceCombinationIssue;
+    elements.sam3dProportionsNote.classList.add("is-error");
+  } else if (!revisionReady) {
     note = "The reconstruction revision is invalid. Refresh this job before analysis.";
     elements.sam3dProportionsNote.classList.add("is-error");
   } else if (error) {
@@ -10599,15 +11144,18 @@ function renderSam3dBodyProportions() {
     analysis.disagreement >= 15
   ) {
     note =
-      "The two models disagree substantially. Consider a lower fit strength or exclude the uncertain region.";
+      "The selected references or views disagree substantially. Consider a lower fit strength or exclude the uncertain region.";
   }
   elements.sam3dProportionsNote.textContent = note;
 }
 
 async function analyzeSam3dBodyProportions() {
-  const job = app.sam3dSelectedJob;
-  if (!job || elements.sam3dProportionsAnalyze.disabled) return;
   const settings = sam3dBodyProportionSettings();
+  const job = sam3dBodyProportionJob(settings);
+  if (!job || elements.sam3dProportionsAnalyze.disabled) return;
+  const referenceSignature = serializeSam3dBodyReferences(
+    settings.references,
+  );
   app.sam3dBodyProportionsInFlight = true;
   app.sam3dBodyProportionsError = null;
   setButtonBusy(
@@ -10622,7 +11170,14 @@ async function analyzeSam3dBodyProportions() {
       SAM3D_BODY_PROPORTION_ACTIONS.analyze,
       sam3dBodyProportionRequest(job),
     );
-    if (app.sam3dSelectedJobId !== job.id) return;
+    const currentSettings = sam3dBodyProportionSettings();
+    if (
+      currentSettings.referenceJobId !== job.id ||
+      serializeSam3dBodyReferences(currentSettings.references) !==
+        referenceSignature
+    ) {
+      return;
+    }
     const analysis = normalizeSam3dBodyProportions(payload);
     if (!analysis.ready) {
       throw new Error(
@@ -10632,6 +11187,7 @@ async function analyzeSam3dBodyProportions() {
     app.sam3dBodyProportions = analysis;
     app.sam3dBodyProportions.targetUid = settings.targetUid;
     app.sam3dBodyProportions.personIndex = settings.personIndex;
+    app.sam3dBodyProportions.references = settings.references;
     app.sam3dBodyProportionsDirty = false;
     toast(
       "Body analysis ready",
@@ -10641,19 +11197,17 @@ async function analyzeSam3dBodyProportions() {
     app.sam3dBodyProportionsError = error;
     toast("Could not analyze body proportions", errorMessage(error), "error");
   } finally {
-    if (app.sam3dSelectedJobId === job.id) {
-      app.sam3dBodyProportionsInFlight = false;
-      setButtonBusy(elements.sam3dProportionsAnalyze, false);
-      renderSam3dBodyProportions();
-    }
+    app.sam3dBodyProportionsInFlight = false;
+    setButtonBusy(elements.sam3dProportionsAnalyze, false);
+    renderSam3dBodyProportions();
   }
 }
 
 async function applySam3dBodyProportions() {
-  const job = app.sam3dSelectedJob;
+  const settings = sam3dBodyProportionSettings();
+  const job = sam3dBodyProportionJob(settings);
   const analysis = app.sam3dBodyProportions;
   if (!job || !analysis || elements.sam3dProportionsApply.disabled) return;
-  const settings = sam3dBodyProportionSettings();
   const confirmed = await showDialog({
     eyebrow: "Apply body-proportion fit",
     title: "Change this Person’s body proportions?",
@@ -10663,6 +11217,7 @@ async function applySam3dBodyProportions() {
     icon: "warning",
     plan: [
       ["Person", settings.targetUid],
+      ["Morph references", String(settings.references.length)],
       ["Regions", settings.regions.join(", ")],
       ["Fit strength", `${settings.strength}%`],
       ["Scale", "Body Scale unchanged; final height may change"],
@@ -10690,6 +11245,7 @@ async function applySam3dBodyProportions() {
       ),
       targetUid: settings.targetUid,
       personIndex: settings.personIndex,
+      references: settings.references,
       applyRevision: "",
       canUndo: false,
       applied: false,
@@ -10704,30 +11260,27 @@ async function applySam3dBodyProportions() {
         "The bridge is applying the bounded morph changes.",
     );
     await loadPersons({ quiet: true });
-    await loadSam3dJob(job.id, { quiet: true });
     app.sam3dBodyProportionsInFlight = false;
     startSam3dBodyProportionPolling();
   } catch (error) {
     app.sam3dBodyProportionsError = error;
     toast("Could not apply body proportions", errorMessage(error), "error");
   } finally {
-    if (app.sam3dSelectedJobId === job.id) {
-      app.sam3dBodyProportionsInFlight = false;
-      setButtonBusy(elements.sam3dProportionsApply, false);
-      renderSam3dWorkspace();
-    }
+    app.sam3dBodyProportionsInFlight = false;
+    setButtonBusy(elements.sam3dProportionsApply, false);
+    renderSam3dWorkspace();
   }
 }
 
 async function undoSam3dBodyProportions() {
-  const job = app.sam3dSelectedJob;
+  const settings = sam3dBodyProportionSettings();
+  const job = sam3dBodyProportionJob(settings);
   const analysis = app.sam3dBodyProportions;
   if (!job || !analysis || elements.sam3dProportionsUndo.disabled) return;
   app.sam3dBodyProportionsInFlight = true;
   setButtonBusy(elements.sam3dProportionsUndo, true, "Restoring…");
   renderSam3dBodyProportions();
   try {
-    const settings = sam3dBodyProportionSettings();
     const payload = await Sam3dClient.bodyProportionsAction(
       job.id,
       SAM3D_BODY_PROPORTION_ACTIONS.undo,
@@ -10753,18 +11306,15 @@ async function undoSam3dBodyProportions() {
         "The bridge is restoring the previous body-proportion morph values.",
     );
     await loadPersons({ quiet: true });
-    await loadSam3dJob(job.id, { quiet: true });
     app.sam3dBodyProportionsInFlight = false;
     startSam3dBodyProportionPolling();
   } catch (error) {
     app.sam3dBodyProportionsError = error;
     toast("Could not undo body fit", errorMessage(error), "error");
   } finally {
-    if (app.sam3dSelectedJobId === job.id) {
-      app.sam3dBodyProportionsInFlight = false;
-      setButtonBusy(elements.sam3dProportionsUndo, false);
-      renderSam3dWorkspace();
-    }
+    app.sam3dBodyProportionsInFlight = false;
+    setButtonBusy(elements.sam3dProportionsUndo, false);
+    renderSam3dWorkspace();
   }
 }
 

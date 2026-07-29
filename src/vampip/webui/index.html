@@ -6,8 +6,8 @@
     <meta name="color-scheme" content="dark">
     <meta name="theme-color" content="#111316">
     <title>VAM-PIP Manager</title>
-    <link rel="stylesheet" href="/styles.css?v=0.16.3">
-    <script src="/app.js?v=0.16.3" defer></script>
+    <link rel="stylesheet" href="/styles.css?v=0.17.0">
+    <script src="/app.js?v=0.17.0" defer></script>
   </head>
   <body>
     <a class="skip-link" href="#main-content">Skip to library</a>
@@ -978,12 +978,6 @@
                           <option value="">No profile · current controls</option>
                         </select>
                       </label>
-                      <label for="sam3d-profile-reference-job">
-                        <span>Reference reconstruction</span>
-                        <select id="sam3d-profile-reference-job">
-                          <option value="">Current job</option>
-                        </select>
-                      </label>
                       <div class="sam3d-profile-actions">
                         <button
                           class="secondary-button small"
@@ -991,12 +985,6 @@
                           type="button"
                           disabled
                         >Save preferences</button>
-                        <button
-                          class="secondary-button small"
-                          id="sam3d-profile-use-reference"
-                          type="button"
-                          disabled
-                        >Open reference</button>
                         <button
                           class="quiet-button"
                           id="sam3d-profile-delete"
@@ -1006,7 +994,32 @@
                       </div>
                       <p id="sam3d-profile-note">
                         Profiles stay in this browser and store regions, fit strength,
-                        and a reference job—never live morph values or revisions.
+                        and Morph references—never live morph values or revisions.
+                      </p>
+                    </section>
+
+                    <section
+                      class="sam3d-morph-reference-picker"
+                      aria-labelledby="sam3d-morph-reference-title"
+                    >
+                      <header>
+                        <div>
+                          <span>Morph input set</span>
+                          <strong id="sam3d-morph-reference-title">Reference gallery</strong>
+                        </div>
+                        <output id="sam3d-morph-reference-count">0 / 8</output>
+                      </header>
+                      <div
+                        class="sam3d-morph-reference-gallery"
+                        id="sam3d-morph-reference-gallery"
+                        role="listbox"
+                        aria-multiselectable="true"
+                        aria-label="Completed SAM 3D bodies available as Morph references"
+                      ></div>
+                      <p id="sam3d-morph-reference-note">
+                        Choose up to eight completed bodies. These references drive only
+                        Morph analysis; legacy solo-only results stay usable alone.
+                        Pose + camera continues to use the current job.
                       </p>
                     </section>
 
@@ -1091,7 +1104,7 @@
                           <strong id="sam3d-proportions-confidence">—</strong>
                         </div>
                         <div>
-                          <span>Model disagreement</span>
+                          <span>Reference disagreement</span>
                           <strong id="sam3d-proportions-disagreement">—</strong>
                         </div>
                       </div>

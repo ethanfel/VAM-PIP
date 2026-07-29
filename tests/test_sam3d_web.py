@@ -303,12 +303,50 @@ class Sam3dWebTests(unittest.TestCase):
             job_id,
             target_uid="Person",
             person_index=1,
+            references=None,
             strength=0.6,
             regions=["arms", "legs"],
         )
 
+    def test_body_proportion_get_propagates_ordered_references(self) -> None:
+        job_id = "a" * 32
+        secondary_job_id = "b" * 32
+        references = f"{job_id}:0,{secondary_job_id}:1"
+        returned = {
+            "job_id": job_id,
+            "reference_count": 2,
+            "analysis_revision": "c" * 32,
+        }
+        with mock.patch.object(
+            self.service,
+            "sam3d_body_proportions",
+            return_value=returned,
+        ) as analyze:
+            self.connection.request(
+                "GET",
+                (
+                    f"/api/sam3d/jobs/{job_id}/body-proportions"
+                    "?target_uid=Person"
+                    f"&references={references}"
+                ),
+                headers={"X-VAMPIP-Token": self.token},
+            )
+            response = self.connection.getresponse()
+            self.assertEqual(response.status, 200)
+            self.assertEqual(self.json(response), returned)
+        analyze.assert_called_once_with(
+            job_id,
+            target_uid="Person",
+            person_index=0,
+            references=references,
+            strength=0.5,
+            regions=None,
+        )
+
     def test_body_proportion_apply_route_keeps_pose_as_a_second_step(self) -> None:
         job_id = "c" * 32
+        secondary_job_id = "a" * 32
+        references = f"{job_id}:0,{secondary_job_id}:1"
         analysis_revision = "d" * 32
         job_revision = "e" * 32
         analysis = {
@@ -330,6 +368,7 @@ class Sam3dWebTests(unittest.TestCase):
                 "person_index": 0,
                 "regions": ["legs", "torso"],
                 "fit_strength": 0.5,
+                "references": references,
             }
         ).encode("utf-8")
         with (
@@ -337,7 +376,7 @@ class Sam3dWebTests(unittest.TestCase):
                 self.service,
                 "sam3d_body_proportions",
                 return_value=analysis,
-            ),
+            ) as analyze,
             mock.patch.object(
                 self.service,
                 "apply_sam3d_body_proportions",
@@ -357,12 +396,21 @@ class Sam3dWebTests(unittest.TestCase):
             response = self.connection.getresponse()
             self.assertEqual(response.status, 202)
             self.assertEqual(self.json(response), applied)
+        analyze.assert_called_once_with(
+            job_id,
+            target_uid="Person",
+            person_index=0,
+            references=references,
+            strength=0.5,
+            regions=["legs", "torso"],
+        )
         apply.assert_called_once_with(
             job_id,
             expected_job_revision=job_revision,
             expected_analysis_revision=analysis_revision,
             target_uid="Person",
             person_index=0,
+            references=references,
             strength=0.5,
             regions=["legs", "torso"],
         )

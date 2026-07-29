@@ -23,7 +23,7 @@ leaving managed mode restores that baseline.
 
 ## Current status
 
-Version 0.16.3 is functional but should still be treated as an early release.
+Version 0.17.0 is functional but should still be treated as an early release.
 Package switching is deliberately conservative:
 
 - entering managed mode requires explicit confirmation;
@@ -277,20 +277,27 @@ fixed camera preset and renderer scripts needed by that workflow. See the
 [standalone SAM 3D Body setup](docs/SAM3D_SETUP.md) for environment, model,
 and configuration instructions.
 
-Completed reconstructions now use a two-stage handoff. **Morph** first compares
-the model's neutral skeleton with the currently selected VaM Person, shows
-seven relative measurements, and proposes bounded built-in morph changes.
-Applying those changes creates one exact Person-wide undo snapshot; another
-fit cannot replace that snapshot until it is restored. **Pose + camera** remains
-a separate second action so body-shape review never moves controllers
-implicitly. Body Scale, face morphs, and soft-body physics are not changed.
-Leg and torso length morphs can still alter final height.
+Completed reconstructions now use two independent workspaces. **Morph** owns an
+ordered reference gallery of up to eight completed bodies, combines their
+neutral skeleton measurements with bounded outlier rejection, and proposes
+built-in morph changes for the selected VaM Person. **Pose + camera** keeps its
+own current reconstruction and body selection, so choosing another pose image
+does not replace, reset, or re-analyze the Morph reference set. Applying a body
+fit creates one exact Person-wide undo snapshot; another fit cannot replace
+that snapshot until it is restored. Body Scale, face morphs, and soft-body
+physics are not changed. Leg and torso length morphs can still alter final
+height.
 
 Named Person profiles stay in browser-local storage. They remember selected
-regions, fit strength, and one reconstruction reference, but never store live
-VaM morph identifiers, values, or revision tokens. Reopening a profile
+regions, fit strength, and the independent Morph reference set, but never store
+live VaM morph identifiers, values, or revision tokens. Existing one-reference
+profiles are imported into the new format automatically. Reopening a profile
 therefore always requires a fresh read-only analysis against the current
 Person before **Apply morphs** becomes available.
+
+Jobs created before neutral-body signatures were added remain valid as a
+single Morph reference and are marked **Legacy · solo only**. Rerun an older
+image with the current worker before combining it with other views.
 
 ## External workspace
 
