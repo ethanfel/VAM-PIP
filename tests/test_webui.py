@@ -1406,6 +1406,14 @@ process.stdout.write(JSON.stringify(output));
             "source.dependencies || envelope.dependencies",
             block,
         )
+        self.assertIn(
+            "const report = normalizeDependencyReport(rawReport);",
+            block,
+        )
+        self.assertNotIn(
+            "Array.isArray(rawReport.dependencies)",
+            block,
+        )
         self.assertIn("entry.required_by", block)
         self.assertIn("entry.resolved_id", block)
         self.assertIn("report.truncated", block)
@@ -1523,7 +1531,14 @@ async function api(path) {{
         self.assertIn('"Use this content"', block)
         self.assertIn('"Using this content"', block)
         self.assertIn("!packageCopy.copyId", block)
-        self.assertIn("copy.relative_path || copy.logical_path || copy.path", self.javascript)
+        for path_field in (
+            "copy.relative_path",
+            "copy.logical_path",
+            "copy.path",
+            "copy.relativePath",
+        ):
+            with self.subTest(path_field=path_field):
+                self.assertIn(path_field, self.javascript)
         request = block[
             block.index('api("/api/package-copy-choice"') :
             block.index("});", block.index('api("/api/package-copy-choice"')) + 3
@@ -1602,7 +1617,7 @@ function safePresentationLabel(value, fallback) {{
   return text || fallback;
 }}
 {normalizer}
-const report = normalizeDependencyReport({{
+const apiReport = {{
   revision: "rev-7",
   truncated: true,
   dependencies: [
@@ -1619,12 +1634,15 @@ const report = normalizeDependencyReport({{
       {{ relative_path: "no-safe-id.var" }},
     ],
   }}],
-}});
+}};
+const report = normalizeDependencyReport(apiReport);
+const renormalized = normalizeDependencyReport(report);
 process.stdout.write(JSON.stringify({{
   revision: report.reportRevision,
   truncated: report.truncated,
   dependencies: report.dependencies,
   selected: report.conflicts[0].copies[0].selected,
+  renormalized,
   pager: dependencyPaginationState(17, 99),
 }}));
 """
@@ -1643,6 +1661,25 @@ process.stdout.write(JSON.stringify({{
         self.assertEqual(result["dependencies"][0]["state"], "hidden")
         self.assertEqual(result["dependencies"][0]["requiredBy"], ["Loose scene"])
         self.assertTrue(result["selected"])
+        self.assertEqual(result["renormalized"]["reportRevision"], "rev-7")
+        self.assertEqual(
+            result["renormalized"]["dependencies"],
+            result["dependencies"],
+        )
+        self.assertEqual(
+            result["renormalized"]["conflicts"][0]["packageId"],
+            "Creator.Asset.4",
+        )
+        self.assertEqual(
+            result["renormalized"]["conflicts"][0]["copies"][0]["copyId"],
+            "copy-a",
+        )
+        self.assertEqual(
+            result["renormalized"]["conflicts"][0]["copies"][0][
+                "contentSha256"
+            ],
+            "1:abc",
+        )
         self.assertEqual(
             result["pager"],
             {
@@ -2395,8 +2432,8 @@ process.stdout.write(JSON.stringify({{
         self.assertIn("body.timeline-popout .timeline-transport", self.styles)
 
     def test_static_assets_use_the_current_cache_version(self) -> None:
-        self.assertIn("/styles.css?v=0.12.0", self.html)
-        self.assertIn("/app.js?v=0.12.0", self.html)
+        self.assertIn("/styles.css?v=0.12.1", self.html)
+        self.assertIn("/app.js?v=0.12.1", self.html)
 
 
 if __name__ == "__main__":

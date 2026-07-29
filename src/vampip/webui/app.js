@@ -3555,11 +3555,13 @@ function normalizeDependencyReport(payload) {
     )
     .map((entry) => {
       const packageId = dependencyIdentifier(
-        entry.package_id || entry.id || entry.requested,
+        entry.package_id || entry.packageId || entry.id || entry.requested,
         "Unknown package",
       );
       const selectedContentSha256 = boundedDependencyText(
-        entry.selected_content_sha256 || entry.selected_digest,
+        entry.selected_content_sha256 ||
+          entry.selectedContentSha256 ||
+          entry.selected_digest,
         "",
         160,
       );
@@ -3571,7 +3573,10 @@ function normalizeDependencyReport(payload) {
         )
         .map((copy) => {
           const contentSha256 = boundedDependencyText(
-            copy.content_sha256 || copy.content_digest || copy.sha256,
+            copy.content_sha256 ||
+              copy.contentSha256 ||
+              copy.content_digest ||
+              copy.sha256,
             "",
             160,
           );
@@ -3583,9 +3588,15 @@ function normalizeDependencyReport(payload) {
                 selectedContentSha256 === contentSha256,
             );
           return {
-            copyId: dependencyIdentifier(copy.copy_id || copy.id, ""),
+            copyId: dependencyIdentifier(
+              copy.copy_id || copy.copyId || copy.id,
+              "",
+            ),
             relativePath: boundedDependencyText(
-              copy.relative_path || copy.logical_path || copy.path,
+              copy.relative_path ||
+                copy.logical_path ||
+                copy.path ||
+                copy.relativePath,
               "Package path unavailable",
               360,
             ),
@@ -3614,14 +3625,20 @@ function normalizeDependencyReport(payload) {
       return {
         packageId,
         reportRevision: boundedDependencyText(
-          entry.report_revision,
+          entry.report_revision || entry.reportRevision,
           "",
           160,
         ),
         selectedContentSha256,
-        choiceStale: booleanValue(entry.choice_stale, false),
+        choiceStale: booleanValue(
+          entry.choice_stale,
+          booleanValue(entry.choiceStale, false),
+        ),
         resolved: booleanValue(entry.resolved, Boolean(selectedContentSha256)),
-        requiresVamClose: booleanValue(entry.requires_vam_close, false),
+        requiresVamClose: booleanValue(
+          entry.requires_vam_close,
+          booleanValue(entry.requiresVamClose, false),
+        ),
         copies,
       };
     });
@@ -3641,11 +3658,13 @@ function normalizeDependencyReport(payload) {
         entry.requested ||
           entry.package_ref ||
           entry.reference ||
-          entry.package_id,
+          entry.package_id ||
+          entry.packageId,
         "Unknown package",
       );
       const resolvedId = dependencyIdentifier(
         entry.resolved_id ||
+          entry.resolvedId ||
           entry.resolved ||
           entry.package_id ||
           entry.identity,
@@ -3654,13 +3673,19 @@ function normalizeDependencyReport(payload) {
       const packageId = resolvedId || requested;
       let state = normalizeDependencyState(entry.state || entry.status);
       if (
-        booleanValue(entry.choice_stale, false) ||
+        booleanValue(
+          entry.choice_stale,
+          booleanValue(entry.choiceStale, false),
+        ) ||
         state === "stale"
       ) {
         state = "stale";
       } else if (
         (booleanValue(entry.conflict, false) &&
-          !booleanValue(entry.conflict_resolved, false)) ||
+          !booleanValue(
+            entry.conflict_resolved,
+            booleanValue(entry.conflictResolved, false),
+          )) ||
         unresolvedConflictIds.has(packageId.toLowerCase())
       ) {
         state = "conflict";
@@ -3669,7 +3694,11 @@ function normalizeDependencyReport(payload) {
         ? entry.required_by
         : entry.required_by
           ? [entry.required_by]
-          : [];
+          : Array.isArray(entry.requiredBy)
+            ? entry.requiredBy
+            : entry.requiredBy
+              ? [entry.requiredBy]
+              : [];
       return {
         requested,
         resolvedId,
@@ -3753,8 +3782,10 @@ function normalizeDependencyReport(payload) {
         : {},
     reportRevision: boundedDependencyText(
       source.report_revision ||
+        source.reportRevision ||
         source.revision ||
         envelope.report_revision ||
+        envelope.reportRevision ||
         envelope.revision,
       "",
       160,
@@ -4114,12 +4145,7 @@ function createDependencyRow(entry) {
 }
 
 function renderResourceDependencyReport(section, item, rawReport) {
-  const report =
-    rawReport &&
-    Array.isArray(rawReport.dependencies) &&
-    Array.isArray(rawReport.conflicts)
-      ? rawReport
-      : normalizeDependencyReport(rawReport);
+  const report = normalizeDependencyReport(rawReport);
   app.resourceDependencyReport = report;
   const header = createElement("div", "resource-detail-section-heading");
   const headingCopy = document.createElement("div");
