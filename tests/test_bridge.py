@@ -116,8 +116,8 @@ class BridgeProtocolTests(unittest.TestCase):
                 "Custom/Images/VAMPip/SAM3D/" + ("a" * 32) + ".png"
             ),
             resource_sha256="e" * 64,
-            source_width=1024,
-            source_height=768,
+            source_width=1984,
+            source_height=1320,
             target_uid="Person",
             camera_uid="SAM Camera",
             create_camera=False,
@@ -134,12 +134,32 @@ class BridgeProtocolTests(unittest.TestCase):
             "Custom/Images/VAMPip/SAM3D/" + ("a" * 32) + ".png",
         )
         self.assertEqual(request["referenceSha256"], "e" * 64)
-        self.assertEqual(request["referenceWidth"], 1024)
-        self.assertEqual(request["referenceHeight"], 768)
+        self.assertEqual(request["referenceWidth"], 1984)
+        self.assertEqual(request["referenceHeight"], 1320)
         self.assertEqual(request["targetUid"], "Person")
         self.assertEqual(request["cameraUid"], "SAM Camera")
         self.assertIs(request["createCamera"], False)
         self.assertNotIn("sourcePath", request)
+
+        request_sam3d_reference(
+            self.vam_root,
+            job_id="a" * 32,
+            expected_job_revision="b" * 32,
+            expected_revision="c" * 32,
+            solution_sha256="d" * 64,
+            resource_ref=(
+                "Custom/Images/VAMPip/SAM3D/" + ("a" * 32) + ".png"
+            ),
+            resource_sha256="e" * 64,
+            source_width=1320,
+            source_height=1984,
+            target_uid="Person",
+            camera_uid="SAM Camera",
+            create_camera=False,
+        )
+        portrait_request = self.read_request()
+        self.assertEqual(portrait_request["referenceWidth"], 1320)
+        self.assertEqual(portrait_request["referenceHeight"], 1984)
 
         with self.assertRaisesRegex(ValueError, "exactly match"):
             request_sam3d_reference(

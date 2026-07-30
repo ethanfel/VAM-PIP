@@ -35,6 +35,22 @@ class BridgeReferenceSourceTests(unittest.TestCase):
         self.assertIn("IsOwnedSam3dReferencePath", source)
         self.assertIn("reference.SetOn(true);", source)
         self.assertIn("current.SetOn(snapshot.On);", source)
+        configure_start = source.index(
+            "private static void ConfigureSam3dReference("
+        )
+        configure_end = source.index(
+            "private IEnumerator EnsureSam3dReference(",
+            configure_start,
+        )
+        configure = source[configure_start:configure_end]
+        self.assertIn(
+            "float panelExtent = Mathf.Max(width, height);",
+            configure,
+        )
+        self.assertIn("scaleX.val = panelExtent;", configure)
+        self.assertIn("scaleY.val = panelExtent;", configure)
+        self.assertNotIn("scaleX.val = width;", configure)
+        self.assertNotIn("scaleY.val = height;", configure)
         self.assertNotIn(
             '(existingUrl ?? "").Trim().Length != 0 &&',
             source,

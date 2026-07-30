@@ -4761,8 +4761,15 @@ namespace VAMPip
             url.val =
                 request.Sam3dReferenceResourceRef;
             scale.val = 1.0f;
-            scaleX.val = width;
-            scaleY.val = height;
+            // ImagePanelEmissive already fits the texture's native aspect
+            // inside its X/Y scale box. Applying width and height as separate
+            // axis scales would apply that ratio a second time (most visibly
+            // squeezing portrait references). A square box based on the
+            // larger requested dimension lets VaM's native fit reproduce the
+            // requested world-space width and height in either orientation.
+            float panelExtent = Mathf.Max(width, height);
+            scaleX.val = panelExtent;
+            scaleY.val = panelExtent;
             reference.SetOn(true);
             reference.collisionEnabled = false;
             controller.physicsEnabled = false;
