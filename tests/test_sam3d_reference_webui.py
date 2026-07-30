@@ -69,7 +69,7 @@ class Sam3dReferenceWebUITests(unittest.TestCase):
             "async function undoSam3dApply(", apply_start
         )
         apply = self.javascript[apply_start:apply_end]
-        self.assertIn("const keepReference = sam3dKeepReferenceRequested();", apply)
+        self.assertIn("keepReference = sam3dKeepReferenceRequested();", apply)
         self.assertIn("keep_reference: keepReference", apply)
 
     def test_reference_actions_are_capability_gated_and_queue_checked(self) -> None:

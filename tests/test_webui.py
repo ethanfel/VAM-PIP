@@ -2953,6 +2953,166 @@ process.stdout.write(JSON.stringify({{
         )
         self.assertIn("SAM3D_MAX_HISTORY", self.javascript)
 
+    def test_sam3d_multi_subject_draft_is_bounded_and_repeated_in_upload(self) -> None:
+        for control_id in (
+            "sam3d-subject-box-list",
+            "sam3d-add-subject",
+            "sam3d-remove-subject",
+            "sam3d-subject-assignment-list",
+        ):
+            self.assertIn(f'id="{control_id}"', self.html)
+        self.assertIn("const SAM3D_MAX_SUBJECTS = 4;", self.javascript)
+        self.assertIn("app.sam3dSubjects.length >= SAM3D_MAX_SUBJECTS", self.javascript)
+        self.assertIn('query.append(\n        "bbox"', self.javascript)
+        self.assertIn("values.every(Number.isFinite)", self.javascript)
+        self.assertIn("function sam3dBboxesPixels(", self.javascript)
+
+    def test_sam3d_preapply_editor_is_draft_only_until_atomic_submit(self) -> None:
+        for tab, panel in (
+            ("genital", "sam3d-genital-panel"),
+            ("review", "sam3d-review-panel"),
+        ):
+            self.assertIn(f'data-sam3d-handoff-tab="{tab}"', self.html)
+            self.assertIn(f'id="{panel}"', self.html)
+        self.assertIn("Optional and off by default.", self.html)
+        self.assertIn("function sam3dPairDraftRequest(", self.javascript)
+        self.assertIn("primary_subject_index:", self.javascript)
+        self.assertIn("genital_editor:", self.javascript)
+        self.assertIn("base_locked:", self.javascript)
+        self.assertIn("segment_lengths_locked:", self.javascript)
+        self.assertIn("testes_enabled:", self.javascript)
+        self.assertIn("function sam3dPairApplyRequest(", self.javascript)
+        self.assertIn("subjects[genitalSubjectIndex].genital_editor", self.javascript)
+        self.assertIn('return `${this.job(jobId)}/apply-pair`;', self.javascript)
+        self.assertIn("Sam3dClient.applyPair(job.id, request)", self.javascript)
+        self.assertIn('"sam3d-pair-apply-v1"', self.javascript)
+        self.assertIn("function moveSam3dGenitalHandle(", self.javascript)
+        self.assertIn("style.aspectRatio", self.javascript)
+        self.assertNotIn("sam3d-genital-contact-target", self.html)
+        draft_start = self.javascript.index("function defaultSam3dGenitalDraft(")
+        draft_end = self.javascript.index(
+            "function sam3dPairApplyRequest(", draft_start
+        )
+        draft = self.javascript[draft_start:draft_end]
+        self.assertNotIn("Sam3dClient.", draft)
+        self.assertNotIn('api("', draft)
+
+    def test_sam3d_manual_partial_pose_is_bounded_and_separate(self) -> None:
+        for control_id in (
+            "sam3d-add-manual-subject",
+            "sam3d-manual-pose",
+            "sam3d-manual-pose-subject",
+            "sam3d-manual-pose-template",
+            "sam3d-manual-pose-facing",
+            "sam3d-manual-pose-stage",
+            "sam3d-manual-pose-source",
+            "sam3d-manual-pose-bones",
+            "sam3d-manual-pose-handles",
+            "sam3d-manual-pose-visible",
+            "sam3d-manual-pose-depth",
+            "sam3d-manual-pose-depth-label",
+            "sam3d-manual-pose-joint-list",
+        ):
+            with self.subTest(control_id=control_id):
+                self.assertIn(f'id="{control_id}"', self.html)
+        self.assertIn("POV / lying toward camera", self.html)
+        self.assertIn("L/R are the Person’s anatomical sides", self.html)
+        self.assertIn(
+            "enough connected visible controls to describe the",
+            self.html,
+        )
+        self.assertIn("pose you want", self.html)
+        self.assertIn(
+            "Release unused VaM control",
+            self.html,
+        )
+        self.assertIn("Target height (m)", self.javascript)
+        self.assertIn("const SAM3D_MANUAL_POSE_COORD_MIN = -0.5;", self.javascript)
+        self.assertIn("const SAM3D_MANUAL_POSE_COORD_MAX = 1.5;", self.javascript)
+        self.assertIn("const SAM3D_MANUAL_POSE_DEPTH_MIN = -1;", self.javascript)
+        self.assertIn("const SAM3D_MANUAL_POSE_DEPTH_MAX = 1;", self.javascript)
+        self.assertIn("function defaultSam3dManualPose(", self.javascript)
+        self.assertIn("function boundedSam3dManualPosePoint(", self.javascript)
+        self.assertIn("function sam3dUnusedProvenanceIndex(", self.javascript)
+        self.assertIn("function renderSam3dManualPoseEditor(", self.javascript)
+        self.assertIn("function swapSam3dManualPoseSides(", self.javascript)
+        self.assertIn("function beginSam3dManualPoseDrag(", self.javascript)
+        self.assertIn("function finishSam3dManualPoseDrag(", self.javascript)
+        self.assertIn(".sam3d-manual-pose-source-frame", self.styles)
+        self.assertIn(".sam3d-manual-pose-handle.is-off-frame", self.styles)
+        self.assertIn(".sam3d-manual-pose-handle.is-hidden", self.styles)
+        self.assertIn("Genital placement stays in its separate editor.", self.html)
+
+    def test_sam3d_manual_editor_request_matches_atomic_pair_contract(self) -> None:
+        helper_start = self.javascript.index("function sam3dManualPoseRequest(")
+        helper_end = self.javascript.index(
+            "function sam3dBodyKeypoints2d(", helper_start
+        )
+        helper = self.javascript[helper_start:helper_end]
+        self.assertIn("enabled: true", helper)
+        self.assertIn("facing: pose.facing", helper)
+        self.assertIn("controllers: Object.fromEntries(", helper)
+        self.assertIn("[handle.u, handle.v, handle.depthOffset]", helper)
+        self.assertIn('controller.id !== "hipControl"', helper)
+        self.assertNotIn("Sam3dClient.", helper)
+        self.assertNotIn('api("', helper)
+
+        request_start = self.javascript.index("function sam3dPairDraftRequest(")
+        request_end = self.javascript.index(
+            "function sam3dPairApplyRequest(", request_start
+        )
+        request = self.javascript[request_start:request_end]
+        self.assertIn("subject.manual_editor = manualPose", request)
+        self.assertIn("person_index:", request)
+        self.assertNotIn("subject.manual_pose", request)
+        self.assertIn(
+            'draft.subjects[primarySubjectIndex]?.manual_editor',
+            self.javascript,
+        )
+        self.assertIn(
+            "The primary subject must stay Auto (SAM)",
+            self.javascript,
+        )
+        self.assertIn(
+            "assignment.personIndex = sam3dUnusedProvenanceIndex(",
+            self.javascript,
+        )
+        self.assertIn("Depth from primary hip plane", self.javascript)
+        self.assertIn("Depth from manual hip plane", self.javascript)
+        self.assertIn("Released — follows body", self.javascript)
+        self.assertIn("released — follow body", self.javascript)
+        self.assertIn("position + rotation Off", self.html)
+        self.assertIn("Undo restores their original states", self.html)
+        self.assertNotIn("Preserve current VaM control", self.javascript)
+        self.assertNotIn("preserve current VaM controls", self.javascript)
+        self.assertNotIn("Neutral fallback", self.javascript)
+        self.assertNotIn("neutral fallback", self.html)
+
+    def test_sam3d_duplicate_auto_skeleton_check_hydrates_manifest_once(self) -> None:
+        for contract in (
+            "sam3dManifestPeopleByJob: new Map()",
+            "sam3dManifestHydrationAttempts: new Set()",
+            "sam3dManifestHydrationInFlight: new Map()",
+            "manifest(jobId, signal)",
+            'this.paths.artifact(jobId, "manifest")',
+            "function normalizeSam3dManifestPeople(",
+            ".slice(0, 256)",
+            "function hydrateSam3dManifestPeople(",
+            "function sam3dAutoSkeletonSimilarity(",
+            "function sam3dDuplicateAutoSkeletons(",
+            "Switch one to Manual partial",
+        ):
+            with self.subTest(contract=contract):
+                self.assertIn(contract, self.javascript)
+        self.assertIn(
+            "app.sam3dManifestHydrationInFlight.has(job.id)",
+            self.javascript,
+        )
+        self.assertIn(
+            "Likely duplicate auto skeleton",
+            self.javascript,
+        )
+
     def test_sam3d_capture_history_is_bounded_and_navigable(self) -> None:
         self.assertIn("const SAM3D_MAX_CAPTURES = 50;", self.javascript)
         self.assertIn("function normalizeSam3dCapture(", self.javascript)

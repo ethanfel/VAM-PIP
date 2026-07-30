@@ -5,6 +5,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib import resources
 import json
+import math
 import mimetypes
 import os
 from pathlib import Path
@@ -51,6 +52,9 @@ _SAM3D_CAPTURE_ARTIFACT = re.compile(
 _SAM3D_RUN = re.compile(r"^/api/sam3d/jobs/([0-9a-f]{32})/run$")
 _SAM3D_SELECT = re.compile(r"^/api/sam3d/jobs/([0-9a-f]{32})/select$")
 _SAM3D_APPLY = re.compile(r"^/api/sam3d/jobs/([0-9a-f]{32})/apply$")
+_SAM3D_PAIR_APPLY = re.compile(
+    r"^/api/sam3d/jobs/([0-9a-f]{32})/apply-pair$"
+)
 _SAM3D_UNDO = re.compile(r"^/api/sam3d/jobs/([0-9a-f]{32})/undo$")
 _SAM3D_CAPTURE = re.compile(r"^/api/sam3d/jobs/([0-9a-f]{32})/capture$")
 _SAM3D_REFERENCE = re.compile(r"^/api/sam3d/jobs/([0-9a-f]{32})/reference$")
@@ -850,19 +854,31 @@ class ManagerRequestHandler(BaseHTTPRequestHandler):
                         + ", ".join(unexpected_fields)
                     )
                 raw_bbox = query.get("bbox", [])
-                bbox: list[float] | None = None
+                bbox: list[float] | list[list[float]] | None = None
                 if raw_bbox:
-                    if len(raw_bbox) != 1:
-                        raise ValueError("bbox must be supplied at most once")
-                    pieces = raw_bbox[0].split(",")
-                    if len(pieces) != 4:
-                        raise ValueError("bbox must be x1,y1,x2,y2")
-                    try:
-                        bbox = [float(piece) for piece in pieces]
-                    except ValueError as error:
-                        raise ValueError(
-                            "bbox must contain four finite numbers"
-                        ) from error
+                    if len(raw_bbox) > 4:
+                        raise ValueError("bbox may be supplied at most four times")
+                    parsed_bboxes: list[list[float]] = []
+                    for raw_box in raw_bbox:
+                        pieces = raw_box.split(",")
+                        if len(pieces) != 4:
+                            raise ValueError("bbox must be x1,y1,x2,y2")
+                        try:
+                            parsed_bbox = [float(piece) for piece in pieces]
+                        except ValueError as error:
+                            raise ValueError(
+                                "bbox must contain four finite numbers"
+                            ) from error
+                        if not all(math.isfinite(item) for item in parsed_bbox):
+                            raise ValueError(
+                                "bbox must contain four finite numbers"
+                            )
+                        parsed_bboxes.append(parsed_bbox)
+                    bbox = (
+                        parsed_bboxes[0]
+                        if len(parsed_bboxes) == 1
+                        else parsed_bboxes
+                    )
                 raw_fov = query.get("vertical_fov", [])
                 vertical_fov: float | None = None
                 if raw_fov:
@@ -1025,6 +1041,7 @@ class ManagerRequestHandler(BaseHTTPRequestHandler):
                 self._json(HTTPStatus.ACCEPTED, result)
                 return
             sam3d_apply = _SAM3D_APPLY.fullmatch(parsed.path)
+            sam3d_pair_apply = _SAM3D_PAIR_APPLY.fullmatch(parsed.path)
             sam3d_select = _SAM3D_SELECT.fullmatch(parsed.path)
             if method == "POST" and sam3d_select:
                 unexpected_fields = sorted(
@@ -1109,6 +1126,61 @@ class ManagerRequestHandler(BaseHTTPRequestHandler):
                     service.remove_sam3d_reference(
                         sam3d_reference.group(1),
                         expected_job_revision=document["expected_job_revision"],
+                    ),
+                )
+                return
+            if method == "POST" and sam3d_pair_apply:
+                allowed_fields = {
+                    "expected_job_revision",
+                    "subjects",
+                    "primary_subject_index",
+                    "camera_uid",
+                    "create_camera",
+                    "aspect_ratio",
+                    "output_resolution",
+                    "image_format",
+                    "horizontal_fov",
+                }
+                unexpected_fields = sorted(set(document) - allowed_fields)
+                if unexpected_fields:
+                    raise ValueError(
+                        "unsupported paired SAM3D apply field(s): "
+                        + ", ".join(unexpected_fields)
+                    )
+                missing = sorted(
+                    {
+                        "expected_job_revision",
+                        "subjects",
+                        "primary_subject_index",
+                        "camera_uid",
+                    }
+                    - set(document)
+                )
+                if missing:
+                    raise ValueError(
+                        "missing paired SAM3D apply field(s): "
+                        + ", ".join(missing)
+                    )
+                self._json(
+                    HTTPStatus.ACCEPTED,
+                    service.apply_sam3d_pair(
+                        sam3d_pair_apply.group(1),
+                        expected_job_revision=document[
+                            "expected_job_revision"
+                        ],
+                        subjects=document["subjects"],
+                        primary_subject_index=document[
+                            "primary_subject_index"
+                        ],
+                        camera_uid=document["camera_uid"],
+                        create_camera=document.get("create_camera", False),
+                        aspect_ratio=document.get("aspect_ratio", "16:9"),
+                        output_resolution=document.get(
+                            "output_resolution",
+                            "1280x720 (HD)",
+                        ),
+                        image_format=document.get("image_format", "jpeg"),
+                        horizontal_fov=document.get("horizontal_fov"),
                     ),
                 )
                 return

@@ -28,7 +28,10 @@ from vampip.sam3d_vam import (
     VAM_CONTROLLER_IDS,
     build_vam_solution,
 )
-from vampip.sam3d_worker import _pinned_torch_hub_loader
+from vampip.sam3d_worker import (
+    _pinned_torch_hub_loader,
+    _request_bboxes as worker_request_bboxes,
+)
 from vampip.service import ManagerService
 
 
@@ -103,15 +106,26 @@ class FakeWorker:
     def __call__(self, config, paths, runtime_dir) -> None:
         request = json.loads(paths.request.read_text(encoding="utf-8"))
         manifest = sample_manifest(request["jobId"])
-        if request["schema"] == 2:
-            manifest["schema"] = 2
+        if request["schema"] in {2, 3}:
+            manifest["schema"] = request["schema"]
             manifest["engine"].update(
                 {
                     "modelId": request["modelId"],
                     "backbone": config.public_status()["backbone"],
                 }
             )
-        manifest["source"]["bbox"] = request["bbox"]
+        if request["schema"] == 3:
+            manifest["source"].pop("bbox")
+            manifest["source"]["bboxes"] = request["bboxes"]
+            person_template = sample_people()[0]
+            manifest["people"] = []
+            for index, bbox in enumerate(request["bboxes"]):
+                person = json.loads(json.dumps(person_template))
+                person["index"] = index
+                person["bbox"] = bbox
+                manifest["people"].append(person)
+        else:
+            manifest["source"]["bbox"] = request["bbox"]
         manifest["source"]["verticalFov"] = request["verticalFov"]
         paths.manifest.write_text(json.dumps(manifest), encoding="utf-8")
         paths.overlay.write_bytes(png_header())
@@ -434,6 +448,27 @@ class Sam3dBackendTests(unittest.TestCase):
                 comparison_id=changed_camera_id,
             )
 
+        changed_boxes_id = "6" * 32
+        bboxes = [
+            [0.0, 0.0, 32.0, 64.0],
+            [32.0, 0.0, 64.0, 64.0],
+        ]
+        manager.create(
+            source,
+            "image/png",
+            bboxes=bboxes,
+            model_id="dinov3_vith16plus",
+            comparison_id=changed_boxes_id,
+        )
+        with self.assertRaisesRegex(ValueError, "same source, box, and FOV"):
+            manager.create(
+                source,
+                "image/png",
+                bboxes=list(reversed(bboxes)),
+                model_id="vit_hmr_512_384",
+                comparison_id=changed_boxes_id,
+            )
+
     def test_comparison_rejects_non_official_model_profiles(self) -> None:
         manager = Sam3dJobManager(
             self.state,
@@ -495,6 +530,87 @@ class Sam3dBackendTests(unittest.TestCase):
         self.assertEqual(completed["state"], "succeeded")
         self.assertIsNone(completed["model"])
         self.assertEqual(manager.manifest(created["id"])["schema"], 1)
+
+    def test_schema_three_preserves_a_bounded_ordered_box_collection(self) -> None:
+        manager = self.manager()
+        bboxes = [
+            [0.0, 0.0, 32.0, 64.0],
+            [32.0, 0.0, 64.0, 64.0],
+        ]
+        created = manager.create(
+            png_header(),
+            "image/png",
+            bboxes=bboxes,
+            vertical_fov=55.0,
+        )
+        request = json.loads(
+            manager._paths(created["id"]).request.read_text(encoding="utf-8")
+        )
+        self.assertEqual(request["schema"], 3)
+        self.assertEqual(request["bboxes"], bboxes)
+        self.assertNotIn("bbox", request)
+        self.assertEqual(created["bboxes"], bboxes)
+        self.assertIsNone(created["bbox"])
+
+        manager.queue(created["id"])
+        manager._queue.join()
+        completed = manager.get(created["id"])
+        self.assertEqual(completed["state"], "succeeded")
+        self.assertEqual(completed["person_count"], 2)
+        manifest = manager.manifest(created["id"])
+        self.assertEqual(manifest["schema"], 3)
+        self.assertEqual(manifest["source"]["bboxes"], bboxes)
+        self.assertNotIn("bbox", manifest["source"])
+        self.assertEqual(
+            [person["bbox"] for person in manifest["people"]],
+            bboxes,
+        )
+
+    def test_schema_three_rejects_unbounded_or_invalid_box_collections(self) -> None:
+        manager = self.manager()
+        invalid = (
+            [],
+            [[0.0, 0.0, 64.0, 64.0]] * 5,
+            [[0.0, 0.0, 8.0, 8.0]],
+            [[0.0, 0.0, math.nan, 64.0]],
+            [[0.0, 0.0, 64.0, 64.0], [True, 0.0, 64.0, 64.0]],
+        )
+        for bboxes in invalid:
+            with self.subTest(bboxes=bboxes):
+                with self.assertRaises(ValueError):
+                    manager.create(
+                        png_header(),
+                        "image/png",
+                        bboxes=bboxes,
+                    )
+
+    def test_worker_request_boxes_preserve_schema_three_order(self) -> None:
+        bboxes = [
+            [32.0, 0.0, 64.0, 64.0],
+            [0.0, 0.0, 32.0, 64.0],
+        ]
+        self.assertEqual(
+            worker_request_bboxes(
+                {"schema": 3, "bboxes": bboxes},
+                width=64,
+                height=64,
+            ),
+            bboxes,
+        )
+        self.assertEqual(
+            worker_request_bboxes(
+                {"schema": 2, "bbox": bboxes[0]},
+                width=64,
+                height=64,
+            ),
+            [bboxes[0]],
+        )
+        with self.assertRaisesRegex(ValueError, "bboxes"):
+            worker_request_bboxes(
+                {"schema": 3, "bboxes": bboxes * 3},
+                width=64,
+                height=64,
+            )
 
     def test_worker_rejects_model_config_without_supported_backbone(self) -> None:
         assert self.config.checkpoint is not None

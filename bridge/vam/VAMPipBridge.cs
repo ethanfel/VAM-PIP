@@ -20,6 +20,7 @@ namespace VAMPip
         private const string BridgeVersion = "1.0.0";
         private const int TimelineProtocolVersion = 1;
         private const int Sam3dSolutionSchema = 1;
+        private const int Sam3dPairSolutionSchema = 2;
 
         private const string PluginDataRoot = "Saves\\PluginData";
         private const string DataRoot = "Saves\\PluginData\\VAMPip";
@@ -59,10 +60,15 @@ namespace VAMPip
         private const int MaximumTimelineLabelLength = 256;
         private const int MaximumTimelineQualifiedLength = 512;
         private const int Sam3dControllerCount = 19;
+        private const int Sam3dPairSubjectCount = 2;
+        private const int Sam3dMaximumDetectedPersonCount = 32;
+        private const int Sam3dMaximumGenitalControllerCount = 4;
         private const int Sam3dDiagnosticControllerCount = 2;
         private const int Sam3dDiagnosticSchema = 1;
         private const int Sam3dPhysicsResetFrames = 5;
         private const float MaximumSam3dCoordinate = 10.0f;
+        private const float Sam3dPairCameraConsistencyTolerance =
+            0.0001f;
         private const float Sam3dCaptureWaitSeconds = 300.0f;
         private const int Sam3dReferenceMaximumBytes =
             32 * 1024 * 1024;
@@ -79,6 +85,10 @@ namespace VAMPip
         private const float MaximumBodyProportionDelta = 0.25f;
         private const float BodyShapeResponseStep = 0.1f;
         private const float BodyShapeLoopJoinTolerance = 0.00025f;
+        private const float BodyShapeMaximumSeamRepairMeters = 0.001f;
+        private const float BodyShapeMaximumSeamRepairFraction = 0.02f;
+        private const int BodyShapeUnderbustFallbackSteps = 8;
+        private const float BodyShapeTorsoScanFractionStep = 0.01f;
         private const float BodyShapeBustFirstFraction = 0.58f;
         private const float BodyShapeBustLastFraction = 0.76f;
         private const float BodyShapeWaistFirstFraction = 0.34f;
@@ -87,7 +97,10 @@ namespace VAMPip
         private const float BodyShapeSeatLastFraction = 0.12f;
         private const float BodyShapeUpperThighLegFraction = 0.35f;
         private const float BodyShapeBuildFrameBudgetSeconds = 0.003f;
-        private const int BodyShapeBuildMaximumStepsPerFrame = 1;
+        private const int BodyShapeBuildMaximumStepsPerFrame = 8;
+        private const int BodyShapeBuildMaximumAttempts = 3;
+        private const float BodyShapeBuildRetryDelaySeconds = 2.0f;
+        private const float BodyShapeCalibrationMorphQuantum = 0.005f;
 
         private const string CommandRescan = "rescan";
         private const string CommandApplyPersonPreset = "applyPersonPreset";
@@ -112,6 +125,7 @@ namespace VAMPip
         private const string CommandLoadScene = "loadScene";
         private const string CommandControlTimeline = "controlTimeline";
         private const string CommandApplySam3dResult = "applySam3dResult";
+        private const string CommandApplySam3dPair = "applySam3dPair";
         private const string CommandUndoSam3dResult = "undoSam3dResult";
         private const string CommandCaptureSam3dResult =
             "captureSam3dResult";
@@ -121,6 +135,9 @@ namespace VAMPip
             "removeSam3dReference";
         private const string Sam3dCoordinateSpace =
             "selected-person-hip-relative";
+        private const string Sam3dPairCoordinateSpace =
+            "shared-camera-subjects";
+        private const string Sam3dPairUnits = "meters";
         private const string Sam3dRendererSuffix = "_Eosin.VRRenderer";
         private const string Sam3dCaptureAction = "VAMPipCapture";
         private const string Sam3dRequestIdParam = "VAMPipRequestId";
@@ -278,6 +295,8 @@ namespace VAMPip
             public string Id;
             public Vector3 Position;
             public Quaternion Rotation;
+            public bool HasRotation;
+            public bool Enabled;
         }
 
         private sealed class Sam3dCameraSolution
@@ -297,6 +316,31 @@ namespace VAMPip
             public string Revision;
             public List<Sam3dControllerSolution> Controllers;
             public Sam3dCameraSolution Camera;
+        }
+
+        private sealed class Sam3dPairSubjectSolution
+        {
+            public string TargetUid;
+            public int PersonIndex;
+            public Vector3 CameraFromHip;
+            public List<Sam3dControllerSolution> Controllers;
+            public List<Sam3dControllerSolution> Genitals;
+        }
+
+        private sealed class Sam3dPairSolution
+        {
+            public string JobId;
+            public string Revision;
+            public int PrimarySubjectIndex;
+            public List<Sam3dPairSubjectSolution> Subjects;
+            public Sam3dCameraSolution Camera;
+        }
+
+        private sealed class Sam3dPairSubjectRuntime
+        {
+            public Sam3dPairSubjectSolution Solution;
+            public Atom Person;
+            public Dictionary<string, FreeControllerV3> Controllers;
         }
 
         private sealed class Sam3dControllerDiagnostic
@@ -370,6 +414,20 @@ namespace VAMPip
             public Sam3dApplyDiagnostics Diagnostics;
             public Sam3dReferenceSnapshot Reference;
             public Sam3dReferenceState PreviousReferenceState;
+            public List<Sam3dPairPersonUndo> PairPersons;
+        }
+
+        private sealed class Sam3dPairPersonUndo
+        {
+            public string TargetUid;
+            public int PersonIndex;
+            public Atom Person;
+            public bool PersonCollisionEnabled;
+            public int ExpectedControllerCount;
+            public List<Sam3dControllerUndo> Controllers;
+            public bool HeadRequestedRotationCaptured;
+            public Quaternion HeadRequestedRotation;
+            public bool PersistentHeadLockActive;
         }
 
         private sealed class Sam3dReferenceSnapshot
@@ -593,8 +651,11 @@ namespace VAMPip
             public int ScanIndex;
             public bool Complete;
             public bool Failed;
+            public string FailureReason;
             public BodyShapeSection Bust;
             public BodyShapeSection Underbust;
+            public BodyShapeSection UnderbustLower;
+            public float UnderbustLowerOffset;
             public BodyShapeSection Waist;
             public BodyShapeSection Seat;
             public BodyShapeSection LeftThigh;
@@ -610,7 +671,7 @@ namespace VAMPip
         {
             public Atom Atom;
             public DAZCharacterSelector Geometry;
-            public string MeshChecksum;
+            public string CalibrationKey;
             public BodyShapeSignature Signature;
             public Dictionary<
                 DAZMorph,
@@ -621,7 +682,7 @@ namespace VAMPip
         {
             public Atom Atom;
             public DAZCharacterSelector Geometry;
-            public string MeshChecksum;
+            public string CalibrationKey;
             public Vector3[] Vertices;
             public int[] Triangles;
             public BodyShapeFrame Frame;
@@ -629,6 +690,10 @@ namespace VAMPip
             public float ScaleZ;
             public List<BodyProportionMorphEntry> Entries;
             public bool Cancelled;
+            public bool Failed;
+            public string FailureReason;
+            public int Attempt;
+            public float RetryAfterRealtime;
         }
 
         private sealed class PersonBodyProportionSnapshot
@@ -639,7 +704,7 @@ namespace VAMPip
             public string Revision;
             public List<BodyProportionMorphEntry> Entries;
             public BodyShapeSignature BodyShape;
-            public string BodyShapeMeshChecksum;
+            public string BodyShapeCalibrationKey;
         }
 
         private sealed class BodyProportionUndoValue
@@ -874,6 +939,8 @@ namespace VAMPip
                 {
                     if (interruptedRequest.Command ==
                             CommandApplySam3dResult ||
+                        interruptedRequest.Command ==
+                            CommandApplySam3dPair ||
                         interruptedRequest.Command ==
                             CommandUndoSam3dResult ||
                         interruptedRequest.Command ==
@@ -1577,6 +1644,28 @@ namespace VAMPip
                         return;
                     }
                 }
+                else if (command == CommandApplySam3dPair)
+                {
+                    parsed.Sam3dJobId =
+                        ((string)request["jobId"] ?? "").Trim();
+                    parsed.Sam3dRevision =
+                        ((string)request["expectedRevision"] ?? "").Trim();
+                    parsed.Sam3dSolutionSha256 =
+                        ((string)request["solutionSha256"] ?? "").Trim();
+                    parsed.Sam3dCameraUid =
+                        ((string)request["cameraUid"] ?? "").Trim();
+                    parsed.Sam3dCreateCamera =
+                        request["createCamera"].AsBool;
+                    parsed.RescanRequired = false;
+
+                    string validationError =
+                        ValidateSam3dPairApplyRequest(parsed);
+                    if (validationError.Length != 0)
+                    {
+                        RejectRequest(requestId, validationError);
+                        return;
+                    }
+                }
                 else if (command == CommandUndoSam3dResult)
                 {
                     parsed.Sam3dJobId =
@@ -1665,6 +1754,7 @@ namespace VAMPip
                         "'undoPersonBodyProportions', " +
                         "'selectPerson', 'selectAtom', 'loadScene', " +
                         "'controlTimeline', 'applySam3dResult', " +
+                        "'applySam3dPair', " +
                         "'undoSam3dResult', 'captureSam3dResult', " +
                         "'showSam3dReference', and 'removeSam3dReference'.");
                     return;
@@ -2230,6 +2320,28 @@ namespace VAMPip
             return "";
         }
 
+        private static string ValidateSam3dPairApplyRequest(
+            BridgeRequest request)
+        {
+            string identityError = ValidateSam3dIdentity(request);
+            if (identityError.Length != 0)
+            {
+                return identityError;
+            }
+            if (!IsSha256Token(request.Sam3dSolutionSha256))
+            {
+                return
+                    "solutionSha256 must contain exactly 64 hexadecimal characters.";
+            }
+            string cameraError =
+                ValidateTargetUid(request.Sam3dCameraUid);
+            if (cameraError.Length != 0)
+            {
+                return "cameraUid " + cameraError;
+            }
+            return "";
+        }
+
         private static string ValidateSam3dShowReferenceRequest(
             BridgeRequest request)
         {
@@ -2646,6 +2758,7 @@ namespace VAMPip
                 return;
             }
             if (request.Command == CommandApplySam3dResult ||
+                request.Command == CommandApplySam3dPair ||
                 request.Command == CommandUndoSam3dResult ||
                 request.Command == CommandCaptureSam3dResult ||
                 request.Command == CommandShowSam3dReference ||
@@ -2657,6 +2770,8 @@ namespace VAMPip
                     StartCoroutine(
                         request.Command == CommandApplySam3dResult
                         ? ExecuteApplySam3dResult(request)
+                        : request.Command == CommandApplySam3dPair
+                        ? ExecuteApplySam3dPair(request)
                         : request.Command == CommandUndoSam3dResult
                         ? ExecuteUndoSam3dResult(request)
                         : request.Command == CommandCaptureSam3dResult
@@ -3428,17 +3543,17 @@ namespace VAMPip
                             "The body-proportion revision is stale; refresh " +
                             "the selected Person.");
                     }
-                    string currentBodyShapeChecksum = "";
-                    if (!TryBodyShapeMeshChecksum(
+                    string currentBodyShapeCalibrationKey =
+                        BuildBodyShapeCalibrationKey(
                             geometry,
-                            out currentBodyShapeChecksum) ||
-                        !string.Equals(
-                            snapshot.BodyShapeMeshChecksum,
-                            currentBodyShapeChecksum,
+                            currentEntries);
+                    if (!string.Equals(
+                            snapshot.BodyShapeCalibrationKey,
+                            currentBodyShapeCalibrationKey,
                             StringComparison.Ordinal))
                     {
                         throw new Exception(
-                            "The neutral body-shape cache changed; refresh " +
+                            "The body-shape calibration state changed; refresh " +
                             "the selected Person.");
                     }
                     if (!IsValidBodyShapeSignature(
@@ -3453,7 +3568,7 @@ namespace VAMPip
                             geometry,
                             currentEntries,
                             snapshot.BodyShape,
-                            currentBodyShapeChecksum);
+                            currentBodyShapeCalibrationKey);
                     if (!IsCurrentBodyProportionSnapshot(
                             snapshot,
                             currentEntries,
@@ -3948,6 +4063,18 @@ namespace VAMPip
                     StringComparison.Ordinal) >= 0;
         }
 
+        private static bool IsSam3dGenitalControllerId(string id)
+        {
+            const string allowed =
+                "|penisBaseControl|penisMidControl|penisTipControl|" +
+                "testesControl|";
+            return id != null &&
+                id.IndexOf('|') < 0 &&
+                allowed.IndexOf(
+                    "|" + id + "|",
+                    StringComparison.Ordinal) >= 0;
+        }
+
         private static Vector3 ParseSam3dVector(
             JSONNode node,
             string label)
@@ -4272,6 +4399,7 @@ namespace VAMPip
                 Sam3dControllerSolution controller =
                     new Sam3dControllerSolution();
                 controller.Id = id;
+                controller.Enabled = true;
                 controller.Position =
                     ParseSam3dVector(
                         value["position"],
@@ -4280,6 +4408,7 @@ namespace VAMPip
                     ParseSam3dQuaternion(
                         value["rotation"],
                         id + " rotation");
+                controller.HasRotation = true;
                 solution.Controllers.Add(controller);
             }
 
@@ -4318,6 +4447,434 @@ namespace VAMPip
             {
                 throw new Exception(
                     "camera basename does not match the immutable job ID.");
+            }
+            return solution;
+        }
+
+        private static Sam3dCameraSolution ParseSam3dPairCamera(
+            JSONClass camera,
+            string jobId)
+        {
+            if (camera == null)
+            {
+                throw new Exception(
+                    "The SAM3D pair solution has no camera.");
+            }
+            Sam3dCameraSolution result =
+                new Sam3dCameraSolution();
+            result.Position =
+                ParseSam3dVector(camera["position"], "camera position");
+            result.Rotation =
+                ParseSam3dQuaternion(
+                    camera["rotation"],
+                    "camera rotation");
+            result.FlatHorizontalFov =
+                camera["flatHorizontalFov"].AsFloat;
+            if (!IsFinite(result.FlatHorizontalFov) ||
+                result.FlatHorizontalFov < 0.1f ||
+                result.FlatHorizontalFov > 179.9f)
+            {
+                throw new Exception(
+                    "camera flatHorizontalFov must be between 0.1 and 179.9.");
+            }
+            result.AspectRatio =
+                Sam3dText(
+                    camera["aspectRatio"],
+                    "camera aspectRatio",
+                    16);
+            result.OutputResolution =
+                Sam3dText(
+                    camera["outputResolution"],
+                    "camera outputResolution",
+                    64);
+            result.ImageFormat =
+                Sam3dText(
+                    camera["imageFormat"],
+                    "camera imageFormat",
+                    128);
+            result.BaseFilename =
+                Sam3dText(
+                    camera["basename"],
+                    "camera basename",
+                    64);
+            if (result.BaseFilename != jobId)
+            {
+                throw new Exception(
+                    "camera basename does not match the immutable job ID.");
+            }
+            return result;
+        }
+
+        private static void ValidateSam3dPairCanonicalAxes(
+            JSONClass document)
+        {
+            JSONClass axes =
+                document == null || !document.HasKey("canonicalAxes")
+                ? null
+                : document["canonicalAxes"].AsObject;
+            if (axes == null ||
+                axes.Count != 3 ||
+                !axes.HasKey("right") ||
+                !axes.HasKey("up") ||
+                !axes.HasKey("forward") ||
+                !string.Equals(
+                    (string)axes["right"],
+                    "+X",
+                    StringComparison.Ordinal) ||
+                !string.Equals(
+                    (string)axes["up"],
+                    "+Y",
+                    StringComparison.Ordinal) ||
+                !string.Equals(
+                    (string)axes["forward"],
+                    "+Z",
+                    StringComparison.Ordinal))
+            {
+                throw new Exception(
+                    "The SAM3D pair canonical axes must be exactly " +
+                    "right +X, up +Y, and forward +Z.");
+            }
+        }
+
+        private static bool Sam3dPairCameraPositionsMatch(
+            Vector3 primaryCameraFromHip,
+            Vector3 cameraPosition)
+        {
+            return
+                IsFinite(primaryCameraFromHip.x) &&
+                IsFinite(primaryCameraFromHip.y) &&
+                IsFinite(primaryCameraFromHip.z) &&
+                IsFinite(cameraPosition.x) &&
+                IsFinite(cameraPosition.y) &&
+                IsFinite(cameraPosition.z) &&
+                Mathf.Abs(
+                    primaryCameraFromHip.x -
+                    cameraPosition.x) <=
+                    Sam3dPairCameraConsistencyTolerance &&
+                Mathf.Abs(
+                    primaryCameraFromHip.y -
+                    cameraPosition.y) <=
+                    Sam3dPairCameraConsistencyTolerance &&
+                Mathf.Abs(
+                    primaryCameraFromHip.z -
+                    cameraPosition.z) <=
+                    Sam3dPairCameraConsistencyTolerance;
+        }
+
+        private static bool ParseSam3dStrictBoolean(
+            JSONNode node,
+            string label)
+        {
+            string serialized =
+                node == null
+                ? ""
+                : node.ToString().Trim();
+            // VaM's legacy SimpleJSON builds disagree on whether parsed
+            // booleans retain JSON casing and whether JSONData.ToString()
+            // quotes primitive storage. They also erase the original scalar
+            // type, so normalize the optional quotes and accept only the two
+            // boolean tokens. Numbers and every other value remain invalid.
+            if (serialized.Length >= 2 &&
+                serialized[0] == '"' &&
+                serialized[serialized.Length - 1] == '"')
+            {
+                serialized = serialized.Substring(
+                    1,
+                    serialized.Length - 2);
+            }
+            if (string.Equals(
+                    serialized,
+                    "true",
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+            if (string.Equals(
+                    serialized,
+                    "false",
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+            throw new Exception(
+                label + " must be a JSON boolean.");
+        }
+
+        private static List<Sam3dControllerSolution>
+            ParseSam3dPairControllers(
+                JSONClass subject,
+                string field,
+                bool genital)
+        {
+            if (subject == null || !subject.HasKey(field))
+            {
+                if (genital)
+                {
+                    return new List<Sam3dControllerSolution>();
+                }
+                throw new Exception(
+                    "A SAM3D pair subject has no controller set.");
+            }
+            JSONArray values = subject[field].AsArray;
+            if (values == null)
+            {
+                if (genital &&
+                    string.Equals(
+                        subject[field].ToString(),
+                        "null",
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    return new List<Sam3dControllerSolution>();
+                }
+                throw new Exception(
+                    field + " must be an array.");
+            }
+            if ((!genital &&
+                 values.Count != Sam3dControllerCount) ||
+                (genital &&
+                 values.Count > Sam3dMaximumGenitalControllerCount))
+            {
+                throw new Exception(
+                    genital
+                    ? "A SAM3D pair subject may contain at most four genital controllers."
+                    : "Each SAM3D pair subject must contain exactly 19 controllers.");
+            }
+            List<Sam3dControllerSolution> result =
+                new List<Sam3dControllerSolution>();
+            HashSet<string> seen = new HashSet<string>();
+            int index;
+            for (index = 0; index < values.Count; index++)
+            {
+                JSONClass value = values[index].AsObject;
+                string id =
+                    value == null
+                    ? ""
+                    : ((string)value["id"] ?? "").Trim();
+                bool allowed =
+                    genital
+                    ? IsSam3dGenitalControllerId(id)
+                    : IsSam3dControllerId(id);
+                if (!allowed || seen.Contains(id))
+                {
+                    throw new Exception(
+                        genital
+                        ? "A SAM3D pair subject contains an unknown or duplicate genital controller."
+                        : "A SAM3D pair subject contains an unknown or duplicate body controller.");
+                }
+                Sam3dControllerSolution controller =
+                    new Sam3dControllerSolution();
+                controller.Id = id;
+                controller.Enabled =
+                    genital ||
+                    !value.HasKey("enabled")
+                    ? true
+                    : ParseSam3dStrictBoolean(
+                        value["enabled"],
+                        id + " enabled");
+                if (!genital && !controller.Enabled)
+                {
+                    if (value.HasKey("position") ||
+                        value.HasKey("rotation"))
+                    {
+                        throw new Exception(
+                            id +
+                            " is disabled and must not contain " +
+                            "position or rotation.");
+                    }
+                    controller.Position = Vector3.zero;
+                    controller.Rotation = Quaternion.identity;
+                    controller.HasRotation = false;
+                    seen.Add(id);
+                    result.Add(controller);
+                    continue;
+                }
+                if (!value.HasKey("position"))
+                {
+                    throw new Exception(
+                        id + " position is required.");
+                }
+                controller.Position =
+                    ParseSam3dVector(
+                        value["position"],
+                        id + " position");
+                controller.HasRotation =
+                    !genital ||
+                    (value.HasKey("rotation") &&
+                     value["rotation"].AsArray != null);
+                if (controller.HasRotation)
+                {
+                    controller.Rotation =
+                        ParseSam3dQuaternion(
+                            value["rotation"],
+                            id + " rotation");
+                }
+                else
+                {
+                    controller.Rotation = Quaternion.identity;
+                }
+                seen.Add(id);
+                result.Add(controller);
+            }
+            return result;
+        }
+
+        private static Sam3dPairSolution LoadSam3dPairSolution(
+            BridgeRequest request)
+        {
+            string path =
+                Sam3dRoot + "\\" + request.Sam3dJobId + ".json";
+            if (!FileManagerSecure.FileExists(path))
+            {
+                throw new Exception(
+                    "The requested SAM3D pair solution is not available.");
+            }
+            string payload = FileManagerSecure.ReadAllText(path);
+            if (payload == null || payload.Length == 0 ||
+                payload.Length > 262144)
+            {
+                throw new Exception(
+                    "The SAM3D pair solution is empty or exceeds 256 KiB.");
+            }
+            if (!string.Equals(
+                    Sha256Ascii(payload),
+                    request.Sam3dSolutionSha256,
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                throw new Exception(
+                    "The SAM3D pair solution file digest no longer matches the request.");
+            }
+            JSONClass document = JSON.Parse(payload).AsObject;
+            if (document == null ||
+                document["schema"].AsInt !=
+                    Sam3dPairSolutionSchema)
+            {
+                throw new Exception(
+                    "The SAM3D pair solution schema is unsupported.");
+            }
+
+            Sam3dPairSolution solution =
+                new Sam3dPairSolution();
+            solution.JobId =
+                ((string)document["jobId"] ?? "")
+                .Trim()
+                .ToLowerInvariant();
+            solution.Revision =
+                ((string)document["revision"] ?? "")
+                .Trim()
+                .ToLowerInvariant();
+            if (!string.Equals(
+                    solution.JobId,
+                    request.Sam3dJobId,
+                    StringComparison.OrdinalIgnoreCase) ||
+                !string.Equals(
+                    solution.Revision,
+                    request.Sam3dRevision,
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                throw new Exception(
+                    "The SAM3D pair solution no longer matches the requested revision.");
+            }
+            if ((string)document["coordinateSpace"] !=
+                    Sam3dPairCoordinateSpace ||
+                (string)document["units"] != Sam3dPairUnits)
+            {
+                throw new Exception(
+                    "The SAM3D pair solution coordinate space or units are unsupported.");
+            }
+            ValidateSam3dPairCanonicalAxes(document);
+            solution.PrimarySubjectIndex =
+                document["primarySubjectIndex"].AsInt;
+            if (solution.PrimarySubjectIndex < 0 ||
+                solution.PrimarySubjectIndex >=
+                    Sam3dPairSubjectCount)
+            {
+                throw new Exception(
+                    "primarySubjectIndex must identify one of the two subjects.");
+            }
+
+            JSONArray subjects = document["subjects"].AsArray;
+            if (subjects == null ||
+                subjects.Count != Sam3dPairSubjectCount)
+            {
+                throw new Exception(
+                    "The SAM3D pair solution must contain exactly two subjects.");
+            }
+            solution.Subjects =
+                new List<Sam3dPairSubjectSolution>();
+            HashSet<string> targetUids =
+                new HashSet<string>();
+            HashSet<int> personIndexes =
+                new HashSet<int>();
+            int subjectIndex;
+            for (subjectIndex = 0;
+                 subjectIndex < subjects.Count;
+                 subjectIndex++)
+            {
+                JSONClass value =
+                    subjects[subjectIndex].AsObject;
+                if (value == null ||
+                    !value.HasKey("personIndex"))
+                {
+                    throw new Exception(
+                        "Each SAM3D pair subject requires a personIndex.");
+                }
+                Sam3dPairSubjectSolution subject =
+                    new Sam3dPairSubjectSolution();
+                subject.TargetUid =
+                    ((string)value["targetUid"] ?? "").Trim();
+                string targetError =
+                    ValidateTargetUid(subject.TargetUid);
+                if (targetError.Length != 0)
+                {
+                    throw new Exception(
+                        "subject targetUid " + targetError);
+                }
+                subject.PersonIndex =
+                    value["personIndex"].AsInt;
+                if (subject.PersonIndex < 0 ||
+                    subject.PersonIndex >=
+                        Sam3dMaximumDetectedPersonCount)
+                {
+                    throw new Exception(
+                        "subject personIndex must be between 0 and 31.");
+                }
+                if (targetUids.Contains(subject.TargetUid) ||
+                    personIndexes.Contains(subject.PersonIndex))
+                {
+                    throw new Exception(
+                        "SAM3D pair subjects must have unique target UIDs and person indices.");
+                }
+                targetUids.Add(subject.TargetUid);
+                personIndexes.Add(subject.PersonIndex);
+                subject.CameraFromHip =
+                    ParseSam3dVector(
+                        value["cameraFromHip"],
+                        "subject cameraFromHip");
+                subject.Controllers =
+                    ParseSam3dPairControllers(
+                        value,
+                        "controllers",
+                        false);
+                subject.Genitals =
+                    ParseSam3dPairControllers(
+                        value,
+                        "genitals",
+                        true);
+                solution.Subjects.Add(subject);
+            }
+            solution.Camera =
+                ParseSam3dPairCamera(
+                    document["camera"].AsObject,
+                    solution.JobId);
+            if (!Sam3dPairCameraPositionsMatch(
+                    solution.Subjects[
+                        solution.PrimarySubjectIndex]
+                    .CameraFromHip,
+                    solution.Camera.Position))
+            {
+                throw new Exception(
+                    "The primary subject cameraFromHip must match " +
+                    "the shared camera position.");
             }
             return solution;
         }
@@ -5135,6 +5692,170 @@ namespace VAMPip
             return result;
         }
 
+        private static Dictionary<string, FreeControllerV3>
+            Sam3dPairPersonControllers(Atom person)
+        {
+            Dictionary<string, FreeControllerV3> result =
+                Sam3dPersonControllers(person);
+            FreeControllerV3[] controllers =
+                person.GetComponentsInChildren<FreeControllerV3>(true);
+            int index;
+            for (index = 0; index < controllers.Length; index++)
+            {
+                FreeControllerV3 controller = controllers[index];
+                if (controller != null &&
+                    IsSam3dGenitalControllerId(controller.name) &&
+                    !result.ContainsKey(controller.name))
+                {
+                    result.Add(controller.name, controller);
+                }
+            }
+            return result;
+        }
+
+        private static Sam3dControllerUndo
+            SnapshotSam3dControllerState(
+                FreeControllerV3 controller,
+                string label)
+        {
+            if (controller == null ||
+                controller.control == null)
+            {
+                throw new Exception(
+                    label +
+                    " has no authoritative control transform.");
+            }
+            Sam3dControllerUndo saved =
+                new Sam3dControllerUndo();
+            saved.Controller = controller;
+            saved.Position = controller.control.position;
+            saved.Rotation = controller.control.rotation;
+            saved.PositionState =
+                controller.currentPositionState;
+            saved.RotationState =
+                controller.currentRotationState;
+            saved.PhysicsEnabled = controller.physicsEnabled;
+            saved.PhysicalBody = controller.followWhenOffRB;
+            saved.PhysicalBodyWasPresent =
+                !object.ReferenceEquals(
+                    saved.PhysicalBody,
+                    null);
+            if (saved.PhysicalBodyWasPresent)
+            {
+                if (saved.PhysicalBody == null)
+                {
+                    throw new Exception(
+                        label +
+                        " has a destroyed physical body.");
+                }
+                saved.PhysicalBodyKinematic =
+                    saved.PhysicalBody.isKinematic;
+            }
+            return saved;
+        }
+
+        private static void AddSam3dPairSavedControllers(
+            Sam3dPairPersonUndo savedPerson,
+            List<Sam3dControllerSolution> targets,
+            Dictionary<string, FreeControllerV3> controllers)
+        {
+            int index;
+            for (index = 0; index < targets.Count; index++)
+            {
+                Sam3dControllerSolution target = targets[index];
+                FreeControllerV3 controller;
+                if (!controllers.TryGetValue(
+                        target.Id,
+                        out controller) ||
+                    controller == null)
+                {
+                    throw new Exception(
+                        "Person is missing required controller " +
+                        target.Id +
+                        ".");
+                }
+                savedPerson.Controllers.Add(
+                    SnapshotSam3dControllerState(
+                        controller,
+                        "Person controller " + target.Id));
+            }
+        }
+
+        private static Sam3dUndoSnapshot SnapshotSam3dPairState(
+            BridgeRequest request,
+            Sam3dPairSolution solution,
+            List<Sam3dPairSubjectRuntime> subjects,
+            Atom camera,
+            MVRScript renderer)
+        {
+            Sam3dPairSubjectRuntime primary =
+                subjects[solution.PrimarySubjectIndex];
+            Sam3dSolution primarySnapshotSolution =
+                new Sam3dSolution();
+            primarySnapshotSolution.JobId = solution.JobId;
+            primarySnapshotSolution.Revision = solution.Revision;
+            primarySnapshotSolution.Controllers =
+                primary.Solution.Controllers;
+            primarySnapshotSolution.Camera = solution.Camera;
+            Sam3dUndoSnapshot snapshot =
+                SnapshotSam3dState(
+                    request,
+                    primarySnapshotSolution,
+                    primary.Person,
+                    camera,
+                    renderer,
+                    primary.Controllers,
+                    null,
+                    false,
+                    null);
+            snapshot.TargetUid =
+                primary.Solution.TargetUid;
+            snapshot.PairPersons =
+                new List<Sam3dPairPersonUndo>();
+
+            int subjectIndex;
+            for (subjectIndex = 0;
+                 subjectIndex < subjects.Count;
+                 subjectIndex++)
+            {
+                Sam3dPairSubjectRuntime runtime =
+                    subjects[subjectIndex];
+                Sam3dPairPersonUndo savedPerson =
+                    new Sam3dPairPersonUndo();
+                savedPerson.TargetUid =
+                    runtime.Solution.TargetUid;
+                savedPerson.PersonIndex =
+                    runtime.Solution.PersonIndex;
+                savedPerson.Person = runtime.Person;
+                savedPerson.PersonCollisionEnabled =
+                    runtime.Person.collisionEnabled;
+                savedPerson.ExpectedControllerCount =
+                    Sam3dControllerCount +
+                    runtime.Solution.Genitals.Count;
+                savedPerson.Controllers =
+                    new List<Sam3dControllerUndo>();
+                if (subjectIndex ==
+                    solution.PrimarySubjectIndex)
+                {
+                    savedPerson.Controllers.AddRange(
+                        snapshot.Controllers);
+                }
+                else
+                {
+                    AddSam3dPairSavedControllers(
+                        savedPerson,
+                        runtime.Solution.Controllers,
+                        runtime.Controllers);
+                }
+                AddSam3dPairSavedControllers(
+                    savedPerson,
+                    runtime.Solution.Genitals,
+                    runtime.Controllers);
+                snapshot.PairPersons.Add(savedPerson);
+            }
+            return snapshot;
+        }
+
         private static Sam3dUndoSnapshot SnapshotSam3dState(
             BridgeRequest request,
             Sam3dSolution solution,
@@ -5281,6 +6002,12 @@ namespace VAMPip
         private static void BeginSam3dPoseTransaction(
             Sam3dUndoSnapshot snapshot)
         {
+            if (snapshot != null &&
+                snapshot.PairPersons != null)
+            {
+                BeginSam3dPairPoseTransaction(snapshot);
+                return;
+            }
             if (snapshot == null ||
                 snapshot.Person == null)
             {
@@ -5297,6 +6024,121 @@ namespace VAMPip
                 FinishSam3dPoseTransaction(
                     snapshot,
                     "Cancel VAM-PIP SAM3D pose",
+                    false);
+                throw;
+            }
+        }
+
+        private static void ValidateSam3dPairSavedPhysics(
+            Sam3dUndoSnapshot snapshot)
+        {
+            if (snapshot == null ||
+                snapshot.PairPersons == null ||
+                snapshot.PairPersons.Count !=
+                    Sam3dPairSubjectCount)
+            {
+                throw new Exception(
+                    "The saved SAM3D pair Person set is incomplete.");
+            }
+            HashSet<FreeControllerV3> seen =
+                new HashSet<FreeControllerV3>();
+            int personIndex;
+            for (personIndex = 0;
+                 personIndex < snapshot.PairPersons.Count;
+                 personIndex++)
+            {
+                Sam3dPairPersonUndo savedPerson =
+                    snapshot.PairPersons[personIndex];
+                if (savedPerson == null ||
+                    savedPerson.Person == null ||
+                    savedPerson.Controllers == null ||
+                    savedPerson.Controllers.Count !=
+                        savedPerson.ExpectedControllerCount)
+                {
+                    throw new Exception(
+                        "A saved SAM3D pair Person is incomplete.");
+                }
+                int controllerIndex;
+                for (controllerIndex = 0;
+                     controllerIndex <
+                        savedPerson.Controllers.Count;
+                     controllerIndex++)
+                {
+                    Sam3dControllerUndo saved =
+                        savedPerson.Controllers[controllerIndex];
+                    if (saved == null ||
+                        saved.Controller == null ||
+                        seen.Contains(saved.Controller) ||
+                        !IsSam3dSavedPhysicalBodyAvailable(
+                            saved.PhysicalBodyWasPresent,
+                            saved.PhysicalBody) ||
+                        !object.ReferenceEquals(
+                            saved.Controller.followWhenOffRB,
+                            saved.PhysicalBody))
+                    {
+                        throw new Exception(
+                            "A saved SAM3D pair controller is no longer available.");
+                    }
+                    seen.Add(saved.Controller);
+                }
+            }
+            if (snapshot.CameraController == null ||
+                !IsSam3dSavedPhysicalBodyAvailable(
+                    snapshot.CameraPhysicalBodyWasPresent,
+                    snapshot.CameraPhysicalBody) ||
+                !object.ReferenceEquals(
+                    snapshot.CameraController.followWhenOffRB,
+                    snapshot.CameraPhysicalBody))
+            {
+                throw new Exception(
+                    "The saved SAM3D pair camera is no longer available.");
+            }
+        }
+
+        private static void LockSam3dPairSavedPhysics(
+            Sam3dUndoSnapshot snapshot)
+        {
+            ValidateSam3dPairSavedPhysics(snapshot);
+            int personIndex;
+            for (personIndex = 0;
+                 personIndex < snapshot.PairPersons.Count;
+                 personIndex++)
+            {
+                List<Sam3dControllerUndo> controllers =
+                    snapshot.PairPersons[personIndex].Controllers;
+                int controllerIndex;
+                for (controllerIndex = 0;
+                     controllerIndex < controllers.Count;
+                     controllerIndex++)
+                {
+                    LockSam3dControllerPhysics(
+                        controllers[controllerIndex]);
+                }
+            }
+            LockSam3dCameraPhysics(snapshot);
+        }
+
+        private static void BeginSam3dPairPoseTransaction(
+            Sam3dUndoSnapshot snapshot)
+        {
+            ValidateSam3dPairSavedPhysics(snapshot);
+            int index;
+            for (index = 0;
+                 index < snapshot.PairPersons.Count;
+                 index++)
+            {
+                snapshot.PairPersons[index]
+                    .Person.collisionEnabled = false;
+            }
+            try
+            {
+                LockSam3dPairSavedPhysics(snapshot);
+            }
+            catch
+            {
+                FinishSam3dPairPoseTransaction(
+                    snapshot,
+                    "Cancel VAM-PIP SAM3D pair pose",
                     false);
                 throw;
             }
@@ -5405,6 +6247,13 @@ namespace VAMPip
         private static void ReassertSam3dPersistentPoseLock(
             Sam3dUndoSnapshot snapshot)
         {
+            if (snapshot != null &&
+                snapshot.PairPersons != null)
+            {
+                ReassertSam3dPairPersistentPoseLock(
+                    snapshot);
+                return;
+            }
             ValidateSam3dSavedPhysics(snapshot);
             int index;
             for (index = 0;
@@ -5426,6 +6275,39 @@ namespace VAMPip
                 snapshot.CameraController);
         }
 
+        private static void ReassertSam3dPairPersistentPoseLock(
+            Sam3dUndoSnapshot snapshot)
+        {
+            ValidateSam3dPairSavedPhysics(snapshot);
+            int personIndex;
+            for (personIndex = 0;
+                 personIndex < snapshot.PairPersons.Count;
+                 personIndex++)
+            {
+                Sam3dPairPersonUndo savedPerson =
+                    snapshot.PairPersons[personIndex];
+                int controllerIndex;
+                for (controllerIndex = 0;
+                     controllerIndex <
+                        savedPerson.Controllers.Count;
+                     controllerIndex++)
+                {
+                    Sam3dControllerUndo saved =
+                        savedPerson.Controllers[controllerIndex];
+                    if (savedPerson.PersistentHeadLockActive &&
+                        IsSam3dPersistentHoldController(saved))
+                    {
+                        LockSam3dControllerPhysics(saved);
+                        SnapSam3dControllerPhysicalPose(
+                            saved.Controller);
+                    }
+                }
+            }
+            LockSam3dCameraPhysics(snapshot);
+            SnapSam3dControllerPhysicalPose(
+                snapshot.CameraController);
+        }
+
         private static bool IsSam3dSavedPhysicalBodyAvailable(
             bool wasPresent,
             Rigidbody body)
@@ -5438,6 +6320,12 @@ namespace VAMPip
         private static void CommitSam3dPoseLock(
             Sam3dUndoSnapshot snapshot)
         {
+            if (snapshot != null &&
+                snapshot.PairPersons != null)
+            {
+                CommitSam3dPairPoseLock(snapshot);
+                return;
+            }
             try
             {
                 ValidateSam3dSavedPhysics(snapshot);
@@ -5475,10 +6363,80 @@ namespace VAMPip
             }
         }
 
+        private static void CommitSam3dPairPoseLock(
+            Sam3dUndoSnapshot snapshot)
+        {
+            try
+            {
+                ValidateSam3dPairSavedPhysics(snapshot);
+                int personIndex;
+                for (personIndex = 0;
+                     personIndex < snapshot.PairPersons.Count;
+                     personIndex++)
+                {
+                    List<Sam3dControllerUndo> controllers =
+                        snapshot.PairPersons[personIndex]
+                        .Controllers;
+                    int controllerIndex;
+                    for (controllerIndex = 0;
+                         controllerIndex < controllers.Count;
+                         controllerIndex++)
+                    {
+                        RestoreSam3dControllerPhysics(
+                            controllers[controllerIndex]);
+                    }
+                }
+                LockSam3dCameraPhysics(snapshot);
+            }
+            finally
+            {
+                try
+                {
+                    if (snapshot == null ||
+                        snapshot.PairPersons == null)
+                    {
+                        throw new Exception(
+                            "The saved SAM3D pair is no longer available.");
+                    }
+                    int index;
+                    for (index = 0;
+                         index < snapshot.PairPersons.Count;
+                         index++)
+                    {
+                        Sam3dPairPersonUndo savedPerson =
+                            snapshot.PairPersons[index];
+                        if (savedPerson == null ||
+                            savedPerson.Person == null)
+                        {
+                            throw new Exception(
+                                "A saved SAM3D pair Person is no longer available.");
+                        }
+                        savedPerson.Person.collisionEnabled =
+                            savedPerson.PersonCollisionEnabled;
+                    }
+                }
+                finally
+                {
+                    SuperController.singleton.ResetSimulation(
+                        Sam3dPhysicsResetFrames,
+                        "Lock VAM-PIP SAM3D pair pose",
+                        true);
+                }
+            }
+        }
+
         private static void RestoreSam3dSavedPhysicsAndCollision(
             Sam3dUndoSnapshot snapshot,
             bool cameraRemovedByUndo)
         {
+            if (snapshot != null &&
+                snapshot.PairPersons != null)
+            {
+                RestoreSam3dPairSavedPhysicsAndCollision(
+                    snapshot,
+                    cameraRemovedByUndo);
+                return;
+            }
             if (snapshot == null)
             {
                 throw new Exception(
@@ -5632,6 +6590,152 @@ namespace VAMPip
             }
         }
 
+        private static void RestoreSam3dPairSavedPhysicsAndCollision(
+            Sam3dUndoSnapshot snapshot,
+            bool cameraRemovedByUndo)
+        {
+            if (snapshot == null ||
+                snapshot.PairPersons == null)
+            {
+                throw new Exception(
+                    "No SAM3D pair undo snapshot is available.");
+            }
+            Exception restoreError = null;
+            int personIndex;
+            for (personIndex = 0;
+                 personIndex < snapshot.PairPersons.Count;
+                 personIndex++)
+            {
+                Sam3dPairPersonUndo savedPerson =
+                    snapshot.PairPersons[personIndex];
+                if (savedPerson == null ||
+                    savedPerson.Controllers == null)
+                {
+                    if (restoreError == null)
+                    {
+                        restoreError = new Exception(
+                            "A saved SAM3D pair Person is unavailable.");
+                    }
+                    continue;
+                }
+                int controllerIndex;
+                for (controllerIndex = 0;
+                     controllerIndex <
+                        savedPerson.Controllers.Count;
+                     controllerIndex++)
+                {
+                    Sam3dControllerUndo saved =
+                        savedPerson.Controllers[controllerIndex];
+                    try
+                    {
+                        if (saved == null ||
+                            saved.Controller == null ||
+                            !IsSam3dSavedPhysicalBodyAvailable(
+                                saved.PhysicalBodyWasPresent,
+                                saved.PhysicalBody) ||
+                            !object.ReferenceEquals(
+                                saved.Controller.followWhenOffRB,
+                                saved.PhysicalBody))
+                        {
+                            throw new Exception(
+                                "A saved SAM3D pair controller is no longer available.");
+                        }
+                        saved.Controller.physicsEnabled =
+                            saved.PhysicsEnabled;
+                        if (saved.PhysicalBodyWasPresent)
+                        {
+                            saved.PhysicalBody.isKinematic =
+                                saved.PhysicalBodyKinematic;
+                        }
+                    }
+                    catch (Exception exception)
+                    {
+                        if (restoreError == null)
+                        {
+                            restoreError = exception;
+                        }
+                    }
+                }
+                try
+                {
+                    if (savedPerson.Person == null)
+                    {
+                        throw new Exception(
+                            "A saved SAM3D pair Person is no longer available.");
+                    }
+                    savedPerson.Person.collisionEnabled =
+                        savedPerson.PersonCollisionEnabled;
+                }
+                catch (Exception exception)
+                {
+                    if (restoreError == null)
+                    {
+                        restoreError = exception;
+                    }
+                }
+            }
+
+            bool cameraControllerAvailable =
+                snapshot.CameraController != null;
+            bool cameraPhysicalBodyAvailable =
+                IsSam3dSavedPhysicalBodyAvailable(
+                    snapshot.CameraPhysicalBodyWasPresent,
+                    snapshot.CameraPhysicalBody);
+            try
+            {
+                if (cameraControllerAvailable &&
+                    cameraPhysicalBodyAvailable &&
+                    object.ReferenceEquals(
+                        snapshot.CameraController.followWhenOffRB,
+                        snapshot.CameraPhysicalBody))
+                {
+                    snapshot.CameraController.physicsEnabled =
+                        snapshot.CameraPhysicsEnabled;
+                    if (snapshot.CameraPhysicalBodyWasPresent)
+                    {
+                        snapshot.CameraPhysicalBody.isKinematic =
+                            snapshot.CameraPhysicalBodyKinematic;
+                    }
+                }
+                else if (!cameraRemovedByUndo)
+                {
+                    throw new Exception(
+                        "The saved SAM3D pair camera is no longer available.");
+                }
+            }
+            catch (Exception exception)
+            {
+                if (restoreError == null)
+                {
+                    restoreError = exception;
+                }
+            }
+            if (restoreError != null)
+            {
+                throw restoreError;
+            }
+        }
+
+        private static void FinishSam3dPairPoseTransaction(
+            Sam3dUndoSnapshot snapshot,
+            string reason,
+            bool cameraRemovedByUndo)
+        {
+            try
+            {
+                RestoreSam3dPairSavedPhysicsAndCollision(
+                    snapshot,
+                    cameraRemovedByUndo);
+            }
+            finally
+            {
+                SuperController.singleton.ResetSimulation(
+                    Sam3dPhysicsResetFrames,
+                    reason,
+                    true);
+            }
+        }
+
         private static void FinishSam3dPoseTransaction(
             Sam3dUndoSnapshot snapshot,
             string reason,
@@ -5659,6 +6763,11 @@ namespace VAMPip
             {
                 throw new Exception("No SAM3D undo snapshot is available.");
             }
+            if (snapshot.PairPersons != null)
+            {
+                RestoreSam3dPairSnapshot(snapshot);
+                return;
+            }
             bool cameraRemovedByUndo = false;
             BeginSam3dPoseTransaction(snapshot);
             try
@@ -5679,6 +6788,391 @@ namespace VAMPip
                     "Restore VAM-PIP SAM3D pose",
                     cameraRemovedByUndo);
             }
+        }
+
+        private void RestoreSam3dPairSnapshot(
+            Sam3dUndoSnapshot snapshot)
+        {
+            bool cameraRemovedByUndo = false;
+            List<string> restoreErrors =
+                new List<string>();
+            BeginSam3dPairRestoreTransactionBestEffort(
+                snapshot,
+                restoreErrors);
+            try
+            {
+                RestoreSam3dPairSnapshotContents(
+                    snapshot,
+                    out cameraRemovedByUndo,
+                    restoreErrors);
+                if (snapshot.Reference != null)
+                {
+                    _sam3dReferenceState =
+                        CloneSam3dReferenceState(
+                            snapshot.PreviousReferenceState);
+                }
+            }
+            catch (Exception exception)
+            {
+                AddSam3dRestoreError(
+                    restoreErrors,
+                    "pair snapshot",
+                    exception);
+            }
+            try
+            {
+                FinishSam3dPairPoseTransaction(
+                    snapshot,
+                    "Restore VAM-PIP SAM3D pair pose",
+                    cameraRemovedByUndo);
+            }
+            catch (Exception exception)
+            {
+                AddSam3dRestoreError(
+                    restoreErrors,
+                    "pair physics and collision state",
+                    exception);
+            }
+            ThrowSam3dRestoreErrors(restoreErrors);
+        }
+
+        private static void RestoreSam3dSavedControllerTransform(
+            Sam3dControllerUndo saved)
+        {
+            if (saved == null ||
+                saved.Controller == null ||
+                saved.Controller.control == null)
+            {
+                throw new Exception(
+                    "A saved Person controller is no longer available.");
+            }
+            saved.Controller.currentPositionState =
+                saved.PositionState;
+            saved.Controller.currentRotationState =
+                saved.RotationState;
+            saved.Controller.control.position = saved.Position;
+            saved.Controller.control.rotation = saved.Rotation;
+            if (saved.Controller.onPositionChangeHandlers != null)
+            {
+                saved.Controller.onPositionChangeHandlers(
+                    saved.Controller);
+            }
+            if (saved.PositionState ==
+                    FreeControllerV3.PositionState.Comply ||
+                saved.RotationState ==
+                    FreeControllerV3.RotationState.Comply)
+            {
+                saved.Controller.PauseComply();
+            }
+        }
+
+        private static void AddSam3dRestoreError(
+            List<string> restoreErrors,
+            string scope,
+            Exception exception)
+        {
+            restoreErrors.Add(
+                scope + ": " + DescribeException(exception));
+        }
+
+        private static void ThrowSam3dRestoreErrors(
+            List<string> restoreErrors)
+        {
+            if (restoreErrors.Count == 0)
+            {
+                return;
+            }
+            throw new Exception(
+                "SAM3D rollback was incomplete: " +
+                string.Join(
+                    " | ",
+                    restoreErrors.ToArray()));
+        }
+
+        private static string Sam3dPairControllerRestoreScope(
+            Sam3dPairPersonUndo savedPerson,
+            Sam3dControllerUndo saved,
+            int controllerIndex,
+            string operation)
+        {
+            string targetUid =
+                savedPerson == null
+                ? "<missing Person>"
+                : savedPerson.TargetUid ?? "<unknown Person>";
+            string controllerId =
+                saved == null || saved.Controller == null
+                ? "controller #" + controllerIndex
+                : saved.Controller.name;
+            return
+                "Person " +
+                targetUid +
+                " " +
+                controllerId +
+                " " +
+                operation;
+        }
+
+        private static void BeginSam3dPairRestoreTransactionBestEffort(
+            Sam3dUndoSnapshot snapshot,
+            List<string> restoreErrors)
+        {
+            if (snapshot == null ||
+                snapshot.PairPersons == null)
+            {
+                AddSam3dRestoreError(
+                    restoreErrors,
+                    "pair transaction",
+                    new Exception(
+                        "The saved SAM3D pair is unavailable."));
+                return;
+            }
+            int personIndex;
+            for (personIndex = 0;
+                 personIndex < snapshot.PairPersons.Count;
+                 personIndex++)
+            {
+                Sam3dPairPersonUndo savedPerson =
+                    snapshot.PairPersons[personIndex];
+                if (savedPerson == null)
+                {
+                    AddSam3dRestoreError(
+                        restoreErrors,
+                        "pair Person #" + personIndex,
+                        new Exception(
+                            "The saved Person is unavailable."));
+                    continue;
+                }
+                try
+                {
+                    if (savedPerson.Person == null)
+                    {
+                        throw new Exception(
+                            "The saved Person is no longer available.");
+                    }
+                    savedPerson.Person.collisionEnabled =
+                        false;
+                }
+                catch (Exception exception)
+                {
+                    AddSam3dRestoreError(
+                        restoreErrors,
+                        "Person " +
+                        (savedPerson.TargetUid ??
+                         "<unknown Person>") +
+                        " collision lock",
+                        exception);
+                }
+                if (savedPerson.Controllers == null)
+                {
+                    AddSam3dRestoreError(
+                        restoreErrors,
+                        "Person " +
+                        (savedPerson.TargetUid ??
+                         "<unknown Person>"),
+                        new Exception(
+                            "The saved controller set is unavailable."));
+                    continue;
+                }
+                int controllerIndex;
+                for (controllerIndex = 0;
+                     controllerIndex <
+                        savedPerson.Controllers.Count;
+                     controllerIndex++)
+                {
+                    Sam3dControllerUndo saved =
+                        savedPerson.Controllers[
+                            controllerIndex];
+                    try
+                    {
+                        if (saved == null ||
+                            saved.Controller == null ||
+                            !IsSam3dSavedPhysicalBodyAvailable(
+                                saved.PhysicalBodyWasPresent,
+                                saved.PhysicalBody) ||
+                            !object.ReferenceEquals(
+                                saved.Controller.followWhenOffRB,
+                                saved.PhysicalBody))
+                        {
+                            throw new Exception(
+                                "The saved controller is no longer available.");
+                        }
+                        LockSam3dControllerPhysics(saved);
+                    }
+                    catch (Exception exception)
+                    {
+                        AddSam3dRestoreError(
+                            restoreErrors,
+                            Sam3dPairControllerRestoreScope(
+                                savedPerson,
+                                saved,
+                                controllerIndex,
+                                "physics lock"),
+                            exception);
+                    }
+                }
+            }
+            try
+            {
+                if (snapshot.CameraController == null ||
+                    !IsSam3dSavedPhysicalBodyAvailable(
+                        snapshot.CameraPhysicalBodyWasPresent,
+                        snapshot.CameraPhysicalBody) ||
+                    !object.ReferenceEquals(
+                        snapshot.CameraController.followWhenOffRB,
+                        snapshot.CameraPhysicalBody))
+                {
+                    throw new Exception(
+                        "The saved camera is no longer available.");
+                }
+                LockSam3dCameraPhysics(snapshot);
+            }
+            catch (Exception exception)
+            {
+                AddSam3dRestoreError(
+                    restoreErrors,
+                    "camera physics lock",
+                    exception);
+            }
+        }
+
+        private static void RestoreSam3dPairSnapshotContents(
+            Sam3dUndoSnapshot snapshot,
+            out bool cameraRemovedByUndo,
+            List<string> restoreErrors)
+        {
+            cameraRemovedByUndo = false;
+            if (snapshot == null)
+            {
+                AddSam3dRestoreError(
+                    restoreErrors,
+                    "pair snapshot",
+                    new Exception(
+                        "No SAM3D pair undo snapshot is available."));
+                return;
+            }
+
+            List<Sam3dPairPersonUndo> savedPersons =
+                snapshot.PairPersons;
+            if (savedPersons == null)
+            {
+                AddSam3dRestoreError(
+                    restoreErrors,
+                    "pair Person set",
+                    new Exception(
+                        "The saved SAM3D pair Person set is unavailable."));
+            }
+            else
+            {
+                if (savedPersons.Count !=
+                    Sam3dPairSubjectCount)
+                {
+                    AddSam3dRestoreError(
+                        restoreErrors,
+                        "pair Person set",
+                        new Exception(
+                            "The saved SAM3D pair Person set is incomplete."));
+                }
+                int personIndex;
+                for (personIndex = 0;
+                     personIndex < savedPersons.Count;
+                     personIndex++)
+                {
+                    Sam3dPairPersonUndo savedPerson =
+                        savedPersons[personIndex];
+                    if (savedPerson == null ||
+                        savedPerson.Controllers == null)
+                    {
+                        AddSam3dRestoreError(
+                            restoreErrors,
+                            "pair Person #" + personIndex,
+                            new Exception(
+                                "The saved controller set is unavailable."));
+                        continue;
+                    }
+                    if (savedPerson.Controllers.Count !=
+                        savedPerson.ExpectedControllerCount)
+                    {
+                        AddSam3dRestoreError(
+                            restoreErrors,
+                            "Person " +
+                            (savedPerson.TargetUid ??
+                             "<unknown Person>"),
+                            new Exception(
+                                "The saved controller set is incomplete."));
+                    }
+                    int controllerIndex;
+                    for (controllerIndex = 0;
+                         controllerIndex <
+                            savedPerson.Controllers.Count;
+                         controllerIndex++)
+                    {
+                        Sam3dControllerUndo saved =
+                            savedPerson.Controllers[
+                                controllerIndex];
+                        try
+                        {
+                            RestoreSam3dSavedControllerTransform(
+                                saved);
+                        }
+                        catch (Exception exception)
+                        {
+                            AddSam3dRestoreError(
+                                restoreErrors,
+                                Sam3dPairControllerRestoreScope(
+                                    savedPerson,
+                                    saved,
+                                    controllerIndex,
+                                    "transform"),
+                                exception);
+                        }
+                    }
+                }
+                for (personIndex = 0;
+                     personIndex < savedPersons.Count;
+                     personIndex++)
+                {
+                    Sam3dPairPersonUndo savedPerson =
+                        savedPersons[personIndex];
+                    if (savedPerson == null ||
+                        savedPerson.Controllers == null)
+                    {
+                        continue;
+                    }
+                    int controllerIndex;
+                    for (controllerIndex = 0;
+                         controllerIndex <
+                            savedPerson.Controllers.Count;
+                         controllerIndex++)
+                    {
+                        Sam3dControllerUndo saved =
+                            savedPerson.Controllers[
+                                controllerIndex];
+                        try
+                        {
+                            SnapSam3dControllerPhysicalPose(
+                                saved == null
+                                ? null
+                                : saved.Controller);
+                        }
+                        catch (Exception exception)
+                        {
+                            AddSam3dRestoreError(
+                                restoreErrors,
+                                Sam3dPairControllerRestoreScope(
+                                    savedPerson,
+                                    saved,
+                                    controllerIndex,
+                                    "physical pose"),
+                                exception);
+                        }
+                    }
+                }
+            }
+
+            cameraRemovedByUndo =
+                RestoreSam3dSharedSnapshotContents(
+                    snapshot,
+                    restoreErrors);
         }
 
         private static bool RestoreSam3dSnapshotContents(
@@ -5723,91 +7217,246 @@ namespace VAMPip
                 SnapSam3dControllerPhysicalPose(
                     snapshot.Controllers[index].Controller);
             }
+            List<string> restoreErrors =
+                new List<string>();
+            bool cameraRemovedByUndo =
+                RestoreSam3dSharedSnapshotContents(
+                    snapshot,
+                    restoreErrors);
+            ThrowSam3dRestoreErrors(restoreErrors);
+            return cameraRemovedByUndo;
+        }
+
+        private static bool RestoreSam3dSharedSnapshotContents(
+            Sam3dUndoSnapshot snapshot,
+            List<string> restoreErrors)
+        {
             if (snapshot.Reference != null)
             {
-                RestoreSam3dReferenceSnapshot(
-                    snapshot.Reference);
+                try
+                {
+                    RestoreSam3dReferenceSnapshot(
+                        snapshot.Reference);
+                }
+                catch (Exception exception)
+                {
+                    AddSam3dRestoreError(
+                        restoreErrors,
+                        "reference",
+                        exception);
+                }
             }
             if (snapshot.CameraCreated)
             {
-                Atom createdCamera =
-                    SuperController.singleton.GetAtomByUid(
-                        snapshot.CameraUid);
-                if (createdCamera == null ||
-                    createdCamera.type != "Empty" ||
-                    !object.ReferenceEquals(
-                        createdCamera.mainController,
-                        snapshot.CameraController) ||
-                    !object.ReferenceEquals(
-                        FindSam3dRenderer(createdCamera),
-                        snapshot.Renderer))
+                try
+                {
+                    Atom createdCamera =
+                        SuperController.singleton.GetAtomByUid(
+                            snapshot.CameraUid);
+                    if (createdCamera == null ||
+                        createdCamera.type != "Empty" ||
+                        !object.ReferenceEquals(
+                            createdCamera.mainController,
+                            snapshot.CameraController) ||
+                        !object.ReferenceEquals(
+                            FindSam3dRenderer(createdCamera),
+                            snapshot.Renderer))
+                    {
+                        throw new Exception(
+                            "The generated SAM3D camera is no longer available.");
+                    }
+                    SuperController.singleton.RemoveAtom(createdCamera);
+                    return true;
+                }
+                catch (Exception exception)
+                {
+                    AddSam3dRestoreError(
+                        restoreErrors,
+                        "generated camera removal",
+                        exception);
+                }
+            }
+
+            try
+            {
+                if (snapshot.CameraController == null ||
+                    snapshot.CameraController.control == null)
                 {
                     throw new Exception(
-                        "The generated SAM3D camera is no longer available.");
+                        "The saved SAM3D camera controller is no longer available.");
                 }
-                SuperController.singleton.RemoveAtom(createdCamera);
-                return true;
-            }
-            if (snapshot.CameraController == null ||
-                snapshot.CameraController.control == null ||
-                snapshot.Renderer == null)
-            {
-                throw new Exception(
-                    "The saved SAM3D camera is no longer available.");
-            }
-            snapshot.CameraController.currentPositionState =
-                snapshot.CameraPositionState;
-            snapshot.CameraController.currentRotationState =
-                snapshot.CameraRotationState;
-            snapshot.CameraController.control.position =
-                snapshot.CameraPosition;
-            snapshot.CameraController.control.rotation =
-                snapshot.CameraRotation;
-            if (snapshot.CameraController.onPositionChangeHandlers != null)
-            {
-                snapshot.CameraController.onPositionChangeHandlers(
-                    snapshot.CameraController);
-            }
-            if (snapshot.CameraController.followWhenOff != null)
-            {
-                snapshot.CameraController.followWhenOff.position =
+                snapshot.CameraController.currentPositionState =
+                    snapshot.CameraPositionState;
+                snapshot.CameraController.currentRotationState =
+                    snapshot.CameraRotationState;
+                snapshot.CameraController.control.position =
                     snapshot.CameraPosition;
-                snapshot.CameraController.followWhenOff.rotation =
+                snapshot.CameraController.control.rotation =
                     snapshot.CameraRotation;
+                if (snapshot.CameraController
+                        .onPositionChangeHandlers != null)
+                {
+                    snapshot.CameraController
+                        .onPositionChangeHandlers(
+                            snapshot.CameraController);
+                }
+                if (snapshot.CameraPositionState ==
+                        FreeControllerV3.PositionState.Comply ||
+                    snapshot.CameraRotationState ==
+                        FreeControllerV3.RotationState.Comply)
+                {
+                    snapshot.CameraController.PauseComply();
+                }
             }
-            if (snapshot.CameraPositionState ==
-                    FreeControllerV3.PositionState.Comply ||
-                snapshot.CameraRotationState ==
-                    FreeControllerV3.RotationState.Comply)
+            catch (Exception exception)
             {
-                snapshot.CameraController.PauseComply();
+                AddSam3dRestoreError(
+                    restoreErrors,
+                    "camera controller transform",
+                    exception);
             }
-            snapshot.Renderer.GetFloatJSONParam(
-                "Flat Horizontal FOV").val =
-                snapshot.FlatHorizontalFov;
-            RequireSam3dChooser(
-                snapshot.Renderer,
-                "Camera Target").val =
-                snapshot.CameraTarget;
-            RequireSam3dChooser(
-                snapshot.Renderer,
-                "Aspect Ratio").val =
-                snapshot.AspectRatio;
-            RequireSam3dChooser(
-                snapshot.Renderer,
-                "Output Resolution").val =
-                snapshot.OutputResolution;
-            RequireSam3dChooser(
-                snapshot.Renderer,
-                "Render Mode").val =
-                snapshot.RenderMode;
-            RequireSam3dChooser(
-                snapshot.Renderer,
-                "Image Format").val =
-                snapshot.ImageFormat;
-            snapshot.Renderer.GetBoolJSONParam(
-                "Generate Funscripts").val =
-                snapshot.GenerateFunscripts;
+
+            try
+            {
+                if (snapshot.CameraController == null)
+                {
+                    throw new Exception(
+                        "The saved SAM3D camera controller is no longer available.");
+                }
+                if (snapshot.CameraController.followWhenOff != null)
+                {
+                    snapshot.CameraController.followWhenOff.position =
+                        snapshot.CameraPosition;
+                    snapshot.CameraController.followWhenOff.rotation =
+                        snapshot.CameraRotation;
+                }
+            }
+            catch (Exception exception)
+            {
+                AddSam3dRestoreError(
+                    restoreErrors,
+                    "camera physical transform",
+                    exception);
+            }
+
+            if (snapshot.Renderer == null)
+            {
+                AddSam3dRestoreError(
+                    restoreErrors,
+                    "renderer",
+                    new Exception(
+                        "The saved SAM3D renderer is no longer available."));
+                return false;
+            }
+            try
+            {
+                JSONStorableFloat fov =
+                    snapshot.Renderer.GetFloatJSONParam(
+                        "Flat Horizontal FOV");
+                if (fov == null)
+                {
+                    throw new Exception(
+                        "Flat Horizontal FOV is unavailable.");
+                }
+                fov.val = snapshot.FlatHorizontalFov;
+            }
+            catch (Exception exception)
+            {
+                AddSam3dRestoreError(
+                    restoreErrors,
+                    "renderer Flat Horizontal FOV",
+                    exception);
+            }
+            try
+            {
+                RequireSam3dChooser(
+                    snapshot.Renderer,
+                    "Camera Target").val =
+                    snapshot.CameraTarget;
+            }
+            catch (Exception exception)
+            {
+                AddSam3dRestoreError(
+                    restoreErrors,
+                    "renderer Camera Target",
+                    exception);
+            }
+            try
+            {
+                RequireSam3dChooser(
+                    snapshot.Renderer,
+                    "Aspect Ratio").val =
+                    snapshot.AspectRatio;
+            }
+            catch (Exception exception)
+            {
+                AddSam3dRestoreError(
+                    restoreErrors,
+                    "renderer Aspect Ratio",
+                    exception);
+            }
+            try
+            {
+                RequireSam3dChooser(
+                    snapshot.Renderer,
+                    "Output Resolution").val =
+                    snapshot.OutputResolution;
+            }
+            catch (Exception exception)
+            {
+                AddSam3dRestoreError(
+                    restoreErrors,
+                    "renderer Output Resolution",
+                    exception);
+            }
+            try
+            {
+                RequireSam3dChooser(
+                    snapshot.Renderer,
+                    "Render Mode").val =
+                    snapshot.RenderMode;
+            }
+            catch (Exception exception)
+            {
+                AddSam3dRestoreError(
+                    restoreErrors,
+                    "renderer Render Mode",
+                    exception);
+            }
+            try
+            {
+                RequireSam3dChooser(
+                    snapshot.Renderer,
+                    "Image Format").val =
+                    snapshot.ImageFormat;
+            }
+            catch (Exception exception)
+            {
+                AddSam3dRestoreError(
+                    restoreErrors,
+                    "renderer Image Format",
+                    exception);
+            }
+            try
+            {
+                JSONStorableBool funscripts =
+                    snapshot.Renderer.GetBoolJSONParam(
+                        "Generate Funscripts");
+                if (funscripts == null)
+                {
+                    throw new Exception(
+                        "Generate Funscripts is unavailable.");
+                }
+                funscripts.val =
+                    snapshot.GenerateFunscripts;
+            }
+            catch (Exception exception)
+            {
+                AddSam3dRestoreError(
+                    restoreErrors,
+                    "renderer Generate Funscripts",
+                    exception);
+            }
             return false;
         }
 
@@ -5860,6 +7509,10 @@ namespace VAMPip
                     snapshot,
                     "controller shutdown");
                 return null;
+            }
+            if (snapshot.PairPersons != null)
+            {
+                return CurrentSam3dPairSnapshot(snapshot);
             }
             Atom person =
                 SuperController.singleton.GetAtomByUid(
@@ -5972,6 +7625,119 @@ namespace VAMPip
                 ReleaseSam3dPoseLockWithoutRestoringPose(
                     snapshot,
                     "pose lock failure: " +
+                    DescribeException(exception));
+                return null;
+            }
+            return snapshot;
+        }
+
+        private Sam3dUndoSnapshot CurrentSam3dPairSnapshot(
+            Sam3dUndoSnapshot snapshot)
+        {
+            Atom camera =
+                SuperController.singleton.GetAtomByUid(
+                    snapshot.CameraUid);
+            if (camera == null ||
+                camera.type != "Empty" ||
+                snapshot.CameraController == null ||
+                !object.ReferenceEquals(
+                    camera.mainController,
+                    snapshot.CameraController) ||
+                !object.ReferenceEquals(
+                    FindSam3dRenderer(camera),
+                    snapshot.Renderer))
+            {
+                ReleaseSam3dPoseLockWithoutRestoringPose(
+                    snapshot,
+                    "invalid applied pair camera");
+                return null;
+            }
+            if (snapshot.PairPersons == null ||
+                snapshot.PairPersons.Count !=
+                    Sam3dPairSubjectCount)
+            {
+                ReleaseSam3dPoseLockWithoutRestoringPose(
+                    snapshot,
+                    "invalid applied pair snapshot");
+                return null;
+            }
+            int personIndex;
+            for (personIndex = 0;
+                 personIndex < snapshot.PairPersons.Count;
+                 personIndex++)
+            {
+                Sam3dPairPersonUndo savedPerson =
+                    snapshot.PairPersons[personIndex];
+                Atom person =
+                    savedPerson == null
+                    ? null
+                    : SuperController.singleton.GetAtomByUid(
+                        savedPerson.TargetUid);
+                if (person == null ||
+                    person.type != "Person" ||
+                    !object.ReferenceEquals(
+                        person,
+                        savedPerson.Person))
+                {
+                    ReleaseSam3dPoseLockWithoutRestoringPose(
+                        snapshot,
+                        "invalid applied pair Person");
+                    return null;
+                }
+                Dictionary<string, FreeControllerV3> controllers =
+                    Sam3dPairPersonControllers(person);
+                int controllerIndex;
+                for (controllerIndex = 0;
+                     controllerIndex <
+                        savedPerson.Controllers.Count;
+                     controllerIndex++)
+                {
+                    FreeControllerV3 current;
+                    Sam3dControllerUndo saved =
+                        savedPerson.Controllers[controllerIndex];
+                    if (saved == null ||
+                        saved.Controller == null ||
+                        !IsSam3dSavedPhysicalBodyAvailable(
+                            saved.PhysicalBodyWasPresent,
+                            saved.PhysicalBody) ||
+                        !controllers.TryGetValue(
+                            saved.Controller.name,
+                            out current) ||
+                        !object.ReferenceEquals(
+                            current,
+                            saved.Controller) ||
+                        !object.ReferenceEquals(
+                            saved.Controller.followWhenOffRB,
+                            saved.PhysicalBody))
+                    {
+                        ReleaseSam3dPoseLockWithoutRestoringPose(
+                            snapshot,
+                            "changed pair Person controller");
+                        return null;
+                    }
+                }
+            }
+            if (!IsSam3dSavedPhysicalBodyAvailable(
+                    snapshot.CameraPhysicalBodyWasPresent,
+                    snapshot.CameraPhysicalBody) ||
+                !object.ReferenceEquals(
+                    snapshot.CameraController.followWhenOffRB,
+                    snapshot.CameraPhysicalBody))
+            {
+                ReleaseSam3dPoseLockWithoutRestoringPose(
+                    snapshot,
+                    "changed pair camera controller");
+                return null;
+            }
+            try
+            {
+                ReassertSam3dPairPersistentPoseLock(snapshot);
+            }
+            catch (Exception exception)
+            {
+                ReleaseSam3dPoseLockWithoutRestoringPose(
+                    snapshot,
+                    "pair pose lock failure: " +
                     DescribeException(exception));
                 return null;
             }
@@ -6385,6 +8151,370 @@ namespace VAMPip
                     person,
                     reference,
                     true);
+            }
+        }
+
+        private static Sam3dControllerUndo
+            FindSam3dPairSavedController(
+                Sam3dPairPersonUndo savedPerson,
+                string id)
+        {
+            int index;
+            for (index = 0;
+                 index < savedPerson.Controllers.Count;
+                 index++)
+            {
+                Sam3dControllerUndo saved =
+                    savedPerson.Controllers[index];
+                if (saved != null &&
+                    saved.Controller != null &&
+                    saved.Controller.name == id)
+                {
+                    return saved;
+                }
+            }
+            throw new Exception(
+                "The saved SAM3D pair controller " +
+                id +
+                " is unavailable.");
+        }
+
+        private static void ApplySam3dPairController(
+            Sam3dControllerSolution target,
+            FreeControllerV3 controller,
+            Sam3dPairPersonUndo savedPerson,
+            Vector3 subjectAnchor,
+            Quaternion sharedRotation)
+        {
+            if (controller == null ||
+                controller.control == null)
+            {
+                throw new Exception(
+                    "Person controller " +
+                    target.Id +
+                    " has no authoritative control transform.");
+            }
+            if (controller.currentPositionState ==
+                    FreeControllerV3.PositionState.Comply ||
+                controller.currentRotationState ==
+                    FreeControllerV3.RotationState.Comply)
+            {
+                controller.PauseComply();
+            }
+            controller.currentPositionState =
+                FreeControllerV3.PositionState.On;
+            controller.currentRotationState =
+                FreeControllerV3.RotationState.On;
+            controller.control.position =
+                subjectAnchor +
+                sharedRotation * target.Position;
+            controller.control.rotation =
+                target.HasRotation
+                ? sharedRotation * target.Rotation
+                : FindSam3dPairSavedController(
+                    savedPerson,
+                    target.Id).Rotation;
+            if (controller.onPositionChangeHandlers != null)
+            {
+                controller.onPositionChangeHandlers(controller);
+            }
+        }
+
+        private static void ReleaseSam3dPairBodyController(
+            Sam3dControllerSolution target,
+            FreeControllerV3 controller)
+        {
+            if (target == null ||
+                target.Enabled ||
+                controller == null)
+            {
+                throw new Exception(
+                    "A disabled SAM3D pair body controller is unavailable.");
+            }
+            controller.currentPositionState =
+                FreeControllerV3.PositionState.Off;
+            controller.currentRotationState =
+                FreeControllerV3.RotationState.Off;
+            if (controller.currentPositionState !=
+                    FreeControllerV3.PositionState.Off ||
+                controller.currentRotationState !=
+                    FreeControllerV3.RotationState.Off)
+            {
+                throw new Exception(
+                    "Person controller " +
+                    target.Id +
+                    " could not be released.");
+            }
+        }
+
+        private static bool Sam3dPairBodyControllerEnabled(
+            Sam3dPairSubjectSolution subject,
+            string id)
+        {
+            int index;
+            for (index = 0;
+                 index < subject.Controllers.Count;
+                 index++)
+            {
+                Sam3dControllerSolution target =
+                    subject.Controllers[index];
+                if (target.Id == id)
+                {
+                    return target.Enabled;
+                }
+            }
+            throw new Exception(
+                "The SAM3D pair body controller " +
+                id +
+                " is unavailable.");
+        }
+
+        private static void CaptureSam3dPairRequestedHeadRotations(
+            Sam3dUndoSnapshot snapshot,
+            List<Sam3dPairSubjectRuntime> subjects)
+        {
+            int index;
+            for (index = 0;
+                 index < subjects.Count;
+                 index++)
+            {
+                Sam3dPairPersonUndo savedPerson =
+                    snapshot.PairPersons[index];
+                if (!Sam3dPairBodyControllerEnabled(
+                        subjects[index].Solution,
+                        "headControl"))
+                {
+                    savedPerson.HeadRequestedRotationCaptured =
+                        false;
+                    continue;
+                }
+                FreeControllerV3 head;
+                if (!subjects[index].Controllers.TryGetValue(
+                        "headControl",
+                        out head) ||
+                    head == null ||
+                    head.control == null)
+                {
+                    throw new Exception(
+                        "A target Person has no usable headControl.");
+                }
+                savedPerson.HeadRequestedRotation =
+                    head.control.rotation;
+                savedPerson.HeadRequestedRotationCaptured =
+                    true;
+            }
+        }
+
+        private static void FinalizeSam3dPairPersistentHeadLocks(
+            Sam3dUndoSnapshot snapshot)
+        {
+            ValidateSam3dPairSavedPhysics(snapshot);
+            int personIndex;
+            for (personIndex = 0;
+                 personIndex < snapshot.PairPersons.Count;
+                 personIndex++)
+            {
+                Sam3dPairPersonUndo savedPerson =
+                    snapshot.PairPersons[personIndex];
+                if (!savedPerson
+                        .HeadRequestedRotationCaptured)
+                {
+                    savedPerson.PersistentHeadLockActive =
+                        false;
+                    continue;
+                }
+                Sam3dControllerUndo head =
+                    FindSam3dPairSavedController(
+                        savedPerson,
+                        "headControl");
+                if (head.Controller.control == null ||
+                    !head.PhysicalBodyWasPresent)
+                {
+                    throw new Exception(
+                        "A saved SAM3D pair head hold is incomplete.");
+                }
+                Vector3 settledPosition =
+                    head.PhysicalBody.position;
+                LockSam3dControllerPhysics(head);
+                head.Controller.control.position =
+                    settledPosition;
+                head.Controller.control.rotation =
+                    savedPerson.HeadRequestedRotation;
+                if (head.Controller.onPositionChangeHandlers != null)
+                {
+                    head.Controller.onPositionChangeHandlers(
+                        head.Controller);
+                }
+                SnapSam3dControllerPhysicalPose(
+                    head.Controller);
+                savedPerson.PersistentHeadLockActive = true;
+            }
+            LockSam3dCameraPhysics(snapshot);
+            SnapSam3dControllerPhysicalPose(
+                snapshot.CameraController);
+            SuperController.singleton.ResetSimulation(
+                Sam3dPhysicsResetFrames,
+                "Lock settled VAM-PIP SAM3D pair head rotations",
+                true);
+        }
+
+        private static void ApplySam3dPairTransforms(
+            Sam3dPairSolution solution,
+            List<Sam3dPairSubjectRuntime> subjects,
+            Atom camera,
+            MVRScript renderer,
+            Sam3dUndoSnapshot snapshot)
+        {
+            BeginSam3dPoseTransaction(snapshot);
+            bool applied = false;
+            try
+            {
+                Sam3dPairSubjectRuntime primary =
+                    subjects[solution.PrimarySubjectIndex];
+                FreeControllerV3 primaryHip;
+                if (!primary.Controllers.TryGetValue(
+                        "hipControl",
+                        out primaryHip) ||
+                    primaryHip == null ||
+                    primaryHip.control == null)
+                {
+                    throw new Exception(
+                        "The primary target Person has no usable hipControl.");
+                }
+                Vector3 primaryAnchor =
+                    primaryHip.control.position;
+                Quaternion sharedRotation =
+                    Sam3dAnchorRotation(primary.Person);
+                Vector3 commonCameraWorld =
+                    primaryAnchor +
+                    sharedRotation *
+                    primary.Solution.CameraFromHip;
+
+                int subjectIndex;
+                for (subjectIndex = 0;
+                     subjectIndex < subjects.Count;
+                     subjectIndex++)
+                {
+                    Sam3dPairSubjectRuntime runtime =
+                        subjects[subjectIndex];
+                    Sam3dPairPersonUndo savedPerson =
+                        snapshot.PairPersons[subjectIndex];
+                    Vector3 subjectAnchor =
+                        commonCameraWorld -
+                        sharedRotation *
+                        runtime.Solution.CameraFromHip;
+                    int controllerIndex;
+                    for (controllerIndex = 0;
+                         controllerIndex <
+                            runtime.Solution.Controllers.Count;
+                         controllerIndex++)
+                    {
+                        Sam3dControllerSolution target =
+                            runtime.Solution.Controllers[
+                                controllerIndex];
+                        if (!target.Enabled)
+                        {
+                            ReleaseSam3dPairBodyController(
+                                target,
+                                runtime.Controllers[target.Id]);
+                            continue;
+                        }
+                        ApplySam3dPairController(
+                            target,
+                            runtime.Controllers[target.Id],
+                            savedPerson,
+                            subjectAnchor,
+                            sharedRotation);
+                    }
+                    for (controllerIndex = 0;
+                         controllerIndex <
+                            runtime.Solution.Genitals.Count;
+                         controllerIndex++)
+                    {
+                        Sam3dControllerSolution target =
+                            runtime.Solution.Genitals[
+                                controllerIndex];
+                        ApplySam3dPairController(
+                            target,
+                            runtime.Controllers[target.Id],
+                            savedPerson,
+                            subjectAnchor,
+                            sharedRotation);
+                    }
+                    for (controllerIndex = 0;
+                         controllerIndex <
+                            runtime.Solution.Controllers.Count;
+                         controllerIndex++)
+                    {
+                        Sam3dControllerSolution target =
+                            runtime.Solution.Controllers[
+                                controllerIndex];
+                        if (!target.Enabled)
+                        {
+                            continue;
+                        }
+                        SnapSam3dControllerPhysicalPose(
+                            runtime.Controllers[target.Id]);
+                    }
+                    for (controllerIndex = 0;
+                         controllerIndex <
+                            runtime.Solution.Genitals.Count;
+                         controllerIndex++)
+                    {
+                        Sam3dControllerSolution target =
+                            runtime.Solution.Genitals[
+                                controllerIndex];
+                        SnapSam3dControllerPhysicalPose(
+                            runtime.Controllers[target.Id]);
+                    }
+                }
+
+                FreeControllerV3 cameraController =
+                    camera.mainController;
+                if (cameraController == null ||
+                    cameraController.control == null)
+                {
+                    throw new Exception(
+                        "The camera Empty has no main control transform.");
+                }
+                cameraController.currentPositionState =
+                    FreeControllerV3.PositionState.On;
+                cameraController.currentRotationState =
+                    FreeControllerV3.RotationState.On;
+                cameraController.control.position =
+                    commonCameraWorld;
+                cameraController.control.rotation =
+                    sharedRotation *
+                    solution.Camera.Rotation;
+                if (cameraController
+                        .onPositionChangeHandlers != null)
+                {
+                    cameraController.onPositionChangeHandlers(
+                        cameraController);
+                }
+                SnapSam3dControllerPhysicalPose(
+                    cameraController);
+                ConfigureSam3dRenderer(
+                    renderer,
+                    solution.Camera);
+                CaptureSam3dPairRequestedHeadRotations(
+                    snapshot,
+                    subjects);
+                applied = true;
+            }
+            finally
+            {
+                if (applied)
+                {
+                    CommitSam3dPoseLock(snapshot);
+                }
+                else
+                {
+                    FinishSam3dPoseTransaction(
+                        snapshot,
+                        "Cancel VAM-PIP SAM3D pair pose",
+                        false);
+                }
             }
         }
 
@@ -7073,6 +9203,195 @@ namespace VAMPip
                 request,
                 startedAt,
                 "SAM3D pose and VR-and-Funscript camera applied. Undo is available.");
+        }
+
+        private IEnumerator ExecuteApplySam3dPair(
+            BridgeRequest request)
+        {
+            string startedAt = UtcNow();
+            PublishStatus(
+                StateApplyingSam3d,
+                request.RequestId,
+                startedAt,
+                "",
+                "vam-sam3d",
+                "Validating the shared-camera SAM3D pair solution.");
+            Sam3dPairSolution solution = null;
+            List<Sam3dPairSubjectRuntime> subjects =
+                new List<Sam3dPairSubjectRuntime>();
+            string preparationError = "";
+            try
+            {
+                if (CurrentSam3dSnapshot() != null)
+                {
+                    throw new Exception(
+                        "Undo the currently applied SAM3D result before applying another.");
+                }
+                solution = LoadSam3dPairSolution(request);
+                int index;
+                for (index = 0;
+                     index < solution.Subjects.Count;
+                     index++)
+                {
+                    Sam3dPairSubjectSolution target =
+                        solution.Subjects[index];
+                    Atom person =
+                        SuperController.singleton.GetAtomByUid(
+                            target.TargetUid);
+                    if (person == null ||
+                        person.type != "Person")
+                    {
+                        throw new Exception(
+                            "A subject targetUid does not identify an existing Person.");
+                    }
+                    Sam3dPairSubjectRuntime runtime =
+                        new Sam3dPairSubjectRuntime();
+                    runtime.Solution = target;
+                    runtime.Person = person;
+                    runtime.Controllers =
+                        Sam3dPairPersonControllers(person);
+                    subjects.Add(runtime);
+                }
+            }
+            catch (Exception exception)
+            {
+                preparationError =
+                    "Could not prepare the SAM3D pair result: " +
+                    DescribeException(exception);
+            }
+            if (preparationError.Length != 0)
+            {
+                FinishSam3dActionError(
+                    request,
+                    startedAt,
+                    preparationError);
+                yield break;
+            }
+
+            Sam3dCameraResult cameraResult =
+                new Sam3dCameraResult();
+            _inFlightSam3dCameraRequest = request;
+            _inFlightSam3dCameraResult = cameraResult;
+            yield return EnsureSam3dCamera(request, cameraResult);
+            if (cameraResult.Error.Length != 0)
+            {
+                cameraResult.Error +=
+                    RemoveCreatedSam3dCamera(
+                        request,
+                        cameraResult);
+                ClearInFlightSam3dCamera(
+                    request,
+                    cameraResult);
+                FinishSam3dActionError(
+                    request,
+                    startedAt,
+                    cameraResult.Error);
+                yield break;
+            }
+
+            Sam3dUndoSnapshot snapshot = null;
+            string applyError = "";
+            try
+            {
+                MVRScript renderer =
+                    FindSam3dRenderer(cameraResult.Atom);
+                if (renderer == null)
+                {
+                    throw new Exception(
+                        "The selected camera has no compatible renderer.");
+                }
+                snapshot =
+                    SnapshotSam3dPairState(
+                        request,
+                        solution,
+                        subjects,
+                        cameraResult.Atom,
+                        renderer);
+                snapshot.CameraCreated =
+                    cameraResult.Created;
+                ApplySam3dPairTransforms(
+                    solution,
+                    subjects,
+                    cameraResult.Atom,
+                    renderer,
+                    snapshot);
+                _sam3dUndoSnapshot = snapshot;
+                ClearInFlightSam3dCamera(
+                    request,
+                    cameraResult);
+            }
+            catch (Exception exception)
+            {
+                applyError =
+                    "Could not apply the SAM3D pair result: " +
+                    DescribeException(exception);
+                if (snapshot != null)
+                {
+                    try
+                    {
+                        RestoreSam3dSnapshot(snapshot);
+                    }
+                    catch (Exception restoreException)
+                    {
+                        applyError +=
+                            " Automatic rollback also failed: " +
+                            DescribeException(restoreException);
+                    }
+                }
+                applyError +=
+                    RemoveCreatedSam3dCamera(
+                        request,
+                        cameraResult);
+                ClearInFlightSam3dCamera(
+                    request,
+                    cameraResult);
+            }
+            if (snapshot != null)
+            {
+                yield return WaitForSam3dPhysicsSettlement();
+            }
+            if (applyError.Length != 0)
+            {
+                FinishSam3dActionError(
+                    request,
+                    startedAt,
+                    applyError);
+                yield break;
+            }
+            try
+            {
+                FinalizeSam3dPairPersistentHeadLocks(snapshot);
+            }
+            catch (Exception exception)
+            {
+                applyError =
+                    "Could not finalize the settled SAM3D pair head rotations: " +
+                    DescribeException(exception);
+                try
+                {
+                    RestoreSam3dSnapshot(snapshot);
+                    _sam3dUndoSnapshot = null;
+                }
+                catch (Exception restoreException)
+                {
+                    applyError +=
+                        " Automatic rollback also failed: " +
+                        DescribeException(restoreException);
+                }
+            }
+            yield return WaitForSam3dPhysicsSettlement();
+            if (applyError.Length != 0)
+            {
+                FinishSam3dActionError(
+                    request,
+                    startedAt,
+                    applyError);
+                yield break;
+            }
+            FinishSam3dActionOk(
+                request,
+                startedAt,
+                "Shared-camera SAM3D pair pose applied atomically. Undo is available.");
         }
 
         private IEnumerator ExecuteShowSam3dReference(
@@ -9643,7 +11962,7 @@ namespace VAMPip
             DAZCharacterSelector geometry,
             List<BodyProportionMorphEntry> entries,
             BodyShapeSignature bodyShape,
-            string bodyShapeMeshChecksum)
+            string bodyShapeCalibrationKey)
         {
             ulong first = 1469598103934665603UL;
             ulong second = 7809847782465536322UL;
@@ -9660,8 +11979,89 @@ namespace VAMPip
             HashCuaText(
                 ref first,
                 ref second,
-                bodyShapeMeshChecksum ?? "");
+                bodyShapeCalibrationKey ?? "");
             return first.ToString("x16") + second.ToString("x16");
+        }
+
+        private static string BuildBodyShapeCalibrationKey(
+            DAZCharacterSelector geometry,
+            List<BodyProportionMorphEntry> entries)
+        {
+            ulong first = 1469598103934665603UL;
+            ulong second = 7809847782465536322UL;
+            HashCuaText(
+                ref first,
+                ref second,
+                "body-shape-calibration-v1");
+            HashCuaText(
+                ref first,
+                ref second,
+                BuildBodyProportionMorphStateKey(
+                    geometry,
+                    entries));
+            HashBodyShapeBaselineBankState(
+                ref first,
+                ref second,
+                geometry == null ? null : geometry.morphBank1);
+            HashBodyShapeBaselineBankState(
+                ref first,
+                ref second,
+                geometry == null ? null : geometry.morphBank2);
+            HashBodyShapeBaselineBankState(
+                ref first,
+                ref second,
+                geometry == null ? null : geometry.morphBank3);
+            return first.ToString("x16") + second.ToString("x16");
+        }
+
+        private static void HashBodyShapeBaselineBankState(
+            ref ulong first,
+            ref ulong second,
+            DAZMorphBank bank)
+        {
+            if (bank == null || bank.morphs == null)
+            {
+                HashCuaText(ref first, ref second, "-1");
+                return;
+            }
+            int activeCount = 0;
+            int index;
+            for (index = 0; index < bank.morphs.Count; index++)
+            {
+                DAZMorph morph = bank.morphs[index];
+                if (morph == null ||
+                    morph.disable ||
+                    morph.isPoseControl ||
+                    morph.isDriven ||
+                    !IsFinite(morph.morphValue))
+                {
+                    continue;
+                }
+                int bucket =
+                    Mathf.RoundToInt(
+                        Mathf.Clamp(
+                            morph.morphValue,
+                            -1000.0f,
+                            1000.0f) /
+                        BodyShapeCalibrationMorphQuantum);
+                if (bucket == 0)
+                {
+                    continue;
+                }
+                activeCount++;
+                HashCuaText(
+                    ref first,
+                    ref second,
+                    morph.uid ?? "");
+                HashCuaText(
+                    ref first,
+                    ref second,
+                    bucket.ToString());
+            }
+            HashCuaText(
+                ref first,
+                ref second,
+                activeCount.ToString());
         }
 
         private static void HashBodyShapeSignature(
@@ -10270,135 +12670,6 @@ namespace VAMPip
                 triangles.Length % 3 == 0;
         }
 
-        private static void MixBodyShapeChecksum(
-            ref ulong first,
-            ref ulong second,
-            int value)
-        {
-            unchecked
-            {
-                uint encoded = (uint)value;
-                first ^= encoded;
-                first *= 1099511628211UL;
-                second +=
-                    encoded +
-                    0x9e3779b9UL +
-                    (second << 6) +
-                    (second >> 2);
-            }
-        }
-
-        private static void MixBodyShapeVector(
-            ref ulong first,
-            ref ulong second,
-            Vector3 value)
-        {
-            MixBodyShapeChecksum(
-                ref first,
-                ref second,
-                Mathf.RoundToInt(value.x * 1000000f));
-            MixBodyShapeChecksum(
-                ref first,
-                ref second,
-                Mathf.RoundToInt(value.y * 1000000f));
-            MixBodyShapeChecksum(
-                ref first,
-                ref second,
-                Mathf.RoundToInt(value.z * 1000000f));
-        }
-
-        private static bool TryBodyShapeMeshChecksum(
-            DAZCharacterSelector geometry,
-            out string checksum)
-        {
-            checksum = "";
-            DAZSkinV2 skin;
-            Vector3[] vertices;
-            int[] triangles;
-            if (!TryBodyShapeMesh(
-                    geometry,
-                    out skin,
-                    out vertices,
-                    out triangles))
-            {
-                return false;
-            }
-            ulong first = 1469598103934665603UL;
-            ulong second = 7809847782465536322UL;
-            MixBodyShapeChecksum(
-                ref first,
-                ref second,
-                vertices.Length);
-            MixBodyShapeChecksum(
-                ref first,
-                ref second,
-                triangles.Length);
-            BodyShapeFrame frame;
-            if (!TryBuildBodyShapeFrame(
-                    geometry,
-                    skin,
-                    out frame))
-            {
-                return false;
-            }
-            MixBodyShapeVector(
-                ref first,
-                ref second,
-                frame.Origin);
-            MixBodyShapeVector(
-                ref first,
-                ref second,
-                frame.Lateral);
-            MixBodyShapeVector(
-                ref first,
-                ref second,
-                frame.Up);
-            MixBodyShapeVector(
-                ref first,
-                ref second,
-                frame.Front);
-            MixBodyShapeChecksum(
-                ref first,
-                ref second,
-                Mathf.RoundToInt(
-                    frame.TorsoLength * 1000000f));
-            MixBodyShapeChecksum(
-                ref first,
-                ref second,
-                Mathf.RoundToInt(
-                    frame.HipToKnee * 1000000f));
-            MixBodyShapeChecksum(
-                ref first,
-                ref second,
-                Mathf.RoundToInt(
-                    frame.StructuralLength * 1000000f));
-            int index;
-            for (index = 0; index < vertices.Length; index++)
-            {
-                Vector3 point = vertices[index];
-                if (!IsFiniteBodyProportionPoint(point))
-                {
-                    return false;
-                }
-                MixBodyShapeChecksum(
-                    ref first,
-                    ref second,
-                    Mathf.RoundToInt(point.x * 1000000f));
-                MixBodyShapeChecksum(
-                    ref first,
-                    ref second,
-                    Mathf.RoundToInt(point.y * 1000000f));
-                MixBodyShapeChecksum(
-                    ref first,
-                    ref second,
-                    Mathf.RoundToInt(point.z * 1000000f));
-            }
-            checksum =
-                first.ToString("x16") +
-                second.ToString("x16");
-            return true;
-        }
-
         private static bool TryBodyShapeBoneLocalPoint(
             DAZSkinV2 skin,
             DAZBone bone,
@@ -10786,6 +13057,43 @@ namespace VAMPip
                         ? best.Second
                         : best.First);
                 }
+                if (!closed && points.Count >= 4)
+                {
+                    float pathLength = 0f;
+                    int pointIndex;
+                    for (pointIndex = 1;
+                         pointIndex < points.Count;
+                         pointIndex++)
+                    {
+                        Vector2 delta =
+                            points[pointIndex] -
+                            points[pointIndex - 1];
+                        float dx = delta.x * scaleX;
+                        float dz = delta.y * scaleZ;
+                        pathLength +=
+                            Mathf.Sqrt(dx * dx + dz * dz);
+                    }
+                    Vector2 closingDelta =
+                        points[points.Count - 1] -
+                        points[0];
+                    float closingX =
+                        closingDelta.x * scaleX;
+                    float closingZ =
+                        closingDelta.y * scaleZ;
+                    float closingGap =
+                        Mathf.Sqrt(
+                            closingX * closingX +
+                            closingZ * closingZ);
+                    closed =
+                        IsFinite(pathLength) &&
+                        IsFinite(closingGap) &&
+                        pathLength > 0.001f &&
+                        closingGap <=
+                            BodyShapeMaximumSeamRepairMeters &&
+                        closingGap <=
+                            pathLength *
+                            BodyShapeMaximumSeamRepairFraction;
+                }
                 if (!closed)
                 {
                     continue;
@@ -10960,11 +13268,12 @@ namespace VAMPip
                     planeOffset,
                     scaleX,
                     scaleZ);
-            BodyShapeLoop best = null;
+            List<BodyShapeLoop> plausibleLoops =
+                new List<BodyShapeLoop>();
             float maximumWidth =
                 Mathf.Max(
-                    frame.ShoulderSpan * scaleX * 1.65f,
-                    frame.StructuralLength * 0.28f);
+                    frame.ShoulderSpan * scaleX * 3.0f,
+                    frame.StructuralLength * 0.65f);
             int loopIndex;
             for (loopIndex = 0;
                  loopIndex < loops.Count;
@@ -10979,7 +13288,10 @@ namespace VAMPip
                     (
                         loop.MaximumZ -
                         loop.MinimumZ) * scaleZ;
-                if (loop.MinimumX > 0f ||
+                if (!BodyShapeLoopContains(
+                        loop,
+                        target) ||
+                    loop.MinimumX > 0f ||
                     loop.MaximumX < 0f ||
                     width <=
                         frame.StructuralLength * 0.04f ||
@@ -10987,32 +13299,24 @@ namespace VAMPip
                     depth <=
                         frame.StructuralLength * 0.03f ||
                     depth >=
-                        frame.StructuralLength * 0.40f ||
+                        frame.StructuralLength * 0.75f ||
                     loop.Perimeter <=
                         frame.StructuralLength * 0.10f ||
                     loop.Perimeter >=
-                        frame.StructuralLength * 2.0f)
+                        frame.StructuralLength * 3.0f)
                 {
                     continue;
                 }
-                if (best == null ||
-                    Mathf.Abs(loop.Centroid.x) <
-                        Mathf.Abs(best.Centroid.x))
-                {
-                    best = loop;
-                }
+                plausibleLoops.Add(loop);
             }
-            if (best == null)
+            if (plausibleLoops.Count == 0)
             {
                 section = null;
                 return false;
             }
-            List<BodyShapeLoop> selectedLoops =
-                new List<BodyShapeLoop>();
-            selectedLoops.Add(best);
             BodyShapeLoop selected;
             return TryBodyShapeSectionFromLoops(
-                selectedLoops,
+                plausibleLoops,
                 target,
                 null,
                 scaleX,
@@ -11051,15 +13355,15 @@ namespace VAMPip
                     width <=
                         frame.StructuralLength * 0.025f ||
                     width >=
-                        frame.StructuralLength * 0.25f ||
+                        frame.StructuralLength * 0.40f ||
                     depth <=
                         frame.StructuralLength * 0.025f ||
                     depth >=
-                        frame.StructuralLength * 0.25f ||
+                        frame.StructuralLength * 0.40f ||
                     loop.Perimeter <=
                         frame.StructuralLength * 0.10f ||
                     loop.Perimeter >=
-                        frame.StructuralLength)
+                        frame.StructuralLength * 1.5f)
                 {
                     continue;
                 }
@@ -11070,6 +13374,155 @@ namespace VAMPip
                 }
             }
             return best;
+        }
+
+        private static bool TryInterpolateBodyShapeSections(
+            BodyShapeSection lower,
+            BodyShapeSection upper,
+            float amount,
+            out BodyShapeSection section)
+        {
+            section = null;
+            if (lower == null || upper == null)
+            {
+                return false;
+            }
+            amount = Mathf.Clamp01(amount);
+            BodyShapeSection measured =
+                new BodyShapeSection();
+            measured.Girth =
+                Mathf.Lerp(
+                    lower.Girth,
+                    upper.Girth,
+                    amount);
+            measured.Width =
+                Mathf.Lerp(
+                    lower.Width,
+                    upper.Width,
+                    amount);
+            measured.Depth =
+                Mathf.Lerp(
+                    lower.Depth,
+                    upper.Depth,
+                    amount);
+            measured.MinimumX =
+                Mathf.Lerp(
+                    lower.MinimumX,
+                    upper.MinimumX,
+                    amount);
+            measured.MaximumX =
+                Mathf.Lerp(
+                    lower.MaximumX,
+                    upper.MaximumX,
+                    amount);
+            measured.MinimumZ =
+                Mathf.Lerp(
+                    lower.MinimumZ,
+                    upper.MinimumZ,
+                    amount);
+            measured.MaximumZ =
+                Mathf.Lerp(
+                    lower.MaximumZ,
+                    upper.MaximumZ,
+                    amount);
+            if (!IsFinite(measured.Girth) ||
+                !IsFinite(measured.Width) ||
+                !IsFinite(measured.Depth) ||
+                !IsFinite(measured.MinimumX) ||
+                !IsFinite(measured.MaximumX) ||
+                !IsFinite(measured.MinimumZ) ||
+                !IsFinite(measured.MaximumZ) ||
+                measured.Girth <= 0.001f ||
+                measured.Width <= 0.001f ||
+                measured.Depth <= 0.001f)
+            {
+                return false;
+            }
+            section = measured;
+            return true;
+        }
+
+        private static bool TryBodyShapeBracketedSection(
+            Vector3[] vertices,
+            int[] triangles,
+            BodyShapeFrame frame,
+            float fraction,
+            Vector2 target,
+            float scaleX,
+            float scaleZ,
+            out BodyShapeSection section)
+        {
+            if (TryBodyShapeSection(
+                    vertices,
+                    triangles,
+                    frame,
+                    fraction * frame.TorsoLength,
+                    target,
+                    scaleX,
+                    scaleZ,
+                    out section))
+            {
+                return true;
+            }
+            BodyShapeSection lower = null;
+            BodyShapeSection upper = null;
+            float lowerOffset = 0f;
+            float upperOffset = 0f;
+            int offsetIndex;
+            for (offsetIndex = 1;
+                 offsetIndex <=
+                    BodyShapeUnderbustFallbackSteps &&
+                    (lower == null || upper == null);
+                 offsetIndex++)
+            {
+                float offset =
+                    offsetIndex *
+                    BodyShapeTorsoScanFractionStep;
+                BodyShapeSection candidate;
+                if (lower == null &&
+                    TryBodyShapeSection(
+                        vertices,
+                        triangles,
+                        frame,
+                        (fraction - offset) *
+                            frame.TorsoLength,
+                        target,
+                        scaleX,
+                        scaleZ,
+                        out candidate))
+                {
+                    lower = candidate;
+                    lowerOffset = offset;
+                }
+                if (upper == null &&
+                    TryBodyShapeSection(
+                        vertices,
+                        triangles,
+                        frame,
+                        (fraction + offset) *
+                            frame.TorsoLength,
+                        target,
+                        scaleX,
+                        scaleZ,
+                        out candidate))
+                {
+                    upper = candidate;
+                    upperOffset = offset;
+                }
+            }
+            if (lower != null &&
+                upper != null &&
+                TryInterpolateBodyShapeSections(
+                    lower,
+                    upper,
+                    lowerOffset /
+                        (lowerOffset + upperOffset),
+                    out section))
+            {
+                return true;
+            }
+            section = null;
+            return false;
         }
 
         private static bool TryScanBodyShapeTorsoSection(
@@ -11336,12 +13789,11 @@ namespace VAMPip
                         0.64f,
                         bustFraction - 0.14f));
             if (
-                !TryBodyShapeSection(
+                !TryBodyShapeBracketedSection(
                     vertices,
                     triangles,
                     frame,
-                    underbustFraction *
-                        frame.TorsoLength,
+                    underbustFraction,
                     Vector2.zero,
                     scaleX,
                     scaleZ,
@@ -11706,11 +14158,16 @@ namespace VAMPip
         }
 
         private static void FailBodyShapeSignatureWork(
-            BodyShapeSignatureWork work)
+            BodyShapeSignatureWork work,
+            string reason)
         {
             work.Failed = true;
             work.Complete = true;
             work.Result = null;
+            work.FailureReason =
+                reason == null || reason.Length == 0
+                ? "The body contour could not be measured."
+                : reason;
         }
 
         private static void StepBodyShapeSignatureWork(
@@ -11759,7 +14216,9 @@ namespace VAMPip
                 }
                 if (work.Bust == null)
                 {
-                    FailBodyShapeSignatureWork(work);
+                    FailBodyShapeSignatureWork(
+                        work,
+                        "No usable bust contour was found.");
                     return;
                 }
                 work.UnderbustFraction =
@@ -11774,22 +14233,108 @@ namespace VAMPip
             }
             if (work.Phase == 1)
             {
-                if (!TryBodyShapeSection(
+                if (work.ScanIndex == 0)
+                {
+                    if (TryBodyShapeSection(
+                            work.Vertices,
+                            work.Triangles,
+                            work.Frame,
+                            work.UnderbustFraction *
+                                work.Frame.TorsoLength,
+                            Vector2.zero,
+                            work.ScaleX,
+                            work.ScaleZ,
+                            out work.Underbust))
+                    {
+                        work.Phase = 2;
+                        work.ScanIndex = 0;
+                        return;
+                    }
+                    work.ScanIndex = 1;
+                    return;
+                }
+                if (work.ScanIndex <=
+                    BodyShapeUnderbustFallbackSteps)
+                {
+                    float lowerOffset =
+                        work.ScanIndex *
+                        BodyShapeTorsoScanFractionStep;
+                    BodyShapeSection lower;
+                    if (TryBodyShapeSection(
+                            work.Vertices,
+                            work.Triangles,
+                            work.Frame,
+                            (
+                                work.UnderbustFraction -
+                                lowerOffset) *
+                            work.Frame.TorsoLength,
+                            Vector2.zero,
+                            work.ScaleX,
+                            work.ScaleZ,
+                            out lower))
+                    {
+                        work.UnderbustLower = lower;
+                        work.UnderbustLowerOffset =
+                            lowerOffset;
+                        work.ScanIndex =
+                            BodyShapeUnderbustFallbackSteps +
+                            1;
+                        return;
+                    }
+                    work.ScanIndex++;
+                    if (work.ScanIndex >
+                        BodyShapeUnderbustFallbackSteps)
+                    {
+                        FailBodyShapeSignatureWork(
+                            work,
+                            "The underbust contour could not be measured.");
+                    }
+                    return;
+                }
+                int upperIndex =
+                    work.ScanIndex -
+                    BodyShapeUnderbustFallbackSteps;
+                float upperOffset =
+                    upperIndex *
+                    BodyShapeTorsoScanFractionStep;
+                BodyShapeSection upper;
+                if (TryBodyShapeSection(
                         work.Vertices,
                         work.Triangles,
                         work.Frame,
-                        work.UnderbustFraction *
-                            work.Frame.TorsoLength,
+                        (
+                            work.UnderbustFraction +
+                            upperOffset) *
+                        work.Frame.TorsoLength,
                         Vector2.zero,
                         work.ScaleX,
                         work.ScaleZ,
+                        out upper) &&
+                    TryInterpolateBodyShapeSections(
+                        work.UnderbustLower,
+                        upper,
+                        work.UnderbustLowerOffset /
+                            (
+                                work.UnderbustLowerOffset +
+                                upperOffset),
                         out work.Underbust))
                 {
-                    FailBodyShapeSignatureWork(work);
+                    work.UnderbustLower = null;
+                    work.UnderbustLowerOffset = 0f;
+                    work.Phase = 2;
+                    work.ScanIndex = 0;
                     return;
                 }
-                work.Phase = 2;
-                work.ScanIndex = 0;
+                work.ScanIndex++;
+                if (work.ScanIndex >
+                    BodyShapeUnderbustFallbackSteps * 2)
+                {
+                    work.UnderbustLower = null;
+                    work.UnderbustLowerOffset = 0f;
+                    FailBodyShapeSignatureWork(
+                        work,
+                        "The underbust contour could not be measured.");
+                }
                 return;
             }
             if (work.Phase == 2)
@@ -11829,7 +14374,9 @@ namespace VAMPip
                 }
                 if (work.Waist == null)
                 {
-                    FailBodyShapeSignatureWork(work);
+                    FailBodyShapeSignatureWork(
+                        work,
+                        "No usable waist contour was found.");
                     return;
                 }
                 work.Phase = 3;
@@ -11873,7 +14420,9 @@ namespace VAMPip
                 }
                 if (work.Seat == null)
                 {
-                    FailBodyShapeSignatureWork(work);
+                    FailBodyShapeSignatureWork(
+                        work,
+                        "No usable seat contour was found.");
                     return;
                 }
                 work.Phase = 4;
@@ -11933,7 +14482,9 @@ namespace VAMPip
                     out work.RightThigh,
                     out rightLoop))
             {
-                FailBodyShapeSignatureWork(work);
+                FailBodyShapeSignatureWork(
+                    work,
+                    "The upper-thigh contours could not be measured.");
                 return;
             }
             float meanGirth =
@@ -11946,12 +14497,21 @@ namespace VAMPip
                     Mathf.Max(meanGirth, 0.00000001f) >
                 0.35f)
             {
-                FailBodyShapeSignatureWork(work);
+                FailBodyShapeSignatureWork(
+                    work,
+                    "The upper-thigh contours are too asymmetric for a safe fit.");
                 return;
             }
             work.Result = BuildBodyShapeWorkResult(work);
+            if (work.Result == null)
+            {
+                FailBodyShapeSignatureWork(
+                    work,
+                    "The measured body contours failed validation.");
+                return;
+            }
             work.Complete = true;
-            work.Failed = work.Result == null;
+            work.Failed = false;
         }
 
         private static JSONClass BodyShapeMetricJson(
@@ -12221,6 +14781,24 @@ namespace VAMPip
             }
         }
 
+        private void FailPersonBodyShapeBuild(
+            PersonBodyShapeBuild build,
+            string reason)
+        {
+            if (!IsCurrentBodyShapeBuild(build))
+            {
+                return;
+            }
+            build.Failed = true;
+            build.FailureReason =
+                reason == null || reason.Length == 0
+                ? "Neutral body-shape calibration stopped unexpectedly."
+                : reason;
+            build.RetryAfterRealtime =
+                Time.realtimeSinceStartup +
+                BodyShapeBuildRetryDelaySeconds;
+        }
+
         private void CancelPersonBodyShapeBuild(
             string atomUid)
         {
@@ -12238,6 +14816,59 @@ namespace VAMPip
             }
         }
 
+        private IEnumerator RunPersonBodyShapeCacheCoroutine(
+            PersonBodyShapeBuild build)
+        {
+            IEnumerator worker =
+                BuildPersonBodyShapeCacheCoroutine(build);
+            while (true)
+            {
+                bool hasNext = false;
+                object current = null;
+                Exception failure = null;
+                try
+                {
+                    hasNext = worker.MoveNext();
+                    if (hasNext)
+                    {
+                        current = worker.Current;
+                    }
+                }
+                catch (Exception error)
+                {
+                    failure = error;
+                }
+                if (failure != null)
+                {
+                    string detail =
+                        DescribeException(failure);
+                    if (detail.Length > 240)
+                    {
+                        detail = detail.Substring(0, 240);
+                    }
+                    FailPersonBodyShapeBuild(
+                        build,
+                        "Neutral body-shape calibration failed: " +
+                        detail);
+                    SuperController.LogError(
+                        "[VAM-PIP Bridge] Body-shape calibration failed " +
+                        "for " +
+                        (
+                            build == null || build.Atom == null
+                            ? "an unknown Person"
+                            : build.Atom.uid) +
+                        ": " +
+                        failure);
+                    yield break;
+                }
+                if (!hasNext)
+                {
+                    yield break;
+                }
+                yield return current;
+            }
+        }
+
         private IEnumerator BuildPersonBodyShapeCacheCoroutine(
             PersonBodyShapeBuild build)
         {
@@ -12250,7 +14881,9 @@ namespace VAMPip
                     build.ScaleZ);
             if (baselineWork == null)
             {
-                RemoveBodyShapeBuild(build);
+                FailPersonBodyShapeBuild(
+                    build,
+                    "The neutral body mesh could not be initialized.");
                 yield break;
             }
             while (!baselineWork.Complete)
@@ -12279,11 +14912,19 @@ namespace VAMPip
                     yield return null;
                 }
             }
-            if (baselineWork.Failed ||
-                baselineWork.Result == null ||
-                !IsCurrentBodyShapeBuild(build))
+            if (!IsCurrentBodyShapeBuild(build))
             {
-                RemoveBodyShapeBuild(build);
+                yield break;
+            }
+            if (baselineWork.Failed ||
+                baselineWork.Result == null)
+            {
+                FailPersonBodyShapeBuild(
+                    build,
+                    baselineWork.FailureReason == null ||
+                        baselineWork.FailureReason.Length == 0
+                    ? "The neutral body contour could not be measured."
+                    : baselineWork.FailureReason);
                 yield break;
             }
 
@@ -12452,13 +15093,15 @@ namespace VAMPip
             {
                 yield break;
             }
-            string currentChecksum = "";
-            if (!TryBodyShapeMeshChecksum(
+            List<BodyProportionMorphEntry> currentEntries =
+                GetBodyProportionMorphEntries(build.Geometry);
+            string currentCalibrationKey =
+                BuildBodyShapeCalibrationKey(
                     build.Geometry,
-                    out currentChecksum) ||
-                !string.Equals(
-                    currentChecksum,
-                    build.MeshChecksum,
+                    currentEntries);
+            if (!string.Equals(
+                    currentCalibrationKey,
+                    build.CalibrationKey,
                     StringComparison.Ordinal))
             {
                 RemoveBodyShapeBuild(build);
@@ -12468,25 +15111,24 @@ namespace VAMPip
                 new PersonBodyShapeCache();
             cache.Atom = build.Atom;
             cache.Geometry = build.Geometry;
-            cache.MeshChecksum = build.MeshChecksum;
+            cache.CalibrationKey = build.CalibrationKey;
             cache.Signature = baselineWork.Result;
             cache.Responses = responses;
             _personBodyShapeCaches[
                 build.Atom.uid] = cache;
             RemoveBodyShapeBuild(build);
-            PublishSceneStatus();
         }
 
         private void EnsurePersonBodyShapeBuild(
             Atom atom,
             DAZCharacterSelector geometry,
-            string meshChecksum,
+            string calibrationKey,
             List<BodyProportionMorphEntry> entries)
         {
             if (atom == null ||
                 geometry == null ||
-                meshChecksum == null ||
-                meshChecksum.Length == 0)
+                calibrationKey == null ||
+                calibrationKey.Length == 0)
             {
                 return;
             }
@@ -12499,8 +15141,8 @@ namespace VAMPip
                     cache.Geometry,
                     geometry) &&
                 string.Equals(
-                    cache.MeshChecksum,
-                    meshChecksum,
+                    cache.CalibrationKey,
+                    calibrationKey,
                     StringComparison.Ordinal) &&
                 IsValidBodyShapeSignature(
                     cache.Signature))
@@ -12508,6 +15150,7 @@ namespace VAMPip
                 return;
             }
             _personBodyShapeCaches.Remove(atom.uid);
+            int attempt = 1;
             PersonBodyShapeBuild existing = null;
             if (_personBodyShapeBuilds.TryGetValue(
                     atom.uid,
@@ -12520,87 +15163,125 @@ namespace VAMPip
                         existing.Geometry,
                         geometry) &&
                     string.Equals(
-                        existing.MeshChecksum,
-                        meshChecksum,
+                        existing.CalibrationKey,
+                        calibrationKey,
                         StringComparison.Ordinal))
                 {
-                    return;
+                    if (!existing.Failed)
+                    {
+                        return;
+                    }
+                    if (existing.Attempt >=
+                            BodyShapeBuildMaximumAttempts ||
+                        Time.realtimeSinceStartup <
+                            existing.RetryAfterRealtime)
+                    {
+                        return;
+                    }
+                    attempt = existing.Attempt + 1;
                 }
                 existing.Cancelled = true;
+                _personBodyShapeBuilds.Remove(atom.uid);
             }
 
-            DAZSkinV2 skin;
-            Vector3[] liveVertices;
-            int[] liveTriangles;
-            BodyShapeFrame frame;
-            if (!TryBodyShapeMesh(
-                    geometry,
-                    out skin,
-                    out liveVertices,
-                    out liveTriangles) ||
-                !TryBuildBodyShapeFrame(
-                    geometry,
-                    skin,
-                    out frame))
-            {
-                return;
-            }
-            float scaleX =
-                skin.transform.TransformVector(
-                    frame.Lateral).magnitude;
-            float scaleZ =
-                skin.transform.TransformVector(
-                    frame.Front).magnitude;
-            if (!IsFinite(scaleX) ||
-                !IsFinite(scaleZ) ||
-                scaleX <= 0.000001f ||
-                scaleZ <= 0.000001f)
-            {
-                return;
-            }
             PersonBodyShapeBuild build =
                 new PersonBodyShapeBuild();
             build.Atom = atom;
             build.Geometry = geometry;
-            build.MeshChecksum = meshChecksum;
-            build.Vertices =
-                new Vector3[liveVertices.Length];
-            Array.Copy(
-                liveVertices,
-                build.Vertices,
-                liveVertices.Length);
-            build.Triangles =
-                new int[liveTriangles.Length];
-            Array.Copy(
-                liveTriangles,
-                build.Triangles,
-                liveTriangles.Length);
-            build.Frame = frame;
-            build.ScaleX = scaleX;
-            build.ScaleZ = scaleZ;
+            build.CalibrationKey = calibrationKey;
             build.Entries =
                 new List<BodyProportionMorphEntry>();
-            if (entries != null)
-            {
-                int index;
-                for (index = 0;
-                     index < entries.Count;
-                     index++)
-                {
-                    if (entries[index] != null &&
-                        entries[index].FitKind == "shape" &&
-                        IsBodyShapeCalibrationMorphName(
-                            entries[index].Name))
-                    {
-                        build.Entries.Add(entries[index]);
-                    }
-                }
-            }
+            build.Failed = false;
+            build.FailureReason = "";
+            build.Attempt = attempt;
+            build.RetryAfterRealtime = 0.0f;
             _personBodyShapeBuilds[atom.uid] =
                 build;
-            StartCoroutine(
-                BuildPersonBodyShapeCacheCoroutine(
-                    build));
+            try
+            {
+                DAZSkinV2 skin;
+                Vector3[] liveVertices;
+                int[] liveTriangles;
+                BodyShapeFrame frame;
+                if (!TryBodyShapeMesh(
+                        geometry,
+                        out skin,
+                        out liveVertices,
+                        out liveTriangles) ||
+                    !TryBuildBodyShapeFrame(
+                        geometry,
+                        skin,
+                        out frame))
+                {
+                    FailPersonBodyShapeBuild(
+                        build,
+                        "The neutral body mesh is not ready for measurement.");
+                    return;
+                }
+                float scaleX =
+                    skin.transform.TransformVector(
+                        frame.Lateral).magnitude;
+                float scaleZ =
+                    skin.transform.TransformVector(
+                        frame.Front).magnitude;
+                if (!IsFinite(scaleX) ||
+                    !IsFinite(scaleZ) ||
+                    scaleX <= 0.000001f ||
+                    scaleZ <= 0.000001f)
+                {
+                    FailPersonBodyShapeBuild(
+                        build,
+                        "The neutral body mesh has an invalid measurement scale.");
+                    return;
+                }
+                build.Vertices =
+                    new Vector3[liveVertices.Length];
+                Array.Copy(
+                    liveVertices,
+                    build.Vertices,
+                    liveVertices.Length);
+                build.Triangles =
+                    new int[liveTriangles.Length];
+                Array.Copy(
+                    liveTriangles,
+                    build.Triangles,
+                    liveTriangles.Length);
+                build.Frame = frame;
+                build.ScaleX = scaleX;
+                build.ScaleZ = scaleZ;
+                if (entries != null)
+                {
+                    int index;
+                    for (index = 0;
+                         index < entries.Count;
+                         index++)
+                    {
+                        if (entries[index] != null &&
+                            entries[index].FitKind == "shape" &&
+                            IsBodyShapeCalibrationMorphName(
+                                entries[index].Name))
+                        {
+                            build.Entries.Add(entries[index]);
+                        }
+                    }
+                }
+                StartCoroutine(
+                    RunPersonBodyShapeCacheCoroutine(
+                        build));
+            }
+            catch (Exception error)
+            {
+                FailPersonBodyShapeBuild(
+                    build,
+                    "Neutral body-shape initialization failed: " +
+                    DescribeException(error));
+                SuperController.LogError(
+                    "[VAM-PIP Bridge] Body-shape initialization failed " +
+                    "for " +
+                    atom.uid +
+                    ": " +
+                    error);
+            }
         }
 
         private static void CopyBodyShapeResponsesFromCache(
@@ -12882,16 +15563,14 @@ namespace VAMPip
                 object.ReferenceEquals(
                     snapshot.Geometry,
                     geometry);
-            string bodyShapeMeshChecksum = "";
-            bool hasBodyShapeMeshChecksum =
-                TryBodyShapeMeshChecksum(
-                    geometry,
-                    out bodyShapeMeshChecksum);
             List<BodyProportionMorphEntry> entries =
                 GetBodyProportionMorphEntries(geometry);
+            string bodyShapeCalibrationKey =
+                BuildBodyShapeCalibrationKey(
+                    geometry,
+                    entries);
             PersonBodyShapeCache bodyShapeCache = null;
             bool bodyShapeReady =
-                hasBodyShapeMeshChecksum &&
                 _personBodyShapeCaches.TryGetValue(
                     atom.uid,
                     out bodyShapeCache) &&
@@ -12902,8 +15581,8 @@ namespace VAMPip
                     bodyShapeCache.Geometry,
                     geometry) &&
                 string.Equals(
-                    bodyShapeCache.MeshChecksum,
-                    bodyShapeMeshChecksum,
+                    bodyShapeCache.CalibrationKey,
+                    bodyShapeCalibrationKey,
                     StringComparison.Ordinal) &&
                 IsValidBodyShapeSignature(
                     bodyShapeCache.Signature);
@@ -12917,18 +15596,17 @@ namespace VAMPip
                     entries,
                     bodyShapeCache);
             }
-            else if (hasBodyShapeMeshChecksum)
+            else
             {
                 EnsurePersonBodyShapeBuild(
                     atom,
                     geometry,
-                    bodyShapeMeshChecksum,
+                    bodyShapeCalibrationKey,
                     entries);
             }
             PersonBodyShapeBuild bodyShapeBuild = null;
             bool bodyShapePreparing =
                 !bodyShapeReady &&
-                hasBodyShapeMeshChecksum &&
                 _personBodyShapeBuilds.TryGetValue(
                     atom.uid,
                     out bodyShapeBuild) &&
@@ -12939,9 +15617,24 @@ namespace VAMPip
                     bodyShapeBuild.Geometry,
                     geometry) &&
                 string.Equals(
-                    bodyShapeBuild.MeshChecksum,
-                    bodyShapeMeshChecksum,
-                    StringComparison.Ordinal);
+                    bodyShapeBuild.CalibrationKey,
+                    bodyShapeCalibrationKey,
+                    StringComparison.Ordinal) &&
+                !bodyShapeBuild.Failed;
+            bool bodyShapeFailed =
+                !bodyShapeReady &&
+                bodyShapeBuild != null &&
+                object.ReferenceEquals(
+                    bodyShapeBuild.Atom,
+                    atom) &&
+                object.ReferenceEquals(
+                    bodyShapeBuild.Geometry,
+                    geometry) &&
+                string.Equals(
+                    bodyShapeBuild.CalibrationKey,
+                    bodyShapeCalibrationKey,
+                    StringComparison.Ordinal) &&
+                bodyShapeBuild.Failed;
             result["bodyShapeReady"].AsBool =
                 bodyShapeReady;
             result["bodyShapePreparing"].AsBool =
@@ -12956,6 +15649,15 @@ namespace VAMPip
                 result["bodyShapeReason"] =
                     bodyShapePreparing
                     ? "Neutral body-shape measurements are being prepared."
+                    : bodyShapeFailed
+                    ? (
+                        bodyShapeBuild.FailureReason +
+                        (
+                            bodyShapeBuild.Attempt <
+                                BodyShapeBuildMaximumAttempts
+                            ? " Retrying automatically."
+                            : " Reload VAM-PIP or change a body-fit morph " +
+                                "to retry."))
                     : "The neutral morphed body mesh could not be measured.";
             }
             string generationKey =
@@ -12963,7 +15665,7 @@ namespace VAMPip
                     geometry,
                     entries,
                     bodyShape,
-                    bodyShapeMeshChecksum);
+                    bodyShapeCalibrationKey);
             string morphStateKey =
                 BuildBodyProportionMorphStateKey(
                     geometry,
@@ -13011,8 +15713,8 @@ namespace VAMPip
             snapshot.Geometry = geometry;
             snapshot.GenerationKey = generationKey;
             snapshot.BodyShape = bodyShape;
-            snapshot.BodyShapeMeshChecksum =
-                bodyShapeMeshChecksum;
+            snapshot.BodyShapeCalibrationKey =
+                bodyShapeCalibrationKey;
             _personBodyProportionSnapshots[atom.uid] =
                 snapshot;
 
@@ -14963,6 +17665,7 @@ namespace VAMPip
             capabilities.Add("timeline-animation-play");
             capabilities.Add("timeline-adapter-v1");
             capabilities.Add("sam3d-apply-v1");
+            capabilities.Add("sam3d-pair-apply-v1");
             capabilities.Add("sam3d-undo-v1");
             capabilities.Add("sam3d-capture-v1");
             capabilities.Add("sam3d-camera-vrfunscript-v1");

@@ -123,6 +123,7 @@ BODY_LINKS = (
 )
 
 MODEL_CONFIG_LIMIT = 64 * 1024
+MAX_BBOXES = 4
 NUMERIC_ARRAY_SHAPES = {
     "pred_keypoints_3d": (70, 3),
     "pred_keypoints_2d": (70, 2),
@@ -475,6 +476,49 @@ def _draw_overlay(cv2: Any, image: Any, people: list[dict[str, object]]) -> Any:
     return overlay
 
 
+def _request_bboxes(
+    request: dict[str, Any],
+    *,
+    width: int,
+    height: int,
+) -> list[list[float]]:
+    if request.get("schema") == 3:
+        raw_bboxes: object = request.get("bboxes")
+        if (
+            not isinstance(raw_bboxes, list)
+            or not 1 <= len(raw_bboxes) <= MAX_BBOXES
+        ):
+            raise ValueError("worker request bboxes are invalid")
+    else:
+        raw_bboxes = [request.get("bbox")]
+
+    bboxes: list[list[float]] = []
+    for raw_bbox in raw_bboxes:
+        if not isinstance(raw_bbox, list) or len(raw_bbox) != 4:
+            raise ValueError("worker request bbox is invalid")
+        if any(
+            isinstance(item, bool)
+            or not isinstance(item, (int, float))
+            or not math.isfinite(float(item))
+            for item in raw_bbox
+        ):
+            raise ValueError("worker request bbox is invalid")
+        bbox = [float(item) for item in raw_bbox]
+        x1, y1, x2, y2 = bbox
+        if (
+            x1 < 0.0
+            or y1 < 0.0
+            or x2 <= x1
+            or y2 <= y1
+            or x2 > width
+            or y2 > height
+            or (x2 - x1) * (y2 - y1) < 256.0
+        ):
+            raise ValueError("worker request bbox is invalid")
+        bboxes.append(bbox)
+    return bboxes
+
+
 def run(
     *,
     repo: Path,
@@ -537,17 +581,15 @@ def run(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     request = json.loads(request_path.read_text(encoding="utf-8"))
-    if not isinstance(request, dict) or request.get("schema") not in {1, 2}:
+    if not isinstance(request, dict) or request.get("schema") not in {1, 2, 3}:
         raise ValueError("worker request schema is unsupported")
-    if request.get("schema") == 2 and request.get("modelId") != model_id:
+    if request.get("schema") in {2, 3} and request.get("modelId") != model_id:
         raise ValueError("worker request model does not match the checkpoint")
     width = request.get("sourceWidth")
     height = request.get("sourceHeight")
     if not isinstance(width, int) or not isinstance(height, int):
         raise ValueError("worker request source dimensions are invalid")
-    bbox = request.get("bbox")
-    if not isinstance(bbox, list) or len(bbox) != 4:
-        raise ValueError("worker request bbox is invalid")
+    bboxes = _request_bboxes(request, width=width, height=height)
     vertical_fov = request.get("verticalFov")
     if vertical_fov is not None:
         vertical_fov = float(vertical_fov)
@@ -612,12 +654,14 @@ def run(
     )
     outputs = estimator.process_one_image(
         str(source),
-        bboxes=np.asarray([bbox], dtype=np.float32),
+        bboxes=np.asarray(bboxes, dtype=np.float32),
         cam_int=camera_intrinsics,
         inference_type="full",
     )
-    if not outputs:
-        raise RuntimeError("SAM 3D Body did not return a person")
+    if not isinstance(outputs, (list, tuple)) or len(outputs) != len(bboxes):
+        raise RuntimeError(
+            "SAM 3D Body result count does not match the requested boxes"
+        )
 
     people: list[dict[str, object]] = []
     arrays: dict[str, Any] = {}
@@ -683,24 +727,28 @@ def run(
         "name": "facebookresearch/sam-3d-body",
         "mode": "native-standalone",
     }
-    if request["schema"] == 2:
+    if request["schema"] in {2, 3}:
         engine.update(
             {
                 "modelId": model_id,
                 "backbone": backbone,
             }
         )
+    source_manifest: dict[str, object] = {
+        "width": width,
+        "height": height,
+        "contentType": request["sourceType"],
+        "verticalFov": vertical_fov,
+    }
+    if request["schema"] == 3:
+        source_manifest["bboxes"] = bboxes
+    else:
+        source_manifest["bbox"] = bboxes[0]
     manifest = {
         "schema": request["schema"],
         "engine": engine,
         "jobId": request["jobId"],
-        "source": {
-            "width": width,
-            "height": height,
-            "contentType": request["sourceType"],
-            "bbox": [float(item) for item in bbox],
-            "verticalFov": vertical_fov,
-        },
+        "source": source_manifest,
         "people": people,
         "artifacts": {
             "arrays": "arrays.npz",

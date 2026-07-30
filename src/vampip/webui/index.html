@@ -687,7 +687,7 @@
                     <span class="sam3d-step">1</span>
                     <div>
                       <p class="eyebrow">Source image</p>
-                      <h3 id="sam3d-source-title">Choose the person to reconstruct</h3>
+                      <h3 id="sam3d-source-title">Choose the subjects to reconstruct</h3>
                     </div>
                   </div>
                   <button class="quiet-button" id="sam3d-clear-source" type="button" hidden>Clear</button>
@@ -715,10 +715,10 @@
                       id="sam3d-source-canvas"
                       width="960"
                       height="640"
-                      aria-label="Source image and selected person box"
+                      aria-label="Source image and labeled subject boxes"
                     ></canvas>
                     <p class="sam3d-canvas-hint" id="sam3d-canvas-hint">
-                      Drag over the person to draw a tighter box.
+                      Select a subject, then drag over that person to redraw its box.
                     </p>
                   </div>
                   <div class="sam3d-source-controls">
@@ -726,10 +726,33 @@
                       <strong id="sam3d-source-name">Source image</strong>
                       <span id="sam3d-source-meta">—</span>
                     </div>
+                    <section class="sam3d-subject-boxes" aria-labelledby="sam3d-subject-boxes-title">
+                      <header>
+                        <div>
+                          <strong id="sam3d-subject-boxes-title">Subjects</strong>
+                          <small>One to four labeled people in the same camera frame</small>
+                        </div>
+                        <span id="sam3d-subject-count">1 / 4</span>
+                      </header>
+                      <div
+                        class="sam3d-subject-box-list"
+                        id="sam3d-subject-box-list"
+                        role="list"
+                        aria-label="Source subjects"
+                      ></div>
+                      <div class="sam3d-subject-box-actions">
+                        <button class="secondary-button small" id="sam3d-add-subject" type="button">
+                          Add subject
+                        </button>
+                        <button class="quiet-button" id="sam3d-remove-subject" type="button" disabled>
+                          Remove selected
+                        </button>
+                      </div>
+                    </section>
                     <label class="switch-row sam3d-bbox-toggle" for="sam3d-manual-bbox">
                       <span>
-                        <strong>Manual person box</strong>
-                        <small>Use the full image when disabled</small>
+                        <strong>Manual subject boxes</strong>
+                        <small>One subject uses the full image when disabled</small>
                       </span>
                       <span class="switch">
                         <input id="sam3d-manual-bbox" type="checkbox">
@@ -753,7 +776,7 @@
                       <small>Leave empty to let SAM 3D estimate the camera intrinsics.</small>
                     </label>
                     <fieldset class="sam3d-bbox-fields" id="sam3d-bbox-fields" disabled>
-                      <legend>Person box · percentage of image</legend>
+                      <legend id="sam3d-bbox-legend">Selected subject box · percentage of image</legend>
                       <label>
                         <span>X</span>
                         <input id="sam3d-bbox-x" type="number" min="0" max="100" step="0.1" value="0">
@@ -887,8 +910,8 @@
               >
                 <div class="sam3d-handoff-heading">
                   <div>
-                    <p class="eyebrow">Post-reconstruction handoff</p>
-                    <h3 id="sam3d-handoff-title">Fit the body, then place it</h3>
+                    <p class="eyebrow">Pre-apply workspace</p>
+                    <h3 id="sam3d-handoff-title">Prepare every subject before VaM changes</h3>
                   </div>
                   <div
                     class="sam3d-handoff-tabs"
@@ -905,7 +928,7 @@
                       data-sam3d-handoff-tab="morph"
                     >
                       <span>1</span>
-                      Morph
+                      Subjects
                     </button>
                     <button
                       id="sam3d-handoff-pose-tab"
@@ -916,19 +939,41 @@
                       data-sam3d-handoff-tab="pose"
                     >
                       <span>2</span>
-                      Pose + camera
+                      Pose
+                    </button>
+                    <button
+                      id="sam3d-handoff-genital-tab"
+                      type="button"
+                      role="tab"
+                      aria-selected="false"
+                      aria-controls="sam3d-genital-panel"
+                      data-sam3d-handoff-tab="genital"
+                    >
+                      <span>3</span>
+                      Genital editor
+                    </button>
+                    <button
+                      id="sam3d-handoff-review-tab"
+                      type="button"
+                      role="tab"
+                      aria-selected="false"
+                      aria-controls="sam3d-review-panel"
+                      data-sam3d-handoff-tab="review"
+                    >
+                      <span>4</span>
+                      Review &amp; Apply
                     </button>
                   </div>
                 </div>
 
                 <div class="sam3d-handoff-target">
                   <label class="sam3d-proportions-target" for="sam3d-person-target">
-                    <span>Target Person</span>
+                    <span>Primary target Person</span>
                     <select id="sam3d-person-target">
                       <option value="">Waiting for VaM…</option>
                     </select>
                     <small>
-                      Shared by both tabs. Morph analysis is read-only until you press Apply body fit.
+                      The primary subject keeps the current single-Person body-fit and pose workflow.
                     </small>
                   </label>
                 </div>
@@ -944,7 +989,7 @@
                     <span class="sam3d-step">4</span>
                     <div>
                       <p class="eyebrow">Body proportions</p>
-                      <h3 id="sam3d-proportions-title">Fit structure and body shape before posing</h3>
+                      <h3 id="sam3d-proportions-title">Assign subjects and fit the primary body</h3>
                     </div>
                   </div>
                   <button
@@ -954,6 +999,29 @@
                     disabled
                   >Analyze</button>
                 </header>
+
+                <section class="sam3d-subject-assignments" aria-labelledby="sam3d-subject-assignments-title">
+                  <header>
+                    <div>
+                      <strong id="sam3d-subject-assignments-title">Subject assignments</strong>
+                      <small>Use a SAM body where it is reliable, or place a cropped second subject manually.</small>
+                    </div>
+                    <div class="sam3d-assignment-heading-actions">
+                      <span id="sam3d-assignment-count">1 subject</span>
+                      <button
+                        class="secondary-button small"
+                        id="sam3d-add-manual-subject"
+                        type="button"
+                      >Add manual subject</button>
+                    </div>
+                  </header>
+                  <div id="sam3d-subject-assignment-list"></div>
+                  <p>
+                    The primary must remain Auto (SAM) because its reconstruction supplies
+                    the shared camera. Two assigned subjects can be applied atomically in
+                    one shared frame.
+                  </p>
+                </section>
 
                 <section
                   class="sam3d-vam-reference"
@@ -1477,8 +1545,8 @@
                   <div>
                     <span class="sam3d-step">5</span>
                     <div>
-                      <p class="eyebrow">VaM handoff</p>
-                      <h3 id="sam3d-apply-title">Apply Person pose and camera together</h3>
+                      <p class="eyebrow">Pose draft</p>
+                      <h3 id="sam3d-apply-title">Prepare pose and shared camera settings</h3>
                     </div>
                   </div>
                   <span class="sam3d-revision" id="sam3d-revision">Revision —</span>
@@ -1539,6 +1607,314 @@
                     </small>
                   </span>
                 </label>
+
+                <section
+                  class="sam3d-manual-pose"
+                  id="sam3d-manual-pose"
+                  hidden
+                  aria-labelledby="sam3d-manual-pose-title"
+                >
+                  <header class="sam3d-manual-pose-heading">
+                    <div>
+                      <p class="eyebrow">Manual partial subject</p>
+                      <h4 id="sam3d-manual-pose-title">Place the visible body controls</h4>
+                      <p>
+                        Use this when SAM reconstructed the dominant person twice or the
+                        second body is cropped. Off-frame controls remain editable in the
+                        overscan area. Genital placement stays in its separate editor.
+                      </p>
+                    </div>
+                    <label for="sam3d-manual-pose-subject">
+                      <span>Manual subject</span>
+                      <select id="sam3d-manual-pose-subject"></select>
+                    </label>
+                  </header>
+
+                  <div
+                    class="sam3d-manual-pose-warning"
+                    id="sam3d-manual-pose-warning"
+                    role="status"
+                    aria-live="polite"
+                    hidden
+                  ></div>
+
+                  <div class="sam3d-manual-pose-toolbar">
+                    <label for="sam3d-manual-pose-template">
+                      <span>Reset template</span>
+                      <select id="sam3d-manual-pose-template">
+                        <option value="upright">Upright</option>
+                        <option value="pov-lying">POV / lying toward camera</option>
+                      </select>
+                    </label>
+                    <label for="sam3d-manual-pose-facing">
+                      <span>Facing</span>
+                      <select id="sam3d-manual-pose-facing">
+                        <option value="camera">Toward camera</option>
+                        <option value="away">Away from camera</option>
+                      </select>
+                    </label>
+                    <button
+                      class="secondary-button small"
+                      id="sam3d-manual-pose-reset"
+                      type="button"
+                    >Reset to template</button>
+                    <p>
+                      The source frame is outlined in the middle. The surrounding area
+                      represents normalized coordinates from −0.5 to 1.5.
+                    </p>
+                  </div>
+
+                  <div class="sam3d-manual-pose-workspace">
+                    <div class="sam3d-manual-pose-preview">
+                      <div
+                        class="sam3d-manual-pose-stage"
+                        id="sam3d-manual-pose-stage"
+                        aria-label="Source image with draggable manual body controls and off-frame overscan"
+                      >
+                        <div class="sam3d-manual-pose-source-frame">
+                          <img
+                            id="sam3d-manual-pose-source"
+                            alt="Source image for manual partial-body placement"
+                          >
+                          <span>Source frame</span>
+                        </div>
+                        <svg
+                          id="sam3d-manual-pose-svg"
+                          viewBox="-50 -50 200 200"
+                          preserveAspectRatio="none"
+                          aria-hidden="true"
+                        >
+                          <g id="sam3d-manual-pose-bones"></g>
+                        </svg>
+                        <div id="sam3d-manual-pose-handles"></div>
+                      </div>
+                      <p>
+                        Drag a control to its projected image position. Dashed controls
+                        are released during Apply (position + rotation Off), so they follow
+                        and settle with the body. Undo restores their original states and
+                        transforms. Striped labels mark coordinates outside the source
+                        frame. Include enough connected visible controls to describe the
+                        pose you want. L/R are the Person’s anatomical sides, so they
+                        mirror on screen when facing the camera.
+                      </p>
+                    </div>
+
+                    <div class="sam3d-manual-pose-controls">
+                      <section class="sam3d-manual-pose-selected">
+                        <div>
+                          <span>Selected control</span>
+                          <strong id="sam3d-manual-pose-selected-label">Hip</strong>
+                        </div>
+                        <label for="sam3d-manual-pose-visible">
+                          <input id="sam3d-manual-pose-visible" type="checkbox" checked>
+                          <span>Include this control · off: Release unused VaM control</span>
+                        </label>
+                        <label for="sam3d-manual-pose-depth">
+                          <span>
+                            <span id="sam3d-manual-pose-depth-label">Depth from primary hip plane</span>
+                            <output id="sam3d-manual-pose-depth-value">0.00 m</output>
+                          </span>
+                          <input
+                            id="sam3d-manual-pose-depth"
+                            type="range"
+                            min="-1"
+                            max="1"
+                            step="0.01"
+                            value="0"
+                          >
+                        </label>
+                      </section>
+
+                      <section class="sam3d-manual-pose-joints" aria-labelledby="sam3d-manual-pose-joints-title">
+                        <header>
+                          <strong id="sam3d-manual-pose-joints-title">Body controls</strong>
+                          <span id="sam3d-manual-pose-visible-count">19 included</span>
+                        </header>
+                        <div id="sam3d-manual-pose-joint-list"></div>
+                      </section>
+                    </div>
+                  </div>
+                </section>
+                </section>
+
+                <section
+                  class="sam3d-panel sam3d-genital-panel"
+                  id="sam3d-genital-panel"
+                  role="tabpanel"
+                  aria-labelledby="sam3d-handoff-genital-tab"
+                  hidden
+                >
+                  <header class="sam3d-panel-heading">
+                    <div>
+                      <span class="sam3d-step">6</span>
+                      <div>
+                        <p class="eyebrow">Draft-only correction</p>
+                        <h3 id="sam3d-genital-title">Place the male genital controls before apply</h3>
+                      </div>
+                    </div>
+                    <button class="secondary-button small" id="sam3d-genital-reset" type="button">
+                      Reset editor
+                    </button>
+                  </header>
+
+                  <div class="sam3d-genital-enable-row">
+                    <label class="switch-row" for="sam3d-genital-enabled">
+                      <span>
+                        <strong>Include genital placement</strong>
+                        <small>Stored in this browser draft only; VaM is not changed here.</small>
+                      </span>
+                      <span class="switch">
+                        <input id="sam3d-genital-enabled" type="checkbox">
+                        <span aria-hidden="true"></span>
+                      </span>
+                    </label>
+                  </div>
+
+                  <div class="sam3d-genital-workspace" id="sam3d-genital-workspace">
+                    <div class="sam3d-genital-preview">
+                      <div
+                        class="sam3d-genital-stage"
+                        id="sam3d-genital-stage"
+                        aria-label="Source image with draft penis and testes controls"
+                      >
+                        <img id="sam3d-genital-source" alt="Source image for genital control placement">
+                        <svg
+                          viewBox="0 0 100 100"
+                          preserveAspectRatio="none"
+                          aria-hidden="true"
+                        >
+                          <polyline id="sam3d-genital-chain" points="50,64 50,72 50,80"></polyline>
+                        </svg>
+                        <button
+                          class="sam3d-genital-handle is-base"
+                          id="sam3d-genital-handle-base"
+                          type="button"
+                          data-sam3d-genital-handle="base"
+                          aria-label="Penis base control"
+                        ><span>Base</span></button>
+                        <button
+                          class="sam3d-genital-handle is-mid"
+                          id="sam3d-genital-handle-mid"
+                          type="button"
+                          data-sam3d-genital-handle="mid"
+                          aria-label="Penis middle control"
+                        ><span>Mid</span></button>
+                        <button
+                          class="sam3d-genital-handle is-tip"
+                          id="sam3d-genital-handle-tip"
+                          type="button"
+                          data-sam3d-genital-handle="tip"
+                          aria-label="Penis tip control"
+                        ><span>Tip</span></button>
+                        <button
+                          class="sam3d-genital-handle is-testes"
+                          id="sam3d-genital-handle-testes"
+                          type="button"
+                          data-sam3d-genital-handle="testes"
+                          aria-label="Optional testes control"
+                          hidden
+                        ><span>Testes</span></button>
+                      </div>
+                      <p>
+                        Drag the projected controls over the source. Depth offsets are bounded separately because a still image has no reliable depth.
+                      </p>
+                    </div>
+
+                    <div class="sam3d-genital-controls">
+                      <div class="sam3d-target-grid">
+                        <label>
+                          <span>Male subject</span>
+                          <select id="sam3d-genital-subject"></select>
+                        </label>
+                        <label>
+                          <span>Detected body</span>
+                          <select id="sam3d-genital-body"></select>
+                        </label>
+                        <label>
+                          <span>VaM Person target</span>
+                          <select id="sam3d-genital-target">
+                            <option value="">Not assigned</option>
+                          </select>
+                        </label>
+                      </div>
+
+                      <fieldset class="sam3d-genital-options">
+                        <legend>Controller behavior</legend>
+                        <label for="sam3d-genital-unlock-base">
+                          <input id="sam3d-genital-unlock-base" type="checkbox">
+                          <span>
+                            <strong>Unlock base</strong>
+                            <small>The default projected base cannot move until explicitly unlocked.</small>
+                          </span>
+                        </label>
+                        <label for="sam3d-genital-lock-lengths">
+                          <input id="sam3d-genital-lock-lengths" type="checkbox" checked>
+                          <span>
+                            <strong>Keep projected segment lengths fixed</strong>
+                            <small>Dragging preserves the screen-space base→mid and mid→tip lengths.</small>
+                          </span>
+                        </label>
+                        <label for="sam3d-genital-testes">
+                          <input id="sam3d-genital-testes" type="checkbox">
+                          <span>
+                            <strong>Include testesControl</strong>
+                            <small>Optional and off by default.</small>
+                          </span>
+                        </label>
+                      </fieldset>
+
+                      <fieldset class="sam3d-genital-depths">
+                        <legend>Depth offsets</legend>
+                        <label for="sam3d-genital-depth-base">
+                          <span>Base <output id="sam3d-genital-depth-base-value">0.00</output></span>
+                          <input id="sam3d-genital-depth-base" type="range" min="-0.5" max="0.5" step="0.01" value="0">
+                        </label>
+                        <label for="sam3d-genital-depth-mid">
+                          <span>Mid <output id="sam3d-genital-depth-mid-value">0.00</output></span>
+                          <input id="sam3d-genital-depth-mid" type="range" min="-0.5" max="0.5" step="0.01" value="0">
+                        </label>
+                        <label for="sam3d-genital-depth-tip">
+                          <span>Tip <output id="sam3d-genital-depth-tip-value">0.00</output></span>
+                          <input id="sam3d-genital-depth-tip" type="range" min="-0.5" max="0.5" step="0.01" value="0">
+                        </label>
+                        <label for="sam3d-genital-depth-testes" id="sam3d-genital-depth-testes-row" hidden>
+                          <span>Testes <output id="sam3d-genital-depth-testes-value">0.00</output></span>
+                          <input id="sam3d-genital-depth-testes" type="range" min="-0.5" max="0.5" step="0.01" value="0">
+                        </label>
+                      </fieldset>
+
+                    </div>
+                  </div>
+
+                  <p class="sam3d-apply-note">
+                    Editing only changes this bounded browser draft. VaM receives it once, together with both poses and the shared camera, from Review &amp; Apply.
+                  </p>
+                </section>
+
+                <section
+                  class="sam3d-panel sam3d-review-panel"
+                  id="sam3d-review-panel"
+                  role="tabpanel"
+                  aria-labelledby="sam3d-handoff-review-tab"
+                  hidden
+                >
+                  <header class="sam3d-panel-heading">
+                    <div>
+                      <span class="sam3d-step">7</span>
+                      <div>
+                        <p class="eyebrow">Final review</p>
+                        <h3 id="sam3d-review-title">Review the complete atomic apply</h3>
+                      </div>
+                    </div>
+                  </header>
+
+                  <div class="sam3d-review-summary" id="sam3d-review-summary"></div>
+                  <p
+                    class="sam3d-pair-draft-note"
+                    id="sam3d-pair-draft-note"
+                    role="status"
+                    aria-live="polite"
+                  ></p>
 
                 <p class="sam3d-apply-note" id="sam3d-apply-note" role="status" aria-live="polite">
                   Select an existing Person and an Empty atom running VR Video &amp; Funscript Exporter.

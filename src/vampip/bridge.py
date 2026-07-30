@@ -932,6 +932,36 @@ def request_sam3d_apply(
     )
 
 
+def request_sam3d_pair_apply(
+    vam_root: Path,
+    *,
+    job_id: str,
+    expected_revision: str,
+    solution_sha256: str,
+    camera_uid: str,
+    create_camera: bool,
+) -> str:
+    if not isinstance(create_camera, bool):
+        raise TypeError("create_camera must be a bool")
+    return _write_request(
+        vam_root,
+        {
+            "command": "applySam3dPair",
+            "jobId": _validate_opaque_token(job_id, label="job_id"),
+            "expectedRevision": _validate_opaque_token(
+                expected_revision,
+                label="expected_revision",
+            ),
+            "solutionSha256": _validate_sha256(
+                solution_sha256,
+                label="solution_sha256",
+            ),
+            "cameraUid": _validate_target_uid(camera_uid),
+            "createCamera": create_camera,
+        },
+    )
+
+
 def _sam3d_reference_request_fields(
     *,
     job_id: str,

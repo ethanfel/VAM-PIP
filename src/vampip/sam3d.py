@@ -37,6 +37,7 @@ SAM3D_MODEL_CONFIG_LIMIT = 64 * 1024
 SAM3D_CAPTURE_HISTORY_LIMIT = 50
 SAM3D_CAPTURE_FILE_LIMIT = 256 * 1024 * 1024
 SAM3D_ARRAYS_FILE_LIMIT = 512 * 1024 * 1024
+SAM3D_MAX_BBOXES = 4
 SAM3D_JOB_ID = re.compile(r"^[0-9a-f]{32}$")
 SAM3D_MODEL_ID = re.compile(r"^[a-z0-9][a-z0-9_.+-]{0,63}$")
 SAM3D_COMPARISON_MODEL_IDS = frozenset({"dinov3_vith16plus", "vit_hmr_512_384"})
@@ -987,14 +988,11 @@ class Sam3dJobManager:
         )
 
     @staticmethod
-    def _request_values(
+    def _bbox_values(
         *,
         image: ImageInfo,
-        bbox: list[float] | None,
-        vertical_fov: float | None,
-    ) -> tuple[list[float], float | None]:
-        if bbox is None:
-            bbox = [0.0, 0.0, float(image.width), float(image.height)]
+        bbox: object,
+    ) -> list[float]:
         if not isinstance(bbox, list) or len(bbox) != 4:
             raise ValueError("bbox must contain x1,y1,x2,y2")
         values: list[float] = []
@@ -1016,6 +1014,19 @@ class Sam3dJobManager:
             or (x2 - x1) * (y2 - y1) < 256.0
         ):
             raise ValueError("bbox is outside the image or too small")
+        return values
+
+    @classmethod
+    def _request_values(
+        cls,
+        *,
+        image: ImageInfo,
+        bbox: list[float] | None,
+        vertical_fov: float | None,
+    ) -> tuple[list[float], float | None]:
+        if bbox is None:
+            bbox = [0.0, 0.0, float(image.width), float(image.height)]
+        values = cls._bbox_values(image=image, bbox=bbox)
         if vertical_fov is not None:
             if isinstance(vertical_fov, bool) or not isinstance(
                 vertical_fov, (int, float)
@@ -1030,22 +1041,68 @@ class Sam3dJobManager:
                 raise ValueError("vertical_fov must be between 5 and 170 degrees")
         return values, vertical_fov
 
+    @classmethod
+    def _request_bboxes(
+        cls,
+        *,
+        image: ImageInfo,
+        bboxes: object,
+        vertical_fov: float | None,
+    ) -> tuple[list[list[float]], float | None]:
+        if (
+            not isinstance(bboxes, list)
+            or not 1 <= len(bboxes) <= SAM3D_MAX_BBOXES
+        ):
+            raise ValueError(
+                f"bboxes must contain between 1 and {SAM3D_MAX_BBOXES} boxes"
+            )
+        values = [
+            cls._bbox_values(image=image, bbox=bbox)
+            for bbox in bboxes
+        ]
+        _, vertical_fov = cls._request_values(
+            image=image,
+            bbox=values[0],
+            vertical_fov=vertical_fov,
+        )
+        return values, vertical_fov
+
     def create(
         self,
         image_data: bytes,
         content_type: str,
         *,
-        bbox: list[float] | None = None,
+        bbox: list[float] | list[list[float]] | None = None,
+        bboxes: list[list[float]] | None = None,
         vertical_fov: float | None = None,
         model_id: str | None = None,
         comparison_id: str | None = None,
     ) -> dict[str, object]:
         image = inspect_image(image_data, content_type)
-        bbox, vertical_fov = self._request_values(
-            image=image,
-            bbox=bbox,
-            vertical_fov=vertical_fov,
+        nested_bbox = (
+            isinstance(bbox, list)
+            and bool(bbox)
+            and isinstance(bbox[0], list)
         )
+        if bboxes is not None and bbox is not None:
+            raise ValueError("bbox and bboxes cannot both be supplied")
+        if bboxes is not None or nested_bbox:
+            raw_bboxes: object = bboxes if bboxes is not None else bbox
+            normalized_bboxes, vertical_fov = self._request_bboxes(
+                image=image,
+                bboxes=raw_bboxes,
+                vertical_fov=vertical_fov,
+            )
+            normalized_bbox: list[float] | None = None
+            request_schema = 3
+        else:
+            normalized_bbox, vertical_fov = self._request_values(
+                image=image,
+                bbox=bbox,
+                vertical_fov=vertical_fov,
+            )
+            normalized_bboxes = [normalized_bbox]
+            request_schema = 2
         if model_id is None:
             model_id = self.default_model_id
         model_id = validate_model_id(model_id)
@@ -1070,15 +1127,18 @@ class Sam3dJobManager:
         except OSError:
             pass
         request = {
-            "schema": 2,
+            "schema": request_schema,
             "jobId": job_id,
             "modelId": model_id,
             "sourceType": image.content_type,
             "sourceWidth": image.width,
             "sourceHeight": image.height,
-            "bbox": bbox,
             "verticalFov": vertical_fov,
         }
+        if request_schema == 3:
+            request["bboxes"] = normalized_bboxes
+        else:
+            request["bbox"] = normalized_bbox
         if comparison_id is not None:
             request["comparisonId"] = comparison_id
         atomic_write_text(
@@ -1104,7 +1164,7 @@ class Sam3dJobManager:
                         model_id=model_id,
                         image=image,
                         image_data=image_data,
-                        bbox=bbox,
+                        bboxes=normalized_bboxes,
                         vertical_fov=vertical_fov,
                     )
                 connection.execute(
@@ -1147,7 +1207,7 @@ class Sam3dJobManager:
         model_id: str,
         image: ImageInfo,
         image_data: bytes,
-        bbox: list[float],
+        bboxes: list[list[float]],
         vertical_fov: float | None,
     ) -> None:
         members: list[tuple[sqlite3.Row, dict[str, object]]] = []
@@ -1185,6 +1245,11 @@ class Sam3dJobManager:
             )
         if existing_model_id == model_id:
             raise ValueError("SAM3D comparison must use distinct model IDs")
+        existing_bboxes = (
+            request.get("bboxes")
+            if request.get("schema") == 3
+            else [request.get("bbox")]
+        )
         if (
             row["source_type"] != image.content_type
             or row["source_width"] != image.width
@@ -1192,7 +1257,7 @@ class Sam3dJobManager:
             or request.get("sourceType") != image.content_type
             or request.get("sourceWidth") != image.width
             or request.get("sourceHeight") != image.height
-            or request.get("bbox") != bbox
+            or existing_bboxes != bboxes
             or request.get("verticalFov") != vertical_fov
         ):
             raise ValueError(
@@ -1271,6 +1336,7 @@ class Sam3dJobManager:
                 "height": int(row["source_height"]),
             },
             "bbox": request.get("bbox"),
+            "bboxes": request.get("bboxes"),
             "vertical_fov": request.get("verticalFov"),
             "model": model,
             "comparison_id": request.get("comparisonId"),
@@ -1597,7 +1663,7 @@ class Sam3dJobManager:
             raise RuntimeError("SAM 3D Body manifest is unreadable") from error
         if (
             not isinstance(manifest, dict)
-            or manifest.get("schema") not in {1, 2}
+            or manifest.get("schema") not in {1, 2, 3}
             or manifest.get("jobId") != job_id
         ):
             raise RuntimeError("SAM 3D Body manifest identity/schema is invalid")
@@ -1641,6 +1707,8 @@ class Sam3dJobManager:
         }
         model_request_keys = legacy_request_keys | {"modelId"}
         comparison_request_keys = model_request_keys | {"comparisonId"}
+        multi_request_keys = (model_request_keys - {"bbox"}) | {"bboxes"}
+        multi_comparison_request_keys = multi_request_keys | {"comparisonId"}
         request_schema = request.get("schema") if isinstance(request, dict) else None
         request_key_set = (
             frozenset(request) if isinstance(request, dict) else frozenset()
@@ -1651,6 +1719,13 @@ class Sam3dJobManager:
             request_schema == 2
             and request_key_set
             in {frozenset(model_request_keys), frozenset(comparison_request_keys)}
+        ) or (
+            request_schema == 3
+            and request_key_set
+            in {
+                frozenset(multi_request_keys),
+                frozenset(multi_comparison_request_keys),
+            }
         )
         if (
             not isinstance(request, dict)
@@ -1667,7 +1742,7 @@ class Sam3dJobManager:
             "name": "facebookresearch/sam-3d-body",
             "mode": "native-standalone",
         }
-        if request_schema == 2:
+        if request_schema in {2, 3}:
             try:
                 request_model_id = validate_model_id(request.get("modelId"))
             except ValueError as error:
@@ -1710,16 +1785,26 @@ class Sam3dJobManager:
         ):
             raise RuntimeError("SAM 3D Body request source is invalid")
         try:
-            request_bbox, request_vertical_fov = self._request_values(
-                image=ImageInfo(
-                    content_type=request_type,
-                    extension=_CONTENT_TYPE_EXTENSIONS[request_type],
-                    width=request_width,
-                    height=request_height,
-                ),
-                bbox=request.get("bbox"),
-                vertical_fov=request.get("verticalFov"),
+            request_image = ImageInfo(
+                content_type=request_type,
+                extension=_CONTENT_TYPE_EXTENSIONS[request_type],
+                width=request_width,
+                height=request_height,
             )
+            if request_schema == 3:
+                request_bboxes, request_vertical_fov = self._request_bboxes(
+                    image=request_image,
+                    bboxes=request.get("bboxes"),
+                    vertical_fov=request.get("verticalFov"),
+                )
+                request_bbox = None
+            else:
+                request_bbox, request_vertical_fov = self._request_values(
+                    image=request_image,
+                    bbox=request.get("bbox"),
+                    vertical_fov=request.get("verticalFov"),
+                )
+                request_bboxes = [request_bbox]
         except ValueError as error:
             raise RuntimeError(
                 "SAM 3D Body request camera inputs are invalid"
@@ -1748,25 +1833,34 @@ class Sam3dJobManager:
                 arrays_metadata,
                 person_count=len(people) if isinstance(people, list) else 0,
             )
+        expected_source_keys = {
+            "width",
+            "height",
+            "contentType",
+            "bboxes" if request_schema == 3 else "bbox",
+            "verticalFov",
+        }
+        source_boxes_valid = (
+            source.get("bboxes") == request_bboxes
+            if isinstance(source, dict) and request_schema == 3
+            else (
+                isinstance(source, dict)
+                and source.get("bbox") == request_bbox
+            )
+        )
         if (
             not isinstance(source, dict)
-            or set(source)
-            != {
-                "width",
-                "height",
-                "contentType",
-                "bbox",
-                "verticalFov",
-            }
+            or set(source) != expected_source_keys
             or source.get("width") != request_width
             or source.get("height") != request_height
             or source.get("contentType") != request_type
-            or source.get("bbox") != request_bbox
+            or not source_boxes_valid
             or source.get("verticalFov") != request_vertical_fov
             or engine != expected_engine
             or not artifacts_valid
             or not isinstance(people, list)
             or not 1 <= len(people) <= 16
+            or (request_schema == 3 and len(people) != len(request_bboxes))
         ):
             raise RuntimeError("SAM 3D Body manifest contents are invalid")
         for person_index, person in enumerate(people):

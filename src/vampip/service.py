@@ -38,6 +38,7 @@ from vampip.bridge import (
     request_select_atom,
     request_select_person,
     request_sam3d_apply,
+    request_sam3d_pair_apply,
     request_sam3d_capture,
     request_sam3d_reference,
     request_remove_sam3d_reference,
@@ -128,6 +129,7 @@ from vampip.sam3d_body_shape import (
 )
 from vampip.sam3d_vam import (
     VR_RENDERER_RESOLUTIONS,
+    build_vam_pair_solution,
     build_vam_solution,
     sam3d_solution_revision,
 )
@@ -2203,7 +2205,7 @@ class ManagerService:
         )
         if (
             current_applied
-            and action_name == "apply"
+            and action_name in {"apply", "apply-pair"}
             and action_state in {"queued", "running"}
         ):
             action_state = "succeeded"
@@ -2903,7 +2905,7 @@ class ManagerService:
             raise ValueError("SAM3D bridge solution is unreadable") from error
         if (
             not isinstance(document, dict)
-            or document.get("schema") != 1
+            or document.get("schema") not in {1, 2}
             or document.get("jobId") != job_id
             or document.get("revision") != expected
             or sam3d_solution_revision(document) != expected
@@ -3669,6 +3671,169 @@ class ManagerService:
             "create_camera": create_camera,
             "keep_reference": keep_reference,
             "reference": reference,
+            "action_state": "queued",
+        }
+
+    def apply_sam3d_pair(
+        self,
+        job_id: str,
+        *,
+        expected_job_revision: object,
+        subjects: object,
+        primary_subject_index: int,
+        camera_uid: object,
+        create_camera: bool = False,
+        aspect_ratio: str = "16:9",
+        output_resolution: str = "1280x720 (HD)",
+        image_format: str = "jpeg",
+        horizontal_fov: float | None = None,
+    ) -> dict[str, object]:
+        job_id = validate_sam3d_job_id(job_id)
+        expected_job_revision = self._sam3d_solution_revision(
+            expected_job_revision,
+            label="expected_job_revision",
+        )
+        if not isinstance(create_camera, bool):
+            raise TypeError("create_camera must be a boolean")
+        if not isinstance(subjects, list) or len(subjects) != 2:
+            raise ValueError("paired SAM3D apply requires exactly two subjects")
+        if (
+            isinstance(primary_subject_index, bool)
+            or not isinstance(primary_subject_index, int)
+            or primary_subject_index not in {0, 1}
+        ):
+            raise ValueError("primary_subject_index must be 0 or 1")
+
+        scene = self._require_live_capability(
+            "sam3d-pair-apply-v1",
+            action_label="applying a paired SAM3D pose",
+        )
+        live_sam3d = scene.get("sam3d")
+        if isinstance(live_sam3d, dict) and live_sam3d.get("applied") is True:
+            raise ValueError(
+                "undo the currently applied SAM3D solution before applying another"
+            )
+        capabilities = {str(value) for value in scene.get("capabilities", [])}
+        if "sam3d-camera-vrfunscript-v1" not in capabilities:
+            raise ValueError(
+                "the loaded VAM-PIP bridge does not provide the VR/Funscript camera"
+            )
+
+        normalized_subjects: list[dict[str, object]] = []
+        seen_targets: set[str] = set()
+        for raw_subject in subjects:
+            if not isinstance(raw_subject, dict):
+                raise TypeError("pair subjects must be objects")
+            if "target_uid" not in raw_subject or "person_index" not in raw_subject:
+                raise ValueError(
+                    "each pair subject requires target_uid and person_index"
+                )
+            target_uid, _ = self._validate_live_atom_target(
+                scene,
+                raw_subject["target_uid"],
+                expected_atom_type="Person",
+                create_if_missing=False,
+            )
+            if target_uid in seen_targets:
+                raise ValueError("pair subjects must target distinct Person atoms")
+            seen_targets.add(target_uid)
+            normalized_subjects.append(
+                {
+                    **raw_subject,
+                    "target_uid": target_uid,
+                }
+            )
+
+        camera_uid, camera_exists = self._validate_live_atom_target(
+            scene,
+            camera_uid,
+            expected_atom_type="Empty",
+            create_if_missing=create_camera,
+        )
+        if camera_exists:
+            camera_atom = self._sam3d_camera_atom(scene, camera_uid)
+            if (
+                camera_atom is None
+                or not isinstance(camera_atom.get("sam3dCamera"), dict)
+                or camera_atom["sam3dCamera"].get("compatible") is not True
+            ):
+                raise ValueError(
+                    "camera_uid is not a compatible VR/Funscript camera atom"
+                )
+
+        manager = self._sam3d()
+        job = manager.get(job_id)
+        if job["state"] != "succeeded":
+            raise Sam3dJobError("SAM3D job has not completed successfully")
+        if job.get("revision") != expected_job_revision:
+            raise ValueError(
+                "SAM3D job revision has changed; refresh before applying"
+            )
+        manifest = manager.manifest(job_id)
+        if manifest.get("revision") != expected_job_revision:
+            raise ValueError(
+                "SAM3D job revision has changed; refresh before applying"
+            )
+        solution = build_vam_pair_solution(
+            manifest,
+            job_id=job_id,
+            subjects=normalized_subjects,
+            primary_subject_index=primary_subject_index,
+            aspect_ratio=aspect_ratio,
+            output_resolution=output_resolution,
+            image_format=image_format,
+            horizontal_fov=horizontal_fov,
+        )
+        solution_payload = (
+            json.dumps(
+                solution,
+                ensure_ascii=True,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            + "\n"
+        )
+        solution_sha256 = hashlib.sha256(
+            solution_payload.encode("ascii")
+        ).hexdigest()
+        solution_revision = str(solution["revision"])
+        with self._bridge_mailbox_transaction():
+            self._write_sam3d_solution(job_id, solution_payload)
+            bridge_request = request_sam3d_pair_apply(
+                self.vam_root,
+                job_id=job_id,
+                expected_revision=solution_revision,
+                solution_sha256=solution_sha256,
+                camera_uid=camera_uid,
+                create_camera=create_camera,
+            )
+        primary_target = str(
+            normalized_subjects[primary_subject_index]["target_uid"]
+        )
+        manager.record_vam_action(
+            job_id,
+            action="apply-pair",
+            revision=solution_revision,
+            request_id=bridge_request,
+            bridge_instance=self._sam3d_bridge_instance(scene),
+            target_uid=primary_target,
+            camera_uid=camera_uid,
+        )
+        return {
+            "job_id": job_id,
+            "job_revision": expected_job_revision,
+            "solution_revision": solution_revision,
+            "bridge_request": bridge_request,
+            "subjects": [
+                {
+                    "target_uid": subject["target_uid"],
+                    "person_index": subject["person_index"],
+                }
+                for subject in normalized_subjects
+            ],
+            "primary_subject_index": primary_subject_index,
+            "camera_uid": camera_uid,
+            "create_camera": create_camera,
             "action_state": "queued",
         }
 

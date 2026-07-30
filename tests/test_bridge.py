@@ -1490,6 +1490,418 @@ class BridgeSourceTests(unittest.TestCase):
         self.assertNotIn('request["actionName"]', source)
         self.assertNotIn('request["solutionPath"]', source)
 
+    def test_bridge_sam3d_pair_apply_is_bounded_atomic_and_shared_camera(
+        self,
+    ) -> None:
+        repository = Path(__file__).resolve().parents[1]
+        source = (
+            repository / "src" / "vampip" / "bridge_assets" / "VAMPipBridge.cs"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn('CommandApplySam3dPair = "applySam3dPair"', source)
+        self.assertIn('"sam3d-pair-apply-v1"', source)
+        self.assertIn("Sam3dPairSolutionSchema = 2", source)
+        self.assertIn('"shared-camera-subjects"', source)
+        self.assertIn('Sam3dPairUnits = "meters"', source)
+        self.assertIn("Sam3dPairSubjectCount = 2", source)
+        self.assertIn("Sam3dMaximumDetectedPersonCount = 32", source)
+        self.assertIn("subjects.Count != Sam3dPairSubjectCount", source)
+        self.assertIn("targetUids.Contains(subject.TargetUid)", source)
+        self.assertIn("personIndexes.Contains(subject.PersonIndex)", source)
+        for controller_id in (
+            "penisBaseControl",
+            "penisMidControl",
+            "penisTipControl",
+            "testesControl",
+        ):
+            self.assertIn(controller_id, source)
+        self.assertIn("Sam3dMaximumGenitalControllerCount = 4", source)
+        self.assertIn("controller.HasRotation", source)
+        self.assertIn("FindSam3dPairSavedController(", source)
+        self.assertIn("SnapshotSam3dPairState(", source)
+        self.assertIn("savedPerson.PersonCollisionEnabled", source)
+        self.assertIn("BeginSam3dPairPoseTransaction(", source)
+        self.assertIn("RestoreSam3dPairSnapshotContents(", source)
+        self.assertIn(
+            "Vector3 commonCameraWorld =\n"
+            "                    primaryAnchor +",
+            source,
+        )
+        self.assertIn(
+            "Vector3 subjectAnchor =\n"
+            "                        commonCameraWorld -",
+            source,
+        )
+        self.assertIn(
+            "cameraController.control.position =\n"
+            "                    commonCameraWorld;",
+            source,
+        )
+        pair_start = source.index(
+            "private IEnumerator ExecuteApplySam3dPair("
+        )
+        pair_end = source.index(
+            "private IEnumerator ExecuteShowSam3dReference(",
+            pair_start,
+        )
+        pair_apply = source[pair_start:pair_end]
+        self.assertIn("RestoreSam3dSnapshot(snapshot);", pair_apply)
+        self.assertNotIn("Sam3dReference", pair_apply)
+        self.assertNotIn('request["solutionPath"]', pair_apply)
+
+    def test_bridge_sam3d_pair_coordinates_and_rollback_are_strict(
+        self,
+    ) -> None:
+        repository = Path(__file__).resolve().parents[1]
+        source = (
+            repository / "src" / "vampip" / "bridge_assets" / "VAMPipBridge.cs"
+        ).read_text(encoding="utf-8")
+
+        axes_start = source.index(
+            "private static void ValidateSam3dPairCanonicalAxes("
+        )
+        axes_end = source.index(
+            "private static bool Sam3dPairCameraPositionsMatch(",
+            axes_start,
+        )
+        axes_source = source[axes_start:axes_end]
+        self.assertIn('axes.Count != 3', axes_source)
+        for field, value in (
+            ("right", "+X"),
+            ("up", "+Y"),
+            ("forward", "+Z"),
+        ):
+            self.assertIn(f'axes.HasKey("{field}")', axes_source)
+            self.assertIn(f'(string)axes["{field}"]', axes_source)
+            self.assertIn(f'"{value}"', axes_source)
+
+        load_start = source.index(
+            "private static Sam3dPairSolution LoadSam3dPairSolution("
+        )
+        load_end = source.index(
+            "private static void ValidateSam3dReferenceFile(",
+            load_start,
+        )
+        load_source = source[load_start:load_end]
+        self.assertIn("ValidateSam3dPairCanonicalAxes(document);", load_source)
+        self.assertIn(
+            "Sam3dPairCameraConsistencyTolerance =\n"
+            "            0.0001f;",
+            source,
+        )
+        self.assertIn("Sam3dPairCameraPositionsMatch(", load_source)
+        self.assertIn(
+            "solution.Subjects[\n"
+            "                        solution.PrimarySubjectIndex]\n"
+            "                    .CameraFromHip",
+            load_source,
+        )
+        self.assertIn("solution.Camera.Position", load_source)
+
+        pair_restore_start = source.index(
+            "private static void RestoreSam3dPairSnapshotContents("
+        )
+        pair_restore_end = source.index(
+            "private static bool RestoreSam3dSnapshotContents(",
+            pair_restore_start,
+        )
+        pair_restore = source[pair_restore_start:pair_restore_end]
+        self.assertIn("out bool cameraRemovedByUndo", pair_restore)
+        self.assertIn("List<string> restoreErrors", pair_restore)
+        self.assertIn("RestoreSam3dSavedControllerTransform(", pair_restore)
+        self.assertIn("SnapSam3dControllerPhysicalPose(", pair_restore)
+        self.assertIn("catch (Exception exception)", pair_restore)
+        self.assertIn("RestoreSam3dSharedSnapshotContents(", pair_restore)
+        self.assertNotIn("RestoreSam3dSnapshotContents(", pair_restore)
+
+        pair_transaction_start = source.index(
+            "private void RestoreSam3dPairSnapshot("
+        )
+        pair_transaction_end = source.index(
+            "private static void RestoreSam3dSavedControllerTransform(",
+            pair_transaction_start,
+        )
+        pair_transaction = source[
+            pair_transaction_start:pair_transaction_end
+        ]
+        self.assertIn(
+            "BeginSam3dPairRestoreTransactionBestEffort(",
+            pair_transaction,
+        )
+        self.assertIn(
+            "FinishSam3dPairPoseTransaction(",
+            pair_transaction,
+        )
+        self.assertIn(
+            "ThrowSam3dRestoreErrors(restoreErrors);",
+            pair_transaction,
+        )
+        self.assertLess(
+            pair_transaction.index(
+                "FinishSam3dPairPoseTransaction("
+            ),
+            pair_transaction.index(
+                "ThrowSam3dRestoreErrors(restoreErrors);"
+            ),
+        )
+
+        best_effort_begin_start = source.index(
+            "private static void BeginSam3dPairRestoreTransactionBestEffort("
+        )
+        best_effort_begin_end = source.index(
+            "private static void RestoreSam3dPairSnapshotContents(",
+            best_effort_begin_start,
+        )
+        best_effort_begin = source[
+            best_effort_begin_start:best_effort_begin_end
+        ]
+        self.assertIn("LockSam3dControllerPhysics(saved);", best_effort_begin)
+        self.assertIn("LockSam3dCameraPhysics(snapshot);", best_effort_begin)
+        self.assertGreaterEqual(
+            best_effort_begin.count("catch (Exception exception)"),
+            3,
+        )
+
+        shared_restore_start = source.index(
+            "private static bool RestoreSam3dSharedSnapshotContents("
+        )
+        shared_restore_end = source.index(
+            "private static void SnapSam3dControllerPhysicalPose(",
+            shared_restore_start,
+        )
+        shared_restore = source[shared_restore_start:shared_restore_end]
+        for scope in (
+            "camera controller transform",
+            "camera physical transform",
+            "renderer Flat Horizontal FOV",
+            "renderer Camera Target",
+            "renderer Aspect Ratio",
+            "renderer Output Resolution",
+            "renderer Render Mode",
+            "renderer Image Format",
+            "renderer Generate Funscripts",
+        ):
+            self.assertIn(f'"{scope}"', shared_restore)
+        self.assertGreaterEqual(
+            shared_restore.count("catch (Exception exception)"),
+            9,
+        )
+
+    def test_bridge_sam3d_pair_disabled_body_entries_release_vam_controls(
+        self,
+    ) -> None:
+        repository = Path(__file__).resolve().parents[1]
+        source = (
+            repository / "src" / "vampip" / "bridge_assets" / "VAMPipBridge.cs"
+        ).read_text(encoding="utf-8")
+
+        controller_start = source.index(
+            "private sealed class Sam3dControllerSolution"
+        )
+        controller_end = source.index(
+            "private sealed class Sam3dCameraSolution",
+            controller_start,
+        )
+        controller_source = source[controller_start:controller_end]
+        self.assertIn("public bool Enabled;", controller_source)
+
+        single_parse_start = source.index(
+            "private static Sam3dSolution LoadSam3dSolution("
+        )
+        single_parse_end = source.index(
+            "private static Sam3dCameraSolution ParseSam3dPairCamera(",
+            single_parse_start,
+        )
+        self.assertIn(
+            "controller.Enabled = true;",
+            source[single_parse_start:single_parse_end],
+        )
+
+        boolean_start = source.index(
+            "private static bool ParseSam3dStrictBoolean("
+        )
+        boolean_end = source.index(
+            "private static List<Sam3dControllerSolution>",
+            boolean_start,
+        )
+        boolean_source = source[boolean_start:boolean_end]
+        self.assertIn("node.ToString().Trim();", boolean_source)
+        self.assertIn('"true"', boolean_source)
+        self.assertIn('"false"', boolean_source)
+        self.assertIn(
+            "VaM's legacy SimpleJSON builds disagree",
+            boolean_source,
+        )
+        self.assertIn(
+            "serialized[0] == '\"'",
+            boolean_source,
+        )
+        self.assertIn(
+            "serialized.Substring(",
+            boolean_source,
+        )
+        self.assertIn(
+            "StringComparison.OrdinalIgnoreCase",
+            boolean_source,
+        )
+        self.assertIn("must be a JSON boolean.", boolean_source)
+
+        parser_start = source.index(
+            "ParseSam3dPairControllers("
+        )
+        parser_end = source.index(
+            "private static Sam3dPairSolution LoadSam3dPairSolution(",
+            parser_start,
+        )
+        parser_source = source[parser_start:parser_end]
+        self.assertIn(
+            "values.Count != Sam3dControllerCount",
+            parser_source,
+        )
+        self.assertIn("HashSet<string> seen", parser_source)
+        self.assertIn(
+            "controller.Enabled =\n"
+            "                    genital ||\n"
+            '                    !value.HasKey("enabled")',
+            parser_source,
+        )
+        self.assertIn(
+            "ParseSam3dStrictBoolean(",
+            parser_source,
+        )
+        self.assertIn(
+            "if (!genital && !controller.Enabled)",
+            parser_source,
+        )
+        self.assertIn(
+            'value.HasKey("position") ||\n'
+            '                        value.HasKey("rotation")',
+            parser_source,
+        )
+        disabled_start = parser_source.index(
+            "if (!genital && !controller.Enabled)"
+        )
+        enabled_position_start = parser_source.index(
+            'if (!value.HasKey("position"))',
+            disabled_start,
+        )
+        disabled_source = parser_source[
+            disabled_start:enabled_position_start
+        ]
+        self.assertIn("controller.HasRotation = false;", disabled_source)
+        self.assertIn("result.Add(controller);", disabled_source)
+        self.assertIn("continue;", disabled_source)
+
+        snapshot_start = source.index(
+            "private static void AddSam3dPairSavedControllers("
+        )
+        snapshot_end = source.index(
+            "private static Sam3dUndoSnapshot SnapshotSam3dPairState(",
+            snapshot_start,
+        )
+        snapshot_source = source[snapshot_start:snapshot_end]
+        self.assertIn(
+            "for (index = 0; index < targets.Count; index++)",
+            snapshot_source,
+        )
+        self.assertNotIn("target.Enabled", snapshot_source)
+
+        capture_start = source.index(
+            "private static bool Sam3dPairBodyControllerEnabled("
+        )
+        apply_start = source.index(
+            "private static void ApplySam3dPairTransforms(",
+            capture_start,
+        )
+        head_source = source[capture_start:apply_start]
+        self.assertIn(
+            "Sam3dPairBodyControllerEnabled(",
+            head_source,
+        )
+        self.assertIn(
+            "savedPerson.HeadRequestedRotationCaptured =\n"
+            "                        false;",
+            head_source,
+        )
+        self.assertIn(
+            "if (!savedPerson\n"
+            "                        .HeadRequestedRotationCaptured)",
+            head_source,
+        )
+
+        apply_end = source.index(
+            "private void FinishSam3dActionOk(",
+            apply_start,
+        )
+        apply_source = source[apply_start:apply_end]
+        release_start = source.index(
+            "private static void ReleaseSam3dPairBodyController("
+        )
+        release_end = source.index(
+            "private static bool Sam3dPairBodyControllerEnabled(",
+            release_start,
+        )
+        release_source = source[release_start:release_end]
+        self.assertIn(
+            "FreeControllerV3.PositionState.Off",
+            release_source,
+        )
+        self.assertIn(
+            "FreeControllerV3.RotationState.Off",
+            release_source,
+        )
+        self.assertIn(
+            "controller.currentPositionState !=",
+            release_source,
+        )
+        self.assertIn(
+            "controller.currentRotationState !=",
+            release_source,
+        )
+        self.assertIn(
+            "could not be released.",
+            release_source,
+        )
+        self.assertNotIn("controller.PauseComply();", release_source)
+        self.assertNotIn("controller.control.position", release_source)
+        self.assertNotIn("controller.control.rotation", release_source)
+        self.assertNotIn("onPositionChangeHandlers", release_source)
+        self.assertNotIn(
+            "SnapSam3dControllerPhysicalPose(",
+            release_source,
+        )
+        self.assertGreaterEqual(
+            apply_source.count("if (!target.Enabled)"),
+            2,
+        )
+        disabled_apply_start = apply_source.index(
+            "if (!target.Enabled)"
+        )
+        disabled_apply_end = apply_source.index(
+            "ApplySam3dPairController(",
+            disabled_apply_start,
+        )
+        disabled_apply_source = apply_source[
+            disabled_apply_start:disabled_apply_end
+        ]
+        self.assertIn(
+            "ReleaseSam3dPairBodyController(",
+            disabled_apply_source,
+        )
+        self.assertGreaterEqual(
+            apply_source.count("runtime.Solution.Genitals.Count"),
+            2,
+        )
+        self.assertIn(
+            "runtime.Controllers[target.Id]",
+            apply_source,
+        )
+        self.assertNotIn(
+            "savedPerson.Controllers[\n"
+            "                                controllerIndex].Controller",
+            apply_source,
+        )
+
     def test_bridge_body_proportions_are_tokenized_bounded_and_reversible(
         self,
     ) -> None:
@@ -1642,8 +2054,42 @@ class BridgeSourceTests(unittest.TestCase):
         self.assertIn("DAZMorphVertex[] deltas", catalog_source)
         self.assertIn("delta.delta * step", catalog_source)
         self.assertIn("HashBodyShapeSignature(", catalog_source)
-        self.assertIn("TryBodyShapeMeshChecksum(", catalog_source)
-        self.assertIn("snapshot.BodyShapeMeshChecksum", catalog_source)
+        self.assertNotIn("TryBodyShapeMeshChecksum(", catalog_source)
+        self.assertNotIn("BodyShapeMeshChecksum", catalog_source)
+        self.assertIn(
+            "BuildBodyShapeCalibrationKey(",
+            catalog_source,
+        )
+        self.assertIn(
+            "HashBodyShapeBaselineBankState(",
+            catalog_source,
+        )
+        self.assertIn(
+            "BodyShapeCalibrationMorphQuantum = 0.005f",
+            source,
+        )
+        baseline_hash_start = catalog_source.index(
+            "private static void HashBodyShapeBaselineBankState("
+        )
+        baseline_hash_end = catalog_source.index(
+            "private static void HashBodyShapeSignature(",
+            baseline_hash_start,
+        )
+        baseline_hash_source = catalog_source[
+            baseline_hash_start:baseline_hash_end
+        ]
+        for exclusion in (
+            "morph.disable",
+            "morph.isPoseControl",
+            "morph.isDriven",
+        ):
+            self.assertIn(exclusion, baseline_hash_source)
+        self.assertIn("morph.morphValue", baseline_hash_source)
+        self.assertIn("morph.uid", baseline_hash_source)
+        self.assertIn(
+            "snapshot.BodyShapeCalibrationKey",
+            catalog_source,
+        )
         self.assertIn(
             "BuildBodyProportionMorphStateKey(",
             catalog_source,
@@ -1662,6 +2108,18 @@ class BridgeSourceTests(unittest.TestCase):
         )
         self.assertIn(
             "CopyBodyShapeResponsesFromCache(",
+            status_source,
+        )
+        self.assertIn(
+            "bodyShapeCache.CalibrationKey",
+            status_source,
+        )
+        self.assertIn(
+            "bodyShapeBuild.CalibrationKey",
+            status_source,
+        )
+        self.assertNotIn(
+            "MeshChecksum",
             status_source,
         )
         self.assertNotIn(
@@ -1689,6 +2147,65 @@ class BridgeSourceTests(unittest.TestCase):
             coroutine_source,
         )
         self.assertIn("yield return null;", coroutine_source)
+        self.assertNotIn(
+            "TryBodyShapeMeshChecksum(",
+            coroutine_source,
+        )
+        self.assertNotIn(
+            "PublishSceneStatus();",
+            coroutine_source,
+        )
+        self.assertIn(
+            "FailPersonBodyShapeBuild(",
+            coroutine_source,
+        )
+        self.assertIn(
+            "RunPersonBodyShapeCacheCoroutine(",
+            catalog_source,
+        )
+        self.assertIn(
+            "BodyShapeBuildMaximumAttempts",
+            catalog_source,
+        )
+        self.assertIn(
+            "bodyShapeBuild.Failed",
+            status_source,
+        )
+        self.assertIn(
+            '" Retrying automatically."',
+            status_source,
+        )
+        ensure_start = catalog_source.index(
+            "private void EnsurePersonBodyShapeBuild("
+        )
+        ensure_end = catalog_source.index(
+            "private static void CopyBodyShapeResponsesFromCache(",
+            ensure_start,
+        )
+        ensure_source = catalog_source[ensure_start:ensure_end]
+        registered_build = ensure_source.index(
+            "_personBodyShapeBuilds[atom.uid] ="
+        )
+        mesh_capture = ensure_source.index(
+            "TryBodyShapeMesh("
+        )
+        self.assertLess(registered_build, mesh_capture)
+        self.assertIn(
+            '"The neutral body mesh is not ready for measurement."',
+            ensure_source,
+        )
+        self.assertIn(
+            '"The neutral body mesh has an invalid measurement scale."',
+            ensure_source,
+        )
+        self.assertIn(
+            '"Neutral body-shape initialization failed: "',
+            ensure_source,
+        )
+        self.assertIn(
+            "FailPersonBodyShapeBuild(",
+            ensure_source,
+        )
         self.assertIn(
             "BodyShapeBustFirstFraction = 0.58f",
             source,
@@ -1704,6 +2221,95 @@ class BridgeSourceTests(unittest.TestCase):
         self.assertIn(
             "BodyShapeSeatFirstFraction = -0.08f",
             source,
+        )
+        self.assertIn(
+            "BodyShapeMaximumSeamRepairMeters = 0.001f",
+            source,
+        )
+        self.assertIn(
+            "BodyShapeMaximumSeamRepairFraction = 0.02f",
+            source,
+        )
+        self.assertIn(
+            "BodyShapeUnderbustFallbackSteps = 8",
+            source,
+        )
+        self.assertIn(
+            "BodyShapeTorsoScanFractionStep = 0.01f",
+            source,
+        )
+        self.assertIn(
+            "TryInterpolateBodyShapeSections(",
+            catalog_source,
+        )
+        self.assertIn(
+            "TryBodyShapeBracketedSection(",
+            catalog_source,
+        )
+        self.assertIn(
+            "work.UnderbustLower",
+            catalog_source,
+        )
+        self.assertIn(
+            "work.UnderbustLowerOffset",
+            catalog_source,
+        )
+        self.assertIn(
+            "BodyShapeUnderbustFallbackSteps +\n"
+            "                            1;",
+            catalog_source,
+        )
+        self.assertIn(
+            "TryInterpolateBodyShapeSections(\n"
+            "                        work.UnderbustLower,\n"
+            "                        upper,",
+            catalog_source,
+        )
+        self.assertIn(
+            "work.UnderbustLowerOffset /\n"
+            "                            (",
+            catalog_source,
+        )
+        self.assertIn(
+            "frame.ShoulderSpan * scaleX * 3.0f",
+            catalog_source,
+        )
+        self.assertIn(
+            "frame.StructuralLength * 0.75f",
+            catalog_source,
+        )
+        self.assertIn(
+            "frame.StructuralLength * 1.5f",
+            catalog_source,
+        )
+        self.assertIn(
+            "plausibleLoops",
+            catalog_source,
+        )
+        self.assertIn(
+            "if (!BodyShapeLoopContains(",
+            catalog_source,
+        )
+        self.assertIn(
+            "BodyShapeMaximumSeamRepairMeters",
+            catalog_source,
+        )
+        self.assertIn(
+            "BodyShapeMaximumSeamRepairFraction",
+            catalog_source,
+        )
+        for failure_reason in (
+            "No usable bust contour was found.",
+            "The underbust contour could not be measured.",
+            "No usable waist contour was found.",
+            "No usable seat contour was found.",
+            "The upper-thigh contours could not be measured.",
+            "The measured body contours failed validation.",
+        ):
+            self.assertIn(f'"{failure_reason}"', catalog_source)
+        self.assertIn(
+            "baselineWork.FailureReason",
+            catalog_source,
         )
         self.assertIn(
             "TryScanBodyShapeTorsoSection(",
@@ -1833,7 +2439,7 @@ class BridgeSourceTests(unittest.TestCase):
         )
         apply_wrapper_source = pose_source[apply_wrapper_start:apply_wrapper_end]
         apply_action_end = action_source.index(
-            "private IEnumerator ExecuteUndoSam3dResult("
+            "private IEnumerator ExecuteApplySam3dPair("
         )
         apply_action_source = action_source[:apply_action_end]
         restore_physics_start = commit_end
@@ -2169,10 +2775,16 @@ class BridgeSourceTests(unittest.TestCase):
             '"Restore VAM-PIP SAM3D pose",\n                    cameraRemovedByUndo);',
             pose_source,
         )
-        self.assertIn(
-            "SuperController.singleton.RemoveAtom(createdCamera);\n"
-            "                return true;",
-            restore_source,
+        remove_created_camera = (
+            "SuperController.singleton.RemoveAtom(createdCamera);"
+        )
+        self.assertIn(remove_created_camera, restore_source)
+        self.assertLess(
+            restore_source.index(remove_created_camera),
+            restore_source.index(
+                "return true;",
+                restore_source.index(remove_created_camera),
+            ),
         )
         self.assertIn("return false;", restore_source)
         track_request = "_inFlightSam3dCameraRequest = request;"

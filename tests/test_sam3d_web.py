@@ -120,6 +120,80 @@ class Sam3dWebTests(unittest.TestCase):
             comparison_id=comparison_id,
         )
 
+    def test_raw_upload_preserves_repeated_bbox_order(self) -> None:
+        image = png_header()
+        returned = {
+            "id": "b" * 32,
+            "state": "uploaded",
+        }
+        with mock.patch.object(
+            self.service,
+            "create_sam3d_job",
+            return_value=returned,
+        ) as create:
+            self.connection.request(
+                "POST",
+                (
+                    "/api/sam3d/jobs"
+                    "?bbox=32,0,64,64"
+                    "&bbox=0,0,32,64"
+                ),
+                body=image,
+                headers={
+                    "X-VAMPIP-Token": self.token,
+                    "Content-Type": "image/png",
+                    "Content-Length": str(len(image)),
+                },
+            )
+            response = self.connection.getresponse()
+            self.assertEqual(response.status, 201)
+            self.assertEqual(self.json(response)["id"], returned["id"])
+        create.assert_called_once_with(
+            image,
+            "image/png",
+            bbox=[
+                [32.0, 0.0, 64.0, 64.0],
+                [0.0, 0.0, 32.0, 64.0],
+            ],
+            vertical_fov=None,
+            model_id=None,
+            comparison_id=None,
+        )
+
+    def test_raw_upload_rejects_more_than_four_or_nonfinite_boxes(self) -> None:
+        image = png_header()
+        headers = {
+            "X-VAMPIP-Token": self.token,
+            "Content-Type": "image/png",
+            "Content-Length": str(len(image)),
+        }
+        repeated = "&".join(["bbox=0,0,64,64"] * 5)
+        self.connection.request(
+            "POST",
+            f"/api/sam3d/jobs?{repeated}",
+            body=image,
+            headers=headers,
+        )
+        response = self.connection.getresponse()
+        self.assertEqual(response.status, 400)
+        self.assertIn("at most four", self.json(response)["error"])
+
+        self.connection.close()
+        self.connection = HTTPConnection(
+            "127.0.0.1",
+            self.server.server_address[1],
+            timeout=10,
+        )
+        self.connection.request(
+            "POST",
+            "/api/sam3d/jobs?bbox=0,0,nan,64",
+            body=image,
+            headers=headers,
+        )
+        response = self.connection.getresponse()
+        self.assertEqual(response.status, 400)
+        self.assertIn("finite", self.json(response)["error"])
+
     def test_raw_upload_rejects_spoofed_type_and_foreign_origin(self) -> None:
         image = png_header()
         headers = {
@@ -148,6 +222,104 @@ class Sam3dWebTests(unittest.TestCase):
         response = self.connection.getresponse()
         self.assertEqual(response.status, 403)
         response.read()
+
+    def test_pair_apply_route_forwards_the_complete_draft(self) -> None:
+        job_id = "a" * 32
+        payload = {
+            "expected_job_revision": "b" * 32,
+            "subjects": [
+                {"target_uid": "Primary", "person_index": 0, "height_m": 1.65},
+                {
+                    "target_uid": "Partner",
+                    "person_index": 1,
+                    "height_m": 1.82,
+                    "manual_editor": {
+                        "enabled": True,
+                        "facing": "away",
+                        "controllers": {
+                            "hipControl": [0.5, 1.2, 0.1],
+                            "lHandControl": [-0.2, 0.75, 0.0],
+                        },
+                    },
+                },
+            ],
+            "primary_subject_index": 0,
+            "camera_uid": "SAM Camera",
+            "create_camera": True,
+            "aspect_ratio": "4:3",
+            "output_resolution": "1920x1080 (FHD)",
+            "image_format": "png",
+            "horizontal_fov": 61.5,
+        }
+        returned = {
+            "job_id": job_id,
+            "action_state": "queued",
+        }
+        body = json.dumps(payload).encode("utf-8")
+        with mock.patch.object(
+            self.service,
+            "apply_sam3d_pair",
+            return_value=returned,
+        ) as apply:
+            self.connection.request(
+                "POST",
+                f"/api/sam3d/jobs/{job_id}/apply-pair",
+                body=body,
+                headers={
+                    "X-VAMPIP-Token": self.token,
+                    "Content-Type": "application/json",
+                    "Content-Length": str(len(body)),
+                },
+            )
+            response = self.connection.getresponse()
+            self.assertEqual(response.status, 202)
+            self.assertEqual(self.json(response), returned)
+        apply.assert_called_once_with(
+            job_id,
+            expected_job_revision=payload["expected_job_revision"],
+            subjects=payload["subjects"],
+            primary_subject_index=0,
+            camera_uid="SAM Camera",
+            create_camera=True,
+            aspect_ratio="4:3",
+            output_resolution="1920x1080 (FHD)",
+            image_format="png",
+            horizontal_fov=61.5,
+        )
+
+    def test_pair_apply_route_rejects_each_missing_required_field(self) -> None:
+        job_id = "a" * 32
+        payload = {
+            "expected_job_revision": "b" * 32,
+            "subjects": [
+                {"target_uid": "Primary", "person_index": 0},
+                {"target_uid": "Partner", "person_index": 1},
+            ],
+            "primary_subject_index": 0,
+            "camera_uid": "SAM Camera",
+        }
+        with mock.patch.object(self.service, "apply_sam3d_pair") as apply:
+            for missing in payload:
+                with self.subTest(missing=missing):
+                    document = dict(payload)
+                    document.pop(missing)
+                    body = json.dumps(document).encode("utf-8")
+                    self.connection.request(
+                        "POST",
+                        f"/api/sam3d/jobs/{job_id}/apply-pair",
+                        body=body,
+                        headers={
+                            "X-VAMPIP-Token": self.token,
+                            "Content-Type": "application/json",
+                            "Content-Length": str(len(body)),
+                        },
+                    )
+                    response = self.connection.getresponse()
+                    self.assertEqual(response.status, 400)
+                    error = self.json(response)["error"]
+                    self.assertIn("missing paired SAM3D apply", error)
+                    self.assertIn(missing, error)
+        apply.assert_not_called()
 
     def test_run_reports_unconfigured_worker_without_starting_comfy(self) -> None:
         image = png_header()

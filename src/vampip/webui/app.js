@@ -19,6 +19,114 @@ const SAM3D_CAPTURE_POLL_ATTEMPTS = 310;
 const SAM3D_MAX_UPLOAD_BYTES = 32 * 1024 * 1024;
 const SAM3D_MAX_HISTORY = 50;
 const SAM3D_MAX_CAPTURES = 50;
+const SAM3D_MAX_SUBJECTS = 4;
+const SAM3D_SUBJECT_COLORS = Object.freeze([
+  "#86e6b0",
+  "#80bfff",
+  "#f6c76a",
+  "#d29cff",
+]);
+const SAM3D_GENITAL_DEPTH_MIN = -0.5;
+const SAM3D_GENITAL_DEPTH_MAX = 0.5;
+const SAM3D_MANUAL_POSE_COORD_MIN = -0.5;
+const SAM3D_MANUAL_POSE_COORD_MAX = 1.5;
+const SAM3D_MANUAL_POSE_DEPTH_MIN = -1;
+const SAM3D_MANUAL_POSE_DEPTH_MAX = 1;
+const SAM3D_MANUAL_POSE_CONTROLLERS = Object.freeze([
+  Object.freeze({ id: "hipControl", label: "Hip", parent: "" }),
+  Object.freeze({
+    id: "abdomen2Control",
+    label: "Abdomen",
+    parent: "hipControl",
+  }),
+  Object.freeze({
+    id: "chestControl",
+    label: "Chest",
+    parent: "abdomen2Control",
+  }),
+  Object.freeze({
+    id: "neckControl",
+    label: "Neck",
+    parent: "chestControl",
+  }),
+  Object.freeze({
+    id: "headControl",
+    label: "Head",
+    parent: "neckControl",
+  }),
+  Object.freeze({
+    id: "lShoulderControl",
+    label: "Left shoulder",
+    parent: "chestControl",
+  }),
+  Object.freeze({
+    id: "lArmControl",
+    label: "Left upper arm",
+    parent: "lShoulderControl",
+  }),
+  Object.freeze({
+    id: "lElbowControl",
+    label: "Left elbow",
+    parent: "lArmControl",
+  }),
+  Object.freeze({
+    id: "lHandControl",
+    label: "Left hand",
+    parent: "lElbowControl",
+  }),
+  Object.freeze({
+    id: "rShoulderControl",
+    label: "Right shoulder",
+    parent: "chestControl",
+  }),
+  Object.freeze({
+    id: "rArmControl",
+    label: "Right upper arm",
+    parent: "rShoulderControl",
+  }),
+  Object.freeze({
+    id: "rElbowControl",
+    label: "Right elbow",
+    parent: "rArmControl",
+  }),
+  Object.freeze({
+    id: "rHandControl",
+    label: "Right hand",
+    parent: "rElbowControl",
+  }),
+  Object.freeze({
+    id: "lThighControl",
+    label: "Left thigh",
+    parent: "hipControl",
+  }),
+  Object.freeze({
+    id: "lKneeControl",
+    label: "Left knee",
+    parent: "lThighControl",
+  }),
+  Object.freeze({
+    id: "lFootControl",
+    label: "Left foot",
+    parent: "lKneeControl",
+  }),
+  Object.freeze({
+    id: "rThighControl",
+    label: "Right thigh",
+    parent: "hipControl",
+  }),
+  Object.freeze({
+    id: "rKneeControl",
+    label: "Right knee",
+    parent: "rThighControl",
+  }),
+  Object.freeze({
+    id: "rFootControl",
+    label: "Right foot",
+    parent: "rKneeControl",
+  }),
+]);
+const SAM3D_MANUAL_POSE_TEMPLATE_UPRIGHT = "upright";
+const SAM3D_MANUAL_POSE_TEMPLATE_POV = "pov-lying";
 const SAM3D_DEFAULT_CAMERA_UID = "VAMPip SAM3D Camera";
 const SAM3D_COMPARE_MODEL_ID = "compare";
 const SAM3D_DINOV3_MODEL_ID = "dinov3_vith16plus";
@@ -910,6 +1018,16 @@ const app = {
   sam3dSourceJobId: "",
   sam3dModelChoice: SAM3D_DINOV3_MODEL_ID,
   sam3dBbox: { x: 0, y: 0, width: 100, height: 100 },
+  sam3dSubjects: [],
+  sam3dSelectedSubjectId: "",
+  sam3dSubjectSequence: 0,
+  sam3dJobSubjectDrafts: new Map(),
+  sam3dManifestPeopleByJob: new Map(),
+  sam3dManifestHydrationAttempts: new Set(),
+  sam3dManifestHydrationInFlight: new Map(),
+  sam3dSubjectAssignments: [],
+  sam3dSubjectAssignmentsJobId: "",
+  sam3dPrimarySubjectIndex: 0,
   sam3dBboxDrag: null,
   sam3dPreviewKind: "source",
   sam3dMutationInFlight: false,
@@ -927,6 +1045,10 @@ const app = {
   sam3dBodyProportionPollAttempts: 0,
   sam3dBodyProportionsPendingAction: "",
   sam3dHandoffTab: "morph",
+  sam3dManualPoseSubjectIndex: 0,
+  sam3dManualPoseDrag: null,
+  sam3dGenitalDraft: null,
+  sam3dGenitalDrag: null,
   sam3dBodyProfiles: [],
   sam3dSelectedBodyProfileId: "",
   sam3dBodyReferences: [],
@@ -952,6 +1074,8 @@ document.addEventListener("DOMContentLoaded", init);
 async function init() {
   cacheElements();
   captureToken();
+  resetSam3dSubjects();
+  resetSam3dGenitalDraft();
   loadSam3dBodyProfiles();
   bindEvents();
   applyInitialRoute();
@@ -1033,6 +1157,10 @@ function cacheElements() {
     "sam3d-canvas-hint",
     "sam3d-source-name",
     "sam3d-source-meta",
+    "sam3d-subject-count",
+    "sam3d-subject-box-list",
+    "sam3d-add-subject",
+    "sam3d-remove-subject",
     "sam3d-known-vertical-fov",
     "sam3d-manual-bbox",
     "sam3d-bbox-fields",
@@ -1070,6 +1198,11 @@ function cacheElements() {
     "sam3d-handoff",
     "sam3d-handoff-morph-tab",
     "sam3d-handoff-pose-tab",
+    "sam3d-handoff-genital-tab",
+    "sam3d-handoff-review-tab",
+    "sam3d-subject-assignment-list",
+    "sam3d-assignment-count",
+    "sam3d-add-manual-subject",
     "sam3d-proportions-panel",
     "sam3d-proportions-analyze",
     "sam3d-proportions-state",
@@ -1146,6 +1279,53 @@ function cacheElements() {
     "sam3d-manual-shape-reset",
     "sam3d-manual-fit-update",
     "sam3d-apply-panel",
+    "sam3d-manual-pose",
+    "sam3d-manual-pose-subject",
+    "sam3d-manual-pose-warning",
+    "sam3d-manual-pose-template",
+    "sam3d-manual-pose-facing",
+    "sam3d-manual-pose-reset",
+    "sam3d-manual-pose-stage",
+    "sam3d-manual-pose-source",
+    "sam3d-manual-pose-svg",
+    "sam3d-manual-pose-bones",
+    "sam3d-manual-pose-handles",
+    "sam3d-manual-pose-selected-label",
+    "sam3d-manual-pose-visible",
+    "sam3d-manual-pose-depth",
+    "sam3d-manual-pose-depth-label",
+    "sam3d-manual-pose-depth-value",
+    "sam3d-manual-pose-joint-list",
+    "sam3d-manual-pose-visible-count",
+    "sam3d-genital-panel",
+    "sam3d-genital-reset",
+    "sam3d-genital-enabled",
+    "sam3d-genital-workspace",
+    "sam3d-genital-stage",
+    "sam3d-genital-source",
+    "sam3d-genital-chain",
+    "sam3d-genital-handle-base",
+    "sam3d-genital-handle-mid",
+    "sam3d-genital-handle-tip",
+    "sam3d-genital-handle-testes",
+    "sam3d-genital-subject",
+    "sam3d-genital-body",
+    "sam3d-genital-target",
+    "sam3d-genital-unlock-base",
+    "sam3d-genital-lock-lengths",
+    "sam3d-genital-testes",
+    "sam3d-genital-depth-base",
+    "sam3d-genital-depth-base-value",
+    "sam3d-genital-depth-mid",
+    "sam3d-genital-depth-mid-value",
+    "sam3d-genital-depth-tip",
+    "sam3d-genital-depth-tip-value",
+    "sam3d-genital-depth-testes",
+    "sam3d-genital-depth-testes-value",
+    "sam3d-genital-depth-testes-row",
+    "sam3d-review-panel",
+    "sam3d-review-summary",
+    "sam3d-pair-draft-note",
     "sam3d-revision",
     "sam3d-person-target",
     "sam3d-camera-target",
@@ -1452,10 +1632,33 @@ function bindEvents() {
   });
   elements.sam3dClearSource.addEventListener("click", clearSam3dSource);
   elements.sam3dManualBbox.addEventListener("change", () => {
+    if (
+      !elements.sam3dManualBbox.checked &&
+      app.sam3dSubjects.length > 1
+    ) {
+      elements.sam3dManualBbox.checked = true;
+      toast(
+        "Subject boxes are required",
+        "Remove extra subjects before returning to full-image single-subject mode.",
+      );
+      return;
+    }
     elements.sam3dBboxFields.disabled = !elements.sam3dManualBbox.checked;
     elements.sam3dCanvasHint.hidden = !elements.sam3dManualBbox.checked;
+    renderSam3dSubjectBoxes();
     drawSam3dSourceCanvas();
   });
+  elements.sam3dSubjectBoxList.addEventListener("click", (event) => {
+    const subjectButton = event.target.closest("[data-sam3d-subject-id]");
+    if (subjectButton) {
+      selectSam3dSourceSubject(subjectButton.dataset.sam3dSubjectId);
+    }
+  });
+  elements.sam3dAddSubject.addEventListener("click", addSam3dSourceSubject);
+  elements.sam3dRemoveSubject.addEventListener(
+    "click",
+    removeSam3dSourceSubject,
+  );
   for (const field of [
     elements.sam3dBboxX,
     elements.sam3dBboxY,
@@ -1515,11 +1718,135 @@ function bindEvents() {
   for (const tab of [
     elements.sam3dHandoffMorphTab,
     elements.sam3dHandoffPoseTab,
+    elements.sam3dHandoffGenitalTab,
+    elements.sam3dHandoffReviewTab,
   ]) {
     tab.addEventListener("click", () =>
       setSam3dHandoffTab(tab.dataset.sam3dHandoffTab),
     );
   }
+  elements.sam3dSubjectAssignmentList.addEventListener(
+    "change",
+    updateSam3dSubjectAssignment,
+  );
+  elements.sam3dAddManualSubject.addEventListener(
+    "click",
+    addSam3dManualSubject,
+  );
+  elements.sam3dSubjectAssignmentList.addEventListener("click", (event) => {
+    const remove = event.target.closest("[data-sam3d-manual-remove-index]");
+    if (remove) {
+      removeSam3dManualSubject(
+        Math.max(0, integerValue(remove.dataset.sam3dManualRemoveIndex) || 0),
+      );
+      return;
+    }
+    const edit = event.target.closest("[data-sam3d-manual-edit-index]");
+    if (!edit) return;
+    app.sam3dManualPoseSubjectIndex = Math.max(
+      0,
+      integerValue(edit.dataset.sam3dManualEditIndex) || 0,
+    );
+    setSam3dHandoffTab("pose");
+  });
+  elements.sam3dManualPoseSubject.addEventListener(
+    "change",
+    updateSam3dManualPoseSubject,
+  );
+  elements.sam3dManualPoseTemplate.addEventListener(
+    "change",
+    updateSam3dManualPoseTemplate,
+  );
+  elements.sam3dManualPoseFacing.addEventListener(
+    "change",
+    updateSam3dManualPoseFacing,
+  );
+  elements.sam3dManualPoseReset.addEventListener(
+    "click",
+    resetSelectedSam3dManualPose,
+  );
+  elements.sam3dManualPoseVisible.addEventListener(
+    "change",
+    updateSelectedSam3dManualPoseVisibility,
+  );
+  elements.sam3dManualPoseDepth.addEventListener(
+    "input",
+    updateSelectedSam3dManualPoseDepth,
+  );
+  elements.sam3dManualPoseJointList.addEventListener(
+    "click",
+    selectSam3dManualPoseJoint,
+  );
+  elements.sam3dManualPoseJointList.addEventListener(
+    "change",
+    updateSam3dManualPoseJointVisibility,
+  );
+  elements.sam3dManualPoseStage.addEventListener(
+    "pointerdown",
+    beginSam3dManualPoseDrag,
+  );
+  elements.sam3dManualPoseStage.addEventListener(
+    "pointermove",
+    continueSam3dManualPoseDrag,
+  );
+  elements.sam3dManualPoseStage.addEventListener(
+    "pointerup",
+    finishSam3dManualPoseDrag,
+  );
+  elements.sam3dManualPoseStage.addEventListener(
+    "pointercancel",
+    finishSam3dManualPoseDrag,
+  );
+  elements.sam3dGenitalEnabled.addEventListener(
+    "change",
+    updateSam3dGenitalOptions,
+  );
+  elements.sam3dGenitalSubject.addEventListener(
+    "change",
+    updateSam3dGenitalSubject,
+  );
+  elements.sam3dGenitalBody.addEventListener(
+    "change",
+    updateSam3dGenitalBody,
+  );
+  elements.sam3dGenitalTarget.addEventListener(
+    "change",
+    updateSam3dGenitalTarget,
+  );
+  for (const control of [
+    elements.sam3dGenitalUnlockBase,
+    elements.sam3dGenitalLockLengths,
+    elements.sam3dGenitalTestes,
+  ]) {
+    control.addEventListener("change", updateSam3dGenitalOptions);
+  }
+  for (const handleName of ["base", "mid", "tip", "testes"]) {
+    elements[
+      `sam3dGenitalDepth${handleName.charAt(0).toUpperCase()}${handleName.slice(1)}`
+    ].addEventListener("input", () =>
+      updateSam3dGenitalDepth(handleName),
+    );
+  }
+  elements.sam3dGenitalReset.addEventListener(
+    "click",
+    resetSam3dGenitalDraft,
+  );
+  elements.sam3dGenitalStage.addEventListener(
+    "pointerdown",
+    beginSam3dGenitalDrag,
+  );
+  elements.sam3dGenitalStage.addEventListener(
+    "pointermove",
+    continueSam3dGenitalDrag,
+  );
+  elements.sam3dGenitalStage.addEventListener(
+    "pointerup",
+    finishSam3dGenitalDrag,
+  );
+  elements.sam3dGenitalStage.addEventListener(
+    "pointercancel",
+    finishSam3dGenitalDrag,
+  );
   elements.sam3dProfileSelect.addEventListener(
     "change",
     selectSam3dBodyProfile,
@@ -7456,6 +7783,9 @@ const Sam3dClient = Object.freeze({
     apply(jobId) {
       return `${this.job(jobId)}/apply`;
     },
+    applyPair(jobId) {
+      return `${this.job(jobId)}/apply-pair`;
+    },
     undo(jobId) {
       return `${this.job(jobId)}/undo`;
     },
@@ -7495,16 +7825,26 @@ const Sam3dClient = Object.freeze({
     return api(this.paths.job(jobId), { signal });
   },
 
+  manifest(jobId, signal) {
+    return api(this.paths.artifact(jobId, "manifest"), { signal });
+  },
+
   create(
     file,
-    bbox,
+    bboxes,
     verticalFov = null,
     modelId = "",
     comparisonId = "",
   ) {
     const query = new URLSearchParams();
-    if (bbox) {
-      query.set("bbox", bbox.map((value) => Math.round(value)).join(","));
+    for (const bbox of asArray(bboxes).slice(0, SAM3D_MAX_SUBJECTS)) {
+      if (!Array.isArray(bbox) || bbox.length !== 4) continue;
+      const values = bbox.map(Number);
+      if (!values.every(Number.isFinite)) continue;
+      query.append(
+        "bbox",
+        values.map((value) => Math.round(value)).join(","),
+      );
     }
     if (verticalFov !== null) {
       query.set("vertical_fov", String(verticalFov));
@@ -7523,6 +7863,13 @@ const Sam3dClient = Object.freeze({
 
   apply(jobId, request) {
     return api(this.paths.apply(jobId), {
+      method: "POST",
+      body: request,
+    });
+  },
+
+  applyPair(jobId, request) {
+    return api(this.paths.applyPair(jobId), {
       method: "POST",
       body: request,
     });
@@ -8223,6 +8570,14 @@ function normalizeSam3dJobs(payload) {
 
 function mergeSam3dJob(job) {
   if (!job) return;
+  const hydratedPeople = app.sam3dManifestPeopleByJob.get(job.id);
+  if (hydratedPeople?.length) {
+    job.bodies = job.bodies.map((body, index) => ({
+      ...body,
+      ...(hydratedPeople[index] || {}),
+    }));
+    job.manifestHydrated = true;
+  }
   const existingIndex = app.sam3dJobs.findIndex(
     (candidate) => candidate.id === job.id,
   );
@@ -8259,6 +8614,119 @@ function mergeSam3dJob(job) {
       app.sam3dAppliedRevision = "";
     }
   }
+}
+
+function normalizeSam3dManifestPeople(payload, job) {
+  const manifest =
+    payload?.manifest &&
+    typeof payload.manifest === "object" &&
+    !Array.isArray(payload.manifest)
+      ? payload.manifest
+      : payload;
+  if (!manifest || typeof manifest !== "object" || Array.isArray(manifest)) {
+    return [];
+  }
+  const declaredJobId = String(
+    manifest.job_id || manifest.jobId || "",
+  ).trim().toLowerCase();
+  if (
+    declaredJobId &&
+    (
+      !SAM3D_JOB_ID_PATTERN.test(declaredJobId) ||
+      declaredJobId !== job.id
+    )
+  ) {
+    return [];
+  }
+  const width = Math.max(1, Number(job.sourceWidth) || 1);
+  const height = Math.max(1, Number(job.sourceHeight) || 1);
+  const coordinateLimit = Math.max(width, height) * 4;
+  return asArray(manifest.people || manifest.bodies)
+    .slice(0, SAM3D_MAX_SUBJECTS)
+    .map((person) => {
+      if (!person || typeof person !== "object" || Array.isArray(person)) {
+        return {};
+      }
+      const rawPoints = asArray(
+        person.keypoints2d ||
+          person.keypoints_2d ||
+          person.joints2d ||
+          person.joints_2d,
+      ).slice(0, 256);
+      const keypoints2d = rawPoints
+        .map((point) => {
+          const x = Number(
+            Array.isArray(point) ? point[0] : point?.x ?? point?.u,
+          );
+          const y = Number(
+            Array.isArray(point) ? point[1] : point?.y ?? point?.v,
+          );
+          if (
+            !Number.isFinite(x) ||
+            !Number.isFinite(y) ||
+            Math.abs(x) > coordinateLimit ||
+            Math.abs(y) > coordinateLimit
+          ) {
+            return null;
+          }
+          return [x, y];
+        })
+        .filter(Boolean);
+      const rawBbox = asArray(person.bbox).slice(0, 4).map(Number);
+      const bbox =
+        rawBbox.length === 4 && rawBbox.every(Number.isFinite)
+          ? rawBbox
+          : undefined;
+      return {
+        ...(keypoints2d.length ? { keypoints2d } : {}),
+        ...(bbox ? { bbox } : {}),
+        score: Number.isFinite(Number(person.score))
+          ? Number(person.score)
+          : undefined,
+      };
+    });
+}
+
+async function hydrateSam3dManifestPeople(job) {
+  if (!job || !sam3dJobSucceeded(job)) return [];
+  const cached = app.sam3dManifestPeopleByJob.get(job.id);
+  if (cached) return cached;
+  const pending = app.sam3dManifestHydrationInFlight.get(job.id);
+  if (pending) return pending;
+  if (app.sam3dManifestHydrationAttempts.has(job.id)) return [];
+  app.sam3dManifestHydrationAttempts.add(job.id);
+  const hydration = (async () => {
+    try {
+      const payload = await Sam3dClient.manifest(job.id);
+      const people = normalizeSam3dManifestPeople(payload, job);
+      if (!people.length) return [];
+      app.sam3dManifestPeopleByJob.set(job.id, people);
+      const current = app.sam3dJobs.find(
+        (candidate) => candidate.id === job.id,
+      );
+      if (current) {
+        current.bodies = current.bodies.map((body, index) => ({
+          ...body,
+          ...(people[index] || {}),
+        }));
+        current.manifestHydrated = true;
+      }
+      if (app.sam3dSelectedJobId === job.id && current) {
+        app.sam3dSelectedJob = current;
+        renderSam3dSubjectAssignments();
+        renderSam3dManualPoseEditor();
+        renderSam3dReview();
+        renderSam3dApplyState();
+      }
+      return people;
+    } catch (_error) {
+      return [];
+    } finally {
+      app.sam3dManifestHydrationInFlight.delete(job.id);
+    }
+  })();
+  app.sam3dManifestHydrationInFlight.set(job.id, hydration);
+  return hydration;
 }
 
 async function loadSam3dWorkspace({ force = false, quiet = false } = {}) {
@@ -8367,6 +8835,9 @@ async function loadSam3dJob(jobId, { quiet = false } = {}) {
     const job = normalizeSam3dJob(payload.job || payload);
     if (!job) throw new Error("The manager returned an invalid SAM 3D job.");
     mergeSam3dJob(job);
+    if (sam3dJobSucceeded(job)) {
+      void hydrateSam3dManifestPeople(job);
+    }
     renderSam3dWorkspace();
     if (sam3dJobNeedsPolling(job)) startSam3dPolling();
     return job;
@@ -8780,6 +9251,138 @@ function sam3dFileTypeAllowed(file) {
   return Boolean(sam3dFileContentType(file));
 }
 
+function createSam3dSourceSubject(bbox = null) {
+  app.sam3dSubjectSequence += 1;
+  const subjectNumber = app.sam3dSubjectSequence;
+  return {
+    id: `subject-${subjectNumber}`,
+    label: `Subject ${subjectNumber}`,
+    color: SAM3D_SUBJECT_COLORS[
+      (subjectNumber - 1) % SAM3D_SUBJECT_COLORS.length
+    ],
+    bbox: clampSam3dBbox(
+      bbox || { x: 0, y: 0, width: 100, height: 100 },
+    ),
+  };
+}
+
+function resetSam3dSubjects() {
+  app.sam3dSubjectSequence = 0;
+  const subject = createSam3dSourceSubject();
+  app.sam3dSubjects = [subject];
+  app.sam3dSelectedSubjectId = subject.id;
+  app.sam3dBbox = { ...subject.bbox };
+  app.sam3dBboxDrag = null;
+  app.sam3dSubjectAssignments = [];
+  app.sam3dSubjectAssignmentsJobId = "";
+  app.sam3dPrimarySubjectIndex = 0;
+  if (elements.sam3dSubjectBoxList) {
+    renderSam3dSubjectBoxes();
+    syncSam3dBboxFields();
+  }
+}
+
+function selectedSam3dSourceSubject() {
+  return (
+    app.sam3dSubjects.find(
+      (subject) => subject.id === app.sam3dSelectedSubjectId,
+    ) ||
+    app.sam3dSubjects[0] ||
+    null
+  );
+}
+
+function selectSam3dSourceSubject(subjectId) {
+  const subject = app.sam3dSubjects.find(
+    (candidate) => candidate.id === String(subjectId || ""),
+  );
+  if (!subject) return;
+  app.sam3dSelectedSubjectId = subject.id;
+  app.sam3dBbox = { ...subject.bbox };
+  syncSam3dBboxFields();
+  renderSam3dSubjectBoxes();
+  drawSam3dSourceCanvas();
+}
+
+function addSam3dSourceSubject() {
+  if (app.sam3dSubjects.length >= SAM3D_MAX_SUBJECTS) return;
+  const offset = Math.min(24, app.sam3dSubjects.length * 7);
+  const subject = createSam3dSourceSubject({
+    x: 12 + offset,
+    y: 10 + offset / 2,
+    width: 62,
+    height: 82 - offset / 2,
+  });
+  app.sam3dSubjects.push(subject);
+  app.sam3dSelectedSubjectId = subject.id;
+  app.sam3dBbox = { ...subject.bbox };
+  elements.sam3dManualBbox.checked = true;
+  elements.sam3dCanvasHint.hidden = false;
+  renderSam3dSubjectBoxes();
+  syncSam3dBboxFields();
+  drawSam3dSourceCanvas();
+}
+
+function removeSam3dSourceSubject() {
+  if (app.sam3dSubjects.length <= 1) return;
+  const selectedIndex = Math.max(
+    0,
+    app.sam3dSubjects.findIndex(
+      (subject) => subject.id === app.sam3dSelectedSubjectId,
+    ),
+  );
+  app.sam3dSubjects.splice(selectedIndex, 1);
+  const next =
+    app.sam3dSubjects[
+      Math.min(selectedIndex, app.sam3dSubjects.length - 1)
+    ];
+  app.sam3dSelectedSubjectId = next.id;
+  app.sam3dBbox = { ...next.bbox };
+  renderSam3dSubjectBoxes();
+  syncSam3dBboxFields();
+  drawSam3dSourceCanvas();
+}
+
+function renderSam3dSubjectBoxes() {
+  if (!elements.sam3dSubjectBoxList) return;
+  elements.sam3dSubjectBoxList.replaceChildren();
+  for (const subject of app.sam3dSubjects) {
+    const item = document.createElement("button");
+    item.type = "button";
+    item.className = "sam3d-subject-box-item";
+    item.dataset.sam3dSubjectId = subject.id;
+    item.classList.toggle(
+      "is-selected",
+      subject.id === app.sam3dSelectedSubjectId,
+    );
+    item.setAttribute("role", "listitem");
+    item.setAttribute(
+      "aria-pressed",
+      String(subject.id === app.sam3dSelectedSubjectId),
+    );
+    const swatch = createElement("span", "sam3d-subject-swatch");
+    swatch.style.backgroundColor = subject.color;
+    const copy = document.createElement("span");
+    const label = document.createElement("strong");
+    label.textContent = subject.label;
+    const detail = document.createElement("small");
+    const bbox = clampSam3dBbox(subject.bbox);
+    detail.textContent =
+      `${bbox.width.toFixed(1)}% × ${bbox.height.toFixed(1)}%`;
+    copy.append(label, detail);
+    item.append(swatch, copy);
+    elements.sam3dSubjectBoxList.append(item);
+  }
+  elements.sam3dSubjectCount.textContent =
+    `${app.sam3dSubjects.length} / ${SAM3D_MAX_SUBJECTS}`;
+  elements.sam3dAddSubject.disabled =
+    app.sam3dSubjects.length >= SAM3D_MAX_SUBJECTS;
+  elements.sam3dRemoveSubject.disabled = app.sam3dSubjects.length <= 1;
+  elements.sam3dManualBbox.disabled = app.sam3dSubjects.length > 1;
+  elements.sam3dBboxFields.disabled =
+    !elements.sam3dManualBbox.checked;
+}
+
 async function chooseSam3dSource(file) {
   if (!(file instanceof File)) return;
   if (!sam3dFileTypeAllowed(file)) {
@@ -8827,8 +9430,10 @@ async function chooseSam3dSource(file) {
   app.sam3dSourceWidth = image.naturalWidth;
   app.sam3dSourceHeight = image.naturalHeight;
   app.sam3dSourceJobId = "";
-  app.sam3dBbox = { x: 0, y: 0, width: 100, height: 100 };
+  resetSam3dSubjects();
+  resetSam3dGenitalDraft();
   elements.sam3dManualBbox.checked = false;
+  elements.sam3dManualBbox.disabled = false;
   elements.sam3dBboxFields.disabled = true;
   syncSam3dBboxFields();
   renderSam3dSource();
@@ -8844,10 +9449,11 @@ function clearSam3dSource() {
   app.sam3dSourceWidth = 0;
   app.sam3dSourceHeight = 0;
   app.sam3dSourceJobId = "";
-  app.sam3dBbox = { x: 0, y: 0, width: 100, height: 100 };
-  app.sam3dBboxDrag = null;
+  resetSam3dSubjects();
+  resetSam3dGenitalDraft();
   elements.sam3dFileInput.value = "";
   elements.sam3dManualBbox.checked = false;
+  elements.sam3dManualBbox.disabled = false;
   elements.sam3dBboxFields.disabled = true;
   syncSam3dBboxFields();
   renderSam3dSource();
@@ -8870,6 +9476,7 @@ function renderSam3dSource() {
     `${formatNumber(app.sam3dSourceWidth)} × ${formatNumber(
       app.sam3dSourceHeight,
     )} · ${formatBytes(app.sam3dSourceFile.size)}`;
+  renderSam3dSubjectBoxes();
   window.requestAnimationFrame(drawSam3dSourceCanvas);
 }
 
@@ -8888,7 +9495,10 @@ function clampSam3dBbox(bbox) {
 }
 
 function syncSam3dBboxFields() {
-  const bbox = clampSam3dBbox(app.sam3dBbox);
+  const subject = selectedSam3dSourceSubject();
+  if (!subject) return;
+  const bbox = clampSam3dBbox(subject.bbox);
+  subject.bbox = bbox;
   app.sam3dBbox = bbox;
   elements.sam3dBboxX.value = bbox.x.toFixed(1);
   elements.sam3dBboxY.value = bbox.y.toFixed(1);
@@ -8897,18 +9507,26 @@ function syncSam3dBboxFields() {
 }
 
 function readSam3dBboxFields() {
-  app.sam3dBbox = clampSam3dBbox({
+  const subject = selectedSam3dSourceSubject();
+  if (!subject) return;
+  subject.bbox = clampSam3dBbox({
     x: elements.sam3dBboxX.value,
     y: elements.sam3dBboxY.value,
     width: elements.sam3dBboxWidth.value,
     height: elements.sam3dBboxHeight.value,
   });
+  app.sam3dBbox = { ...subject.bbox };
+  renderSam3dSubjectBoxes();
   drawSam3dSourceCanvas();
 }
 
 function resetSam3dBbox() {
-  app.sam3dBbox = { x: 0, y: 0, width: 100, height: 100 };
+  const subject = selectedSam3dSourceSubject();
+  if (!subject) return;
+  subject.bbox = { x: 0, y: 0, width: 100, height: 100 };
+  app.sam3dBbox = { ...subject.bbox };
   syncSam3dBboxFields();
+  renderSam3dSubjectBoxes();
   drawSam3dSourceCanvas();
 }
 
@@ -8944,15 +9562,38 @@ function beginSam3dBboxDrag(event) {
   }
   const point = sam3dCanvasPoint(event);
   if (!point) return;
+  const hitSubject = [...app.sam3dSubjects].reverse().find((subject) => {
+    const bbox = clampSam3dBbox(subject.bbox);
+    return (
+      point.x >= bbox.x &&
+      point.x <= bbox.x + bbox.width &&
+      point.y >= bbox.y &&
+      point.y <= bbox.y + bbox.height
+    );
+  });
+  if (
+    hitSubject &&
+    hitSubject.id !== app.sam3dSelectedSubjectId
+  ) {
+    selectSam3dSourceSubject(hitSubject.id);
+    return;
+  }
+  const subject = selectedSam3dSourceSubject();
+  if (!subject) return;
   event.preventDefault();
   elements.sam3dSourceCanvas.setPointerCapture(event.pointerId);
-  app.sam3dBboxDrag = { pointerId: event.pointerId, start: point };
-  app.sam3dBbox = {
+  app.sam3dBboxDrag = {
+    pointerId: event.pointerId,
+    start: point,
+    subjectId: subject.id,
+  };
+  subject.bbox = {
     x: point.x,
     y: point.y,
     width: 0.1,
     height: 0.1,
   };
+  app.sam3dBbox = { ...subject.bbox };
   syncSam3dBboxFields();
   drawSam3dSourceCanvas();
 }
@@ -8962,15 +9603,21 @@ function continueSam3dBboxDrag(event) {
   if (!drag || drag.pointerId !== event.pointerId) return;
   const point = sam3dCanvasPoint(event);
   if (!point) return;
+  const subject = app.sam3dSubjects.find(
+    (candidate) => candidate.id === drag.subjectId,
+  );
+  if (!subject) return;
   const left = Math.min(drag.start.x, point.x);
   const top = Math.min(drag.start.y, point.y);
-  app.sam3dBbox = clampSam3dBbox({
+  subject.bbox = clampSam3dBbox({
     x: left,
     y: top,
     width: Math.abs(point.x - drag.start.x),
     height: Math.abs(point.y - drag.start.y),
   });
+  app.sam3dBbox = { ...subject.bbox };
   syncSam3dBboxFields();
+  renderSam3dSubjectBoxes();
   drawSam3dSourceCanvas();
 }
 
@@ -9002,52 +9649,93 @@ function drawSam3dSourceCanvas() {
   context.drawImage(image, 0, 0, width, height);
   if (!elements.sam3dManualBbox.checked) return;
 
-  const bbox = clampSam3dBbox(app.sam3dBbox);
-  const x = (bbox.x / 100) * width;
-  const y = (bbox.y / 100) * height;
-  const boxWidth = (bbox.width / 100) * width;
-  const boxHeight = (bbox.height / 100) * height;
   context.save();
   context.fillStyle = "rgba(5, 8, 12, 0.48)";
-  context.beginPath();
-  context.rect(0, 0, width, height);
-  context.rect(x, y, boxWidth, boxHeight);
-  context.fill("evenodd");
-  context.strokeStyle = "#86e6b0";
+  context.fillRect(0, 0, width, height);
   context.lineWidth = Math.max(2, Math.min(width, height) / 300);
-  context.setLineDash([
-    Math.max(5, width / 150),
-    Math.max(4, width / 220),
-  ]);
-  context.strokeRect(x, y, boxWidth, boxHeight);
-  context.setLineDash([]);
-  context.fillStyle = "#86e6b0";
-  const handle = Math.max(6, Math.min(width, height) / 90);
-  for (const [handleX, handleY] of [
-    [x, y],
-    [x + boxWidth, y],
-    [x, y + boxHeight],
-    [x + boxWidth, y + boxHeight],
-  ]) {
-    context.fillRect(
-      handleX - handle / 2,
-      handleY - handle / 2,
-      handle,
-      handle,
+  for (const subject of app.sam3dSubjects) {
+    const bbox = clampSam3dBbox(subject.bbox);
+    const x = (bbox.x / 100) * width;
+    const y = (bbox.y / 100) * height;
+    const boxWidth = (bbox.width / 100) * width;
+    const boxHeight = (bbox.height / 100) * height;
+    const selected = subject.id === app.sam3dSelectedSubjectId;
+    context.save();
+    context.fillStyle = `${subject.color}${selected ? "24" : "12"}`;
+    context.fillRect(x, y, boxWidth, boxHeight);
+    context.strokeStyle = subject.color;
+    context.globalAlpha = selected ? 1 : 0.72;
+    context.setLineDash(
+      selected
+        ? []
+        : [Math.max(5, width / 150), Math.max(4, width / 220)],
     );
+    context.strokeRect(x, y, boxWidth, boxHeight);
+    context.setLineDash([]);
+    context.globalAlpha = 1;
+    const fontSize = Math.max(12, Math.min(width, height) / 38);
+    context.font = `700 ${fontSize}px system-ui, sans-serif`;
+    const labelWidth = context.measureText(subject.label).width + 18;
+    context.fillStyle = subject.color;
+    context.fillRect(
+      x,
+      Math.max(0, y - fontSize - 10),
+      labelWidth,
+      fontSize + 10,
+    );
+    context.fillStyle = "#101418";
+    context.fillText(
+      subject.label,
+      x + 9,
+      Math.max(fontSize, y - 7),
+    );
+    if (selected) {
+      const handle = Math.max(6, Math.min(width, height) / 90);
+      context.fillStyle = subject.color;
+      for (const [handleX, handleY] of [
+        [x, y],
+        [x + boxWidth, y],
+        [x, y + boxHeight],
+        [x + boxWidth, y + boxHeight],
+      ]) {
+        context.fillRect(
+          handleX - handle / 2,
+          handleY - handle / 2,
+          handle,
+          handle,
+        );
+      }
+    }
+    context.restore();
   }
   context.restore();
 }
 
 function sam3dBboxPixels() {
-  if (!elements.sam3dManualBbox.checked) return null;
-  const bbox = clampSam3dBbox(app.sam3dBbox);
+  const subject = selectedSam3dSourceSubject();
+  if (!elements.sam3dManualBbox.checked || !subject) return null;
+  const bbox = clampSam3dBbox(subject.bbox);
   return [
     (bbox.x / 100) * app.sam3dSourceWidth,
     (bbox.y / 100) * app.sam3dSourceHeight,
     ((bbox.x + bbox.width) / 100) * app.sam3dSourceWidth,
     ((bbox.y + bbox.height) / 100) * app.sam3dSourceHeight,
   ];
+}
+
+function sam3dBboxesPixels() {
+  if (!elements.sam3dManualBbox.checked) return [];
+  return app.sam3dSubjects
+    .slice(0, SAM3D_MAX_SUBJECTS)
+    .map((subject) => {
+      const bbox = clampSam3dBbox(subject.bbox);
+      return [
+        (bbox.x / 100) * app.sam3dSourceWidth,
+        (bbox.y / 100) * app.sam3dSourceHeight,
+        ((bbox.x + bbox.width) / 100) * app.sam3dSourceWidth,
+        ((bbox.y + bbox.height) / 100) * app.sam3dSourceHeight,
+      ];
+    });
 }
 
 function sam3dKnownVerticalFov() {
@@ -9101,7 +9789,7 @@ async function createSam3dJob() {
   let uploadedJob = null;
   try {
     const comparisonId = comparing ? newSam3dComparisonId() : "";
-    const bbox = sam3dBboxPixels();
+    const bboxes = sam3dBboxesPixels();
     const verticalFov = sam3dKnownVerticalFov();
     const uploadedJobs = [];
     for (const [index, modelId] of modelIds.entries()) {
@@ -9111,7 +9799,7 @@ async function createSam3dJob() {
         : "Uploading source image…";
       const uploadPayload = await Sam3dClient.create(
         app.sam3dSourceFile,
-        bbox,
+        bboxes,
         verticalFov,
         modelId,
         comparisonId,
@@ -9123,6 +9811,13 @@ async function createSam3dJob() {
         throw new Error("The manager did not return a valid SAM 3D job.");
       }
       uploadedJobs.push(uploadedJob);
+      app.sam3dJobSubjectDrafts.set(
+        uploadedJob.id,
+        app.sam3dSubjects.map((subject) => ({
+          ...subject,
+          bbox: { ...subject.bbox },
+        })),
+      );
       mergeSam3dJob(uploadedJob);
     }
 
@@ -9796,6 +10491,10 @@ function selectSam3dBody(value) {
     return;
   }
   app.sam3dSelectedBodyIndex = bodyIndex;
+  const primary = ensureSam3dSubjectAssignments()[
+    app.sam3dPrimarySubjectIndex
+  ];
+  if (primary) primary.personIndex = bodyIndex;
   app.sam3dPreviewKind = "overlay";
   renderSam3dJob();
   renderSam3dApplyState();
@@ -11246,11 +11945,1553 @@ async function deleteSam3dBodyProfile() {
   toast("Person profile deleted", `${profile.name} was removed locally.`);
 }
 
+function sam3dDraftSubjects(job = app.sam3dSelectedJob) {
+  const stored = job ? app.sam3dJobSubjectDrafts.get(job.id) : null;
+  if (stored?.length) return stored.slice(0, SAM3D_MAX_SUBJECTS);
+  const count = Math.max(1, Math.min(SAM3D_MAX_SUBJECTS, job?.bodies?.length || 1));
+  return Array.from({ length: count }, (_, index) => ({
+    id: `body-${index + 1}`,
+    label: `Subject ${index + 1}`,
+    color: SAM3D_SUBJECT_COLORS[index],
+  }));
+}
+
+function sam3dUnusedProvenanceIndex(assignments, excludedIndex = -1) {
+  const used = new Set(
+    asArray(assignments)
+      .map((assignment, index) =>
+        index === excludedIndex
+          ? null
+          : integerValue(assignment?.personIndex),
+      )
+      .filter(
+        (personIndex) =>
+          personIndex !== null &&
+          personIndex >= 0 &&
+          personIndex < 32,
+      ),
+  );
+  for (let personIndex = 0; personIndex < 32; personIndex += 1) {
+    if (!used.has(personIndex)) return personIndex;
+  }
+  return 0;
+}
+
+function addSam3dManualSubject() {
+  const job = app.sam3dSelectedJob;
+  if (!job) return;
+  const subjects = sam3dDraftSubjects(job);
+  if (subjects.length >= 2) return;
+  const index = subjects.length;
+  const manualSubject = {
+    id: `manual-subject-${index + 1}`,
+    label: `Manual subject ${index + 1}`,
+    color: SAM3D_SUBJECT_COLORS[index],
+    manualOnly: true,
+    bbox: { x: 0, y: 48, width: 100, height: 52 },
+  };
+  app.sam3dJobSubjectDrafts.set(job.id, [...subjects, manualSubject]);
+  app.sam3dSubjectAssignmentsJobId = "";
+  const assignments = ensureSam3dSubjectAssignments();
+  if (assignments[index]) {
+    assignments[index].personIndex = sam3dUnusedProvenanceIndex(
+      assignments,
+      index,
+    );
+  }
+  app.sam3dManualPoseSubjectIndex = index;
+  renderSam3dHandoff();
+  setSam3dHandoffTab("pose");
+}
+
+function removeSam3dManualSubject(index) {
+  const job = app.sam3dSelectedJob;
+  const subjects = sam3dDraftSubjects(job);
+  if (!job || !subjects[index]?.manualOnly) return;
+  subjects.splice(index, 1);
+  app.sam3dJobSubjectDrafts.set(job.id, subjects);
+  app.sam3dSubjectAssignmentsJobId = "";
+  app.sam3dPrimarySubjectIndex = 0;
+  app.sam3dManualPoseSubjectIndex = 0;
+  resetSam3dGenitalDraft();
+  renderSam3dHandoff();
+  renderSam3dApplyState();
+}
+
+function sam3dManualPoseTemplateCoordinates(templateName, subjectIndex) {
+  if (templateName === SAM3D_MANUAL_POSE_TEMPLATE_POV) {
+    return {
+      hipControl: [0.5, 1.0],
+      abdomen2Control: [0.5, 1.12],
+      chestControl: [0.5, 1.24],
+      neckControl: [0.5, 1.35],
+      headControl: [0.5, 1.46],
+      lShoulderControl: [0.62, 1.25],
+      lArmControl: [0.7, 1.14],
+      lElbowControl: [0.78, 0.94],
+      lHandControl: [0.88, 0.74],
+      rShoulderControl: [0.38, 1.25],
+      rArmControl: [0.3, 1.14],
+      rElbowControl: [0.22, 0.94],
+      rHandControl: [0.12, 0.74],
+      lThighControl: [0.57, 0.96],
+      lKneeControl: [0.65, 0.82],
+      lFootControl: [0.75, 0.68],
+      rThighControl: [0.43, 0.96],
+      rKneeControl: [0.35, 0.82],
+      rFootControl: [0.25, 0.68],
+    };
+  }
+  const local = {
+    hipControl: [0.5, 0.62],
+    abdomen2Control: [0.5, 0.52],
+    chestControl: [0.5, 0.4],
+    neckControl: [0.5, 0.29],
+    headControl: [0.5, 0.17],
+    lShoulderControl: [0.62, 0.38],
+    lArmControl: [0.69, 0.43],
+    lElbowControl: [0.76, 0.54],
+    lHandControl: [0.82, 0.66],
+    rShoulderControl: [0.38, 0.38],
+    rArmControl: [0.31, 0.43],
+    rElbowControl: [0.24, 0.54],
+    rHandControl: [0.18, 0.66],
+    lThighControl: [0.56, 0.68],
+    lKneeControl: [0.57, 0.82],
+    lFootControl: [0.58, 0.96],
+    rThighControl: [0.44, 0.68],
+    rKneeControl: [0.43, 0.82],
+    rFootControl: [0.42, 0.96],
+  };
+  const subject = sam3dDraftSubjects()[subjectIndex];
+  const bbox = clampSam3dBbox(
+    subject?.bbox || { x: 0, y: 0, width: 100, height: 100 },
+  );
+  const left = bbox.x / 100;
+  const top = bbox.y / 100;
+  const width = bbox.width / 100;
+  const height = bbox.height / 100;
+  return Object.fromEntries(
+    Object.entries(local).map(([controllerId, point]) => [
+      controllerId,
+      [left + point[0] * width, top + point[1] * height],
+    ]),
+  );
+}
+
+function boundedSam3dManualPosePoint(point) {
+  return {
+    u: Math.max(
+      SAM3D_MANUAL_POSE_COORD_MIN,
+      Math.min(SAM3D_MANUAL_POSE_COORD_MAX, Number(point?.u) || 0),
+    ),
+    v: Math.max(
+      SAM3D_MANUAL_POSE_COORD_MIN,
+      Math.min(SAM3D_MANUAL_POSE_COORD_MAX, Number(point?.v) || 0),
+    ),
+    depthOffset: Math.max(
+      SAM3D_MANUAL_POSE_DEPTH_MIN,
+      Math.min(
+        SAM3D_MANUAL_POSE_DEPTH_MAX,
+        Number(point?.depthOffset) || 0,
+      ),
+    ),
+    visible: point?.visible !== false,
+  };
+}
+
+function defaultSam3dManualPose(
+  subjectIndex,
+  templateName = SAM3D_MANUAL_POSE_TEMPLATE_UPRIGHT,
+) {
+  const resolvedTemplate =
+    templateName === SAM3D_MANUAL_POSE_TEMPLATE_POV
+      ? SAM3D_MANUAL_POSE_TEMPLATE_POV
+      : SAM3D_MANUAL_POSE_TEMPLATE_UPRIGHT;
+  const coordinates = sam3dManualPoseTemplateCoordinates(
+    resolvedTemplate,
+    subjectIndex,
+  );
+  return {
+    template: resolvedTemplate,
+    facing: "camera",
+    selectedControllerId: "hipControl",
+    handles: Object.fromEntries(
+      SAM3D_MANUAL_POSE_CONTROLLERS.map((controller) => {
+        const [u, v] = coordinates[controller.id] || [0.5, 0.5];
+        return [
+          controller.id,
+          boundedSam3dManualPosePoint({
+            u,
+            v,
+            depthOffset: 0,
+            visible: true,
+          }),
+        ];
+      }),
+    ),
+  };
+}
+
+function sam3dSuggestedManualPoseTemplate(subject, subjectIndex) {
+  const bbox = subject?.bbox
+    ? clampSam3dBbox(subject.bbox)
+    : null;
+  if (
+    subject?.manualOnly ||
+    (
+      subjectIndex > 0 &&
+      bbox &&
+      bbox.y + bbox.height >= 95 &&
+      bbox.height <= 70
+    )
+  ) {
+    return SAM3D_MANUAL_POSE_TEMPLATE_POV;
+  }
+  return SAM3D_MANUAL_POSE_TEMPLATE_UPRIGHT;
+}
+
+function normalizeSam3dManualPose(pose, subjectIndex) {
+  const fallback = defaultSam3dManualPose(
+    subjectIndex,
+    pose?.template,
+  );
+  const handles =
+    pose?.handles && typeof pose.handles === "object"
+      ? pose.handles
+      : {};
+  return {
+    template: fallback.template,
+    facing: pose?.facing === "away" ? "away" : "camera",
+    selectedControllerId: SAM3D_MANUAL_POSE_CONTROLLERS.some(
+      (controller) => controller.id === pose?.selectedControllerId,
+    )
+      ? pose.selectedControllerId
+      : fallback.selectedControllerId,
+    handles: Object.fromEntries(
+      SAM3D_MANUAL_POSE_CONTROLLERS.map((controller) => {
+        const handle = boundedSam3dManualPosePoint(
+          handles[controller.id] || fallback.handles[controller.id],
+        );
+        if (controller.id === "hipControl") handle.visible = true;
+        return [controller.id, handle];
+      }),
+    ),
+  };
+}
+
+function sam3dManualPoseRequest(assignment, subjectIndex) {
+  if (assignment?.poseMode !== "manual") return null;
+  const pose = normalizeSam3dManualPose(
+    assignment.manualPose,
+    subjectIndex,
+  );
+  return {
+    enabled: true,
+    facing: pose.facing,
+    controllers: Object.fromEntries(
+      SAM3D_MANUAL_POSE_CONTROLLERS.flatMap((controller) => {
+        const handle = boundedSam3dManualPosePoint(
+          pose.handles[controller.id],
+        );
+        if (!handle.visible && controller.id !== "hipControl") return [];
+        return [[
+          controller.id,
+          [handle.u, handle.v, handle.depthOffset],
+        ]];
+      }),
+    ),
+  };
+}
+
+function sam3dBodyKeypoints2d(body, job = app.sam3dSelectedJob) {
+  const raw =
+    body?.keypoints2d ||
+    body?.keypoints_2d ||
+    body?.joints2d ||
+    body?.joints_2d;
+  const candidates = Array.isArray(raw)
+    ? raw
+    : raw && typeof raw === "object"
+      ? Object.values(raw)
+      : [];
+  const width = Math.max(1, Number(job?.sourceWidth) || 1);
+  const height = Math.max(1, Number(job?.sourceHeight) || 1);
+  return candidates.map((candidate) => {
+    const x = Number(
+      Array.isArray(candidate)
+        ? candidate[0]
+        : candidate?.x ?? candidate?.u ?? candidate?.[0],
+    );
+    const y = Number(
+      Array.isArray(candidate)
+        ? candidate[1]
+        : candidate?.y ?? candidate?.v ?? candidate?.[1],
+    );
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+    const normalized = Math.abs(x) <= 2 && Math.abs(y) <= 2;
+    return normalized ? [x, y] : [x / width, y / height];
+  });
+}
+
+function sam3dAutoSkeletonSimilarity(
+  firstBody,
+  secondBody,
+  job = app.sam3dSelectedJob,
+) {
+  const first = sam3dBodyKeypoints2d(firstBody, job);
+  const second = sam3dBodyKeypoints2d(secondBody, job);
+  const distances = [];
+  for (let index = 0; index < Math.min(first.length, second.length); index += 1) {
+    if (!first[index] || !second[index]) continue;
+    distances.push(
+      Math.hypot(
+        first[index][0] - second[index][0],
+        first[index][1] - second[index][1],
+      ) / Math.SQRT2,
+    );
+  }
+  if (distances.length < 8) {
+    return { duplicate: false, jointCount: distances.length, overlap: 0 };
+  }
+  distances.sort((a, b) => a - b);
+  const median = distances[Math.floor(distances.length / 2)];
+  const overlap =
+    distances.filter((distance) => distance <= 0.025).length /
+    distances.length;
+  return {
+    duplicate: median <= 0.015 && overlap >= 0.85,
+    jointCount: distances.length,
+    median,
+    overlap,
+  };
+}
+
+function sam3dDuplicateAutoSkeletons(
+  assignments = ensureSam3dSubjectAssignments(),
+  job = app.sam3dSelectedJob,
+) {
+  if (!job?.bodies?.length) return [];
+  const duplicates = [];
+  for (let first = 0; first < assignments.length; first += 1) {
+    if (assignments[first]?.poseMode === "manual") continue;
+    for (let second = first + 1; second < assignments.length; second += 1) {
+      if (assignments[second]?.poseMode === "manual") continue;
+      const firstIndex = integerValue(assignments[first]?.personIndex);
+      const secondIndex = integerValue(assignments[second]?.personIndex);
+      if (
+        firstIndex === null ||
+        secondIndex === null ||
+        !job.bodies[firstIndex] ||
+        !job.bodies[secondIndex]
+      ) {
+        continue;
+      }
+      if (firstIndex === secondIndex) {
+        duplicates.push({ first, second, overlap: 1 });
+        continue;
+      }
+      const similarity = sam3dAutoSkeletonSimilarity(
+        job.bodies[firstIndex],
+        job.bodies[secondIndex],
+        job,
+      );
+      if (similarity.duplicate) {
+        duplicates.push({ first, second, overlap: similarity.overlap });
+      }
+    }
+  }
+  return duplicates;
+}
+
+function ensureSam3dSubjectAssignments() {
+  const job = app.sam3dSelectedJob;
+  if (!job) return [];
+  const subjects = sam3dDraftSubjects(job);
+  if (
+    app.sam3dSubjectAssignmentsJobId !== job.id ||
+    app.sam3dSubjectAssignments.length !== subjects.length
+  ) {
+    const previous =
+      app.sam3dSubjectAssignmentsJobId === job.id
+        ? new Map(
+            app.sam3dSubjectAssignments.map((assignment) => [
+              assignment.subjectId,
+              assignment,
+            ]),
+          )
+        : new Map();
+    app.sam3dSubjectAssignmentsJobId = job.id;
+    app.sam3dSubjectAssignments = subjects.map((subject, index) => {
+      const existing = previous.get(subject.id);
+      const poseMode =
+        existing?.poseMode === "manual" || subject.manualOnly
+          ? "manual"
+          : "sam";
+      return {
+        subjectId: subject.id,
+        personIndex:
+          poseMode === "manual"
+            ? Math.max(0, integerValue(existing?.personIndex) ?? index)
+            : Math.min(
+                index,
+                Math.max(0, job.bodies.length - 1),
+              ),
+        targetUid:
+          existing?.targetUid ??
+          (index === 0
+            ? String(elements.sam3dPersonTarget.value || "")
+            : ""),
+        heightM: Math.max(
+          0.5,
+          Math.min(3, Number(existing?.heightM) || 1.65),
+        ),
+        poseMode,
+        manualOnly: subject.manualOnly === true,
+        manualPose:
+          poseMode === "manual"
+            ? normalizeSam3dManualPose(
+                existing?.manualPose || {
+                  template: sam3dSuggestedManualPoseTemplate(
+                    subject,
+                    index,
+                  ),
+                },
+                index,
+              )
+            : existing?.manualPose || null,
+      };
+    });
+    const currentPrimary =
+      app.sam3dSubjectAssignments[app.sam3dPrimarySubjectIndex];
+    if (!currentPrimary || currentPrimary.poseMode === "manual") {
+      app.sam3dPrimarySubjectIndex = Math.max(
+        0,
+        app.sam3dSubjectAssignments.findIndex(
+          (assignment) => assignment.poseMode !== "manual",
+        ),
+      );
+    }
+    resetSam3dGenitalDraft();
+  }
+  return app.sam3dSubjectAssignments;
+}
+
+function updateSam3dSubjectAssignment(event) {
+  const control = event.target.closest("[data-sam3d-assignment-index]");
+  if (!control) return;
+  const index = integerValue(control.dataset.sam3dAssignmentIndex);
+  const assignment = ensureSam3dSubjectAssignments()[index];
+  if (!assignment) return;
+  if (control.dataset.sam3dAssignmentField === "body") {
+    assignment.personIndex = Math.max(0, integerValue(control.value) || 0);
+  } else if (control.dataset.sam3dAssignmentField === "target") {
+    assignment.targetUid = String(control.value || "").trim();
+  } else if (control.dataset.sam3dAssignmentField === "height") {
+    assignment.heightM = Math.max(0.5, Math.min(3, Number(control.value) || 1.65));
+  } else if (control.dataset.sam3dAssignmentField === "mode") {
+    const nextMode = control.value === "manual" ? "manual" : "sam";
+    if (nextMode === "manual" && index === app.sam3dPrimarySubjectIndex) {
+      const replacement = ensureSam3dSubjectAssignments().findIndex(
+        (candidate, candidateIndex) =>
+          candidateIndex !== index && candidate.poseMode !== "manual",
+      );
+      if (replacement < 0) {
+        control.value = "sam";
+        toast(
+          "The primary subject must stay Auto (SAM)",
+          "Add another SAM subject first; its reconstruction supplies the shared camera.",
+          "error",
+        );
+        return;
+      }
+      app.sam3dPrimarySubjectIndex = replacement;
+    }
+    assignment.poseMode = nextMode;
+    if (nextMode === "manual") {
+      assignment.personIndex = sam3dUnusedProvenanceIndex(
+        ensureSam3dSubjectAssignments(),
+        index,
+      );
+      assignment.manualPose = normalizeSam3dManualPose(
+        assignment.manualPose || {
+          template: sam3dSuggestedManualPoseTemplate(
+            sam3dDraftSubjects()[index],
+            index,
+          ),
+        },
+        index,
+      );
+      app.sam3dManualPoseSubjectIndex = index;
+    }
+  } else if (control.dataset.sam3dAssignmentField === "primary") {
+    if (assignment.poseMode === "manual") return;
+    app.sam3dPrimarySubjectIndex = index;
+  }
+  const primary = ensureSam3dSubjectAssignments()[app.sam3dPrimarySubjectIndex];
+  if (primary) {
+    elements.sam3dPersonTarget.value = primary.targetUid;
+    elements.sam3dPersonHeight.value = String(primary.heightM);
+    selectSam3dBody(primary.personIndex);
+  }
+  renderSam3dSubjectAssignments();
+  renderSam3dManualPoseEditor();
+  renderSam3dGenitalEditor();
+  renderSam3dReview();
+  renderSam3dApplyState();
+}
+
+function sam3dAssignmentField(labelText, control, className = "") {
+  const field = createElement(
+    "label",
+    `sam3d-assignment-field ${className}`.trim(),
+  );
+  const label = document.createElement("span");
+  label.textContent = labelText;
+  field.append(label, control);
+  return field;
+}
+
+function renderSam3dSubjectAssignments() {
+  const job = app.sam3dSelectedJob;
+  if (!job || !elements.sam3dSubjectAssignmentList) return;
+  const subjects = sam3dDraftSubjects(job);
+  const assignments = ensureSam3dSubjectAssignments();
+  const duplicatePairs = sam3dDuplicateAutoSkeletons(assignments, job);
+  const duplicateIndices = new Set(
+    duplicatePairs.flatMap((pair) => [pair.first, pair.second]),
+  );
+  const targetOptions = Array.from(elements.sam3dPersonTarget.options);
+  elements.sam3dSubjectAssignmentList.replaceChildren();
+  subjects.forEach((subject, index) => {
+    const assignment = assignments[index];
+    const card = createElement("article", "sam3d-subject-assignment");
+    card.classList.toggle("is-manual", assignment.poseMode === "manual");
+    card.classList.toggle("has-duplicate", duplicateIndices.has(index));
+    const identity = createElement("div", "sam3d-assignment-identity");
+    const title = document.createElement("strong");
+    title.textContent = subject.label;
+    const source = document.createElement("small");
+    source.textContent =
+      assignment.poseMode === "manual"
+        ? "Manual partial rig"
+        : "SAM reconstruction";
+    identity.append(title, source);
+    const primary = document.createElement("input");
+    primary.type = "radio";
+    primary.name = "sam3d-primary-subject";
+    primary.checked = index === app.sam3dPrimarySubjectIndex;
+    primary.disabled = assignment.poseMode === "manual";
+    primary.dataset.sam3dAssignmentIndex = String(index);
+    primary.dataset.sam3dAssignmentField = "primary";
+    primary.setAttribute(
+      "aria-label",
+      assignment.poseMode === "manual"
+        ? `${subject.label} cannot be primary because it has no SAM camera`
+        : `Use ${subject.label} as primary subject`,
+    );
+    primary.title =
+      assignment.poseMode === "manual"
+        ? "The primary must remain Auto (SAM) to supply the shared camera."
+        : "Use this SAM subject for the shared camera.";
+    const mode = document.createElement("select");
+    mode.dataset.sam3dAssignmentIndex = String(index);
+    mode.dataset.sam3dAssignmentField = "mode";
+    const autoOption = new Option("Auto (SAM)", "sam");
+    autoOption.disabled = assignment.manualOnly;
+    mode.append(autoOption, new Option("Manual partial", "manual"));
+    mode.value = assignment.poseMode;
+    const body = document.createElement("select");
+    body.dataset.sam3dAssignmentIndex = String(index);
+    body.dataset.sam3dAssignmentField = "body";
+    body.append(...(job.bodies.length ? job.bodies : [{}]).map((candidate, bodyIndex) =>
+      new Option(sam3dBodyLabel(candidate, bodyIndex), String(bodyIndex))));
+    body.value = String(assignment.personIndex);
+    const target = document.createElement("select");
+    target.dataset.sam3dAssignmentIndex = String(index);
+    target.dataset.sam3dAssignmentField = "target";
+    target.append(new Option("Not assigned", ""), ...targetOptions.map((option) =>
+      new Option(option.textContent, option.value)));
+    target.value = assignment.targetUid;
+    const height = document.createElement("input");
+    height.type = "number";
+    height.min = "0.5";
+    height.max = "3";
+    height.step = "0.01";
+    height.value = String(assignment.heightM);
+    height.dataset.sam3dAssignmentIndex = String(index);
+    height.dataset.sam3dAssignmentField = "height";
+    height.setAttribute("aria-label", `${subject.label} target height in meters`);
+    const primaryField = createElement("label", "sam3d-assignment-primary");
+    const primaryLabel = document.createElement("span");
+    primaryLabel.textContent = "Primary";
+    primaryField.append(primaryLabel, primary);
+    const modeField = sam3dAssignmentField("Pose source", mode);
+    const bodyField = sam3dAssignmentField("Detected body", body);
+    bodyField.hidden = assignment.poseMode === "manual";
+    body.disabled = assignment.poseMode === "manual";
+    const targetField = sam3dAssignmentField("VaM Person", target);
+    const heightShell = createElement("span", "sam3d-assignment-height-input");
+    const heightUnit = document.createElement("span");
+    heightUnit.textContent = "m";
+    heightShell.append(height, heightUnit);
+    const heightField = sam3dAssignmentField(
+      "Target height (m)",
+      heightShell,
+      "sam3d-assignment-height",
+    );
+    const actions = createElement("div", "sam3d-assignment-actions");
+    if (assignment.poseMode === "manual") {
+      const edit = button("Edit rig", "secondary-button small");
+      edit.type = "button";
+      edit.dataset.sam3dManualEditIndex = String(index);
+      actions.append(edit);
+      if (assignment.manualOnly) {
+        const remove = button("Remove", "quiet-button small");
+        remove.type = "button";
+        remove.dataset.sam3dManualRemoveIndex = String(index);
+        actions.append(remove);
+      }
+    }
+    card.append(
+      primaryField,
+      identity,
+      modeField,
+      bodyField,
+      targetField,
+      heightField,
+      actions,
+    );
+    if (duplicateIndices.has(index)) {
+      const warning = createElement("p", "sam3d-assignment-warning");
+      const pair = duplicatePairs.find(
+        (candidate) =>
+          candidate.first === index || candidate.second === index,
+      );
+      warning.textContent =
+        `Likely duplicate auto skeleton (${Math.round((pair?.overlap || 1) * 100)}% joint overlap). ` +
+        "Switch one of the two subjects to Manual partial before Apply.";
+      card.append(warning);
+    }
+    elements.sam3dSubjectAssignmentList.append(card);
+  });
+  elements.sam3dAssignmentCount.textContent =
+    `${subjects.length} subject${subjects.length === 1 ? "" : "s"}`;
+  elements.sam3dAddManualSubject.disabled = subjects.length >= 2;
+  elements.sam3dAddManualSubject.hidden = subjects.length >= 2;
+}
+
+function sam3dManualPoseAssignments() {
+  return ensureSam3dSubjectAssignments()
+    .map((assignment, index) => ({ assignment, index }))
+    .filter(({ assignment }) => assignment.poseMode === "manual");
+}
+
+function selectedSam3dManualPoseAssignment() {
+  const manualAssignments = sam3dManualPoseAssignments();
+  if (!manualAssignments.length) return null;
+  const selected =
+    manualAssignments.find(
+      ({ index }) => index === app.sam3dManualPoseSubjectIndex,
+    ) || manualAssignments[0];
+  app.sam3dManualPoseSubjectIndex = selected.index;
+  selected.assignment.manualPose = normalizeSam3dManualPose(
+    selected.assignment.manualPose,
+    selected.index,
+  );
+  return selected;
+}
+
+function updateSam3dManualPoseSubject() {
+  app.sam3dManualPoseSubjectIndex = Math.max(
+    0,
+    integerValue(elements.sam3dManualPoseSubject.value) || 0,
+  );
+  renderSam3dManualPoseEditor();
+}
+
+function updateSam3dManualPoseTemplate() {
+  const selected = selectedSam3dManualPoseAssignment();
+  if (!selected) return;
+  selected.assignment.manualPose = defaultSam3dManualPose(
+    selected.index,
+    elements.sam3dManualPoseTemplate.value,
+  );
+  renderSam3dManualPoseEditor();
+  renderSam3dReview();
+  renderSam3dApplyState();
+}
+
+function sam3dOppositeManualPoseController(controllerId) {
+  const value = String(controllerId || "");
+  if (/^l[A-Z]/.test(value)) return `r${value.slice(1)}`;
+  if (/^r[A-Z]/.test(value)) return `l${value.slice(1)}`;
+  return value;
+}
+
+function swapSam3dManualPoseSides(pose) {
+  for (const name of [
+    "ShoulderControl",
+    "ArmControl",
+    "ElbowControl",
+    "HandControl",
+    "ThighControl",
+    "KneeControl",
+    "FootControl",
+  ]) {
+    const left = `l${name}`;
+    const right = `r${name}`;
+    [pose.handles[left], pose.handles[right]] = [
+      pose.handles[right],
+      pose.handles[left],
+    ];
+  }
+  pose.selectedControllerId = sam3dOppositeManualPoseController(
+    pose.selectedControllerId,
+  );
+}
+
+function updateSam3dManualPoseFacing() {
+  const selected = selectedSam3dManualPoseAssignment();
+  if (!selected) return;
+  const facing =
+    elements.sam3dManualPoseFacing.value === "away"
+      ? "away"
+      : "camera";
+  if (selected.assignment.manualPose.facing !== facing) {
+    swapSam3dManualPoseSides(selected.assignment.manualPose);
+  }
+  selected.assignment.manualPose.facing = facing;
+  renderSam3dManualPoseEditor();
+  renderSam3dReview();
+  renderSam3dApplyState();
+}
+
+function resetSelectedSam3dManualPose() {
+  const selected = selectedSam3dManualPoseAssignment();
+  if (!selected) return;
+  selected.assignment.manualPose = defaultSam3dManualPose(
+    selected.index,
+    elements.sam3dManualPoseTemplate.value,
+  );
+  renderSam3dManualPoseEditor();
+  renderSam3dReview();
+  renderSam3dApplyState();
+}
+
+function sam3dSelectedManualPoseHandle() {
+  const selected = selectedSam3dManualPoseAssignment();
+  if (!selected) return null;
+  const pose = selected.assignment.manualPose;
+  return {
+    ...selected,
+    pose,
+    controller: SAM3D_MANUAL_POSE_CONTROLLERS.find(
+      (candidate) => candidate.id === pose.selectedControllerId,
+    ) || SAM3D_MANUAL_POSE_CONTROLLERS[0],
+    handle:
+      pose.handles[pose.selectedControllerId] ||
+      pose.handles.hipControl,
+  };
+}
+
+function updateSelectedSam3dManualPoseVisibility() {
+  const selected = sam3dSelectedManualPoseHandle();
+  if (!selected) return;
+  if (selected.controller.id === "hipControl") {
+    elements.sam3dManualPoseVisible.checked = true;
+    return;
+  }
+  selected.handle.visible = elements.sam3dManualPoseVisible.checked;
+  renderSam3dManualPoseEditor();
+  renderSam3dReview();
+  renderSam3dApplyState();
+}
+
+function updateSelectedSam3dManualPoseDepth() {
+  const selected = sam3dSelectedManualPoseHandle();
+  if (!selected) return;
+  selected.handle.depthOffset = boundedSam3dManualPosePoint({
+    ...selected.handle,
+    depthOffset: elements.sam3dManualPoseDepth.value,
+  }).depthOffset;
+  renderSam3dManualPoseEditor();
+}
+
+function selectSam3dManualPoseJoint(event) {
+  const target = event.target.closest("[data-sam3d-manual-joint]");
+  if (!target || event.target.matches('input[type="checkbox"]')) return;
+  const selected = selectedSam3dManualPoseAssignment();
+  const controllerId = String(target.dataset.sam3dManualJoint || "");
+  if (
+    !selected ||
+    !SAM3D_MANUAL_POSE_CONTROLLERS.some(
+      (controller) => controller.id === controllerId,
+    )
+  ) {
+    return;
+  }
+  selected.assignment.manualPose.selectedControllerId = controllerId;
+  renderSam3dManualPoseEditor();
+}
+
+function updateSam3dManualPoseJointVisibility(event) {
+  const checkbox = event.target.closest(
+    "[data-sam3d-manual-joint-visible]",
+  );
+  if (!checkbox) return;
+  const selected = selectedSam3dManualPoseAssignment();
+  const controllerId = String(
+    checkbox.dataset.sam3dManualJointVisible || "",
+  );
+  const handle = selected?.assignment.manualPose.handles[controllerId];
+  if (!handle) return;
+  handle.visible =
+    controllerId === "hipControl" ? true : checkbox.checked;
+  selected.assignment.manualPose.selectedControllerId = controllerId;
+  renderSam3dManualPoseEditor();
+  renderSam3dReview();
+  renderSam3dApplyState();
+}
+
+function beginSam3dManualPoseDrag(event) {
+  const handle = event.target.closest("[data-sam3d-manual-handle]");
+  const selected = selectedSam3dManualPoseAssignment();
+  if (!handle || !selected) return;
+  const controllerId = String(handle.dataset.sam3dManualHandle || "");
+  if (!selected.assignment.manualPose.handles[controllerId]) return;
+  event.preventDefault();
+  selected.assignment.manualPose.selectedControllerId = controllerId;
+  app.sam3dManualPoseDrag = {
+    pointerId: event.pointerId,
+    subjectIndex: selected.index,
+    controllerId,
+  };
+  elements.sam3dManualPoseStage.setPointerCapture(event.pointerId);
+  renderSam3dManualPoseEditor();
+}
+
+function continueSam3dManualPoseDrag(event) {
+  const drag = app.sam3dManualPoseDrag;
+  if (!drag || drag.pointerId !== event.pointerId) return;
+  const assignment = ensureSam3dSubjectAssignments()[drag.subjectIndex];
+  const handle = assignment?.manualPose?.handles?.[drag.controllerId];
+  const bounds = elements.sam3dManualPoseStage.getBoundingClientRect();
+  if (!handle || !bounds.width || !bounds.height) return;
+  const span =
+    SAM3D_MANUAL_POSE_COORD_MAX - SAM3D_MANUAL_POSE_COORD_MIN;
+  const next = boundedSam3dManualPosePoint({
+    ...handle,
+    u:
+      SAM3D_MANUAL_POSE_COORD_MIN +
+      ((event.clientX - bounds.left) / bounds.width) * span,
+    v:
+      SAM3D_MANUAL_POSE_COORD_MIN +
+      ((event.clientY - bounds.top) / bounds.height) * span,
+  });
+  assignment.manualPose.handles[drag.controllerId] = next;
+  renderSam3dManualPoseEditor();
+}
+
+function finishSam3dManualPoseDrag(event) {
+  if (
+    !app.sam3dManualPoseDrag ||
+    app.sam3dManualPoseDrag.pointerId !== event.pointerId
+  ) {
+    return;
+  }
+  continueSam3dManualPoseDrag(event);
+  app.sam3dManualPoseDrag = null;
+  if (elements.sam3dManualPoseStage.hasPointerCapture(event.pointerId)) {
+    elements.sam3dManualPoseStage.releasePointerCapture(event.pointerId);
+  }
+  renderSam3dReview();
+  renderSam3dApplyState();
+}
+
+function sam3dManualPoseOffFrame(handle) {
+  return (
+    handle.u < 0 ||
+    handle.u > 1 ||
+    handle.v < 0 ||
+    handle.v > 1
+  );
+}
+
+function sam3dManualPoseStagePercent(value) {
+  return (
+    ((value - SAM3D_MANUAL_POSE_COORD_MIN) /
+      (SAM3D_MANUAL_POSE_COORD_MAX -
+        SAM3D_MANUAL_POSE_COORD_MIN)) *
+    100
+  );
+}
+
+function renderSam3dManualPoseEditor() {
+  if (!elements.sam3dManualPose) return;
+  const manualAssignments = sam3dManualPoseAssignments();
+  elements.sam3dManualPose.hidden = manualAssignments.length === 0;
+  if (!manualAssignments.length) return;
+  const selected = selectedSam3dManualPoseAssignment();
+  if (!selected) return;
+  const pose = selected.assignment.manualPose;
+  elements.sam3dManualPoseSubject.replaceChildren(
+    ...manualAssignments.map(({ index }) => {
+      const subject = sam3dDraftSubjects()[index];
+      return new Option(
+        subject?.label || `Subject ${index + 1}`,
+        String(index),
+      );
+    }),
+  );
+  elements.sam3dManualPoseSubject.value = String(selected.index);
+  elements.sam3dManualPoseTemplate.value = pose.template;
+  elements.sam3dManualPoseFacing.value = pose.facing;
+
+  const duplicates = sam3dDuplicateAutoSkeletons();
+  elements.sam3dManualPoseWarning.hidden = duplicates.length === 0;
+  elements.sam3dManualPoseWarning.textContent = duplicates.length
+    ? "Two remaining Auto (SAM) assignments appear to use the same skeleton. Convert one to Manual partial before Apply."
+    : "";
+
+  const sourceWidth = Number(app.sam3dSelectedJob?.sourceWidth) || 0;
+  const sourceHeight = Number(app.sam3dSelectedJob?.sourceHeight) || 0;
+  if (sourceWidth > 0 && sourceHeight > 0) {
+    elements.sam3dManualPoseStage.style.aspectRatio =
+      `${sourceWidth} / ${sourceHeight}`;
+  } else {
+    elements.sam3dManualPoseStage.style.removeProperty("aspect-ratio");
+  }
+  const sourceUrl = app.sam3dSelectedJob
+    ? sam3dArtifactUrl(app.sam3dSelectedJob, "source")
+    : app.sam3dSourceUrl;
+  if (
+    sourceUrl &&
+    elements.sam3dManualPoseSource.getAttribute("src") !== sourceUrl
+  ) {
+    elements.sam3dManualPoseSource.src = sourceUrl;
+  }
+
+  elements.sam3dManualPoseBones.replaceChildren();
+  for (const controller of SAM3D_MANUAL_POSE_CONTROLLERS) {
+    if (!controller.parent) continue;
+    const point = pose.handles[controller.id];
+    const parent = pose.handles[controller.parent];
+    if (!point || !parent) continue;
+    const line = document.createElementNS(
+      "http://www.w3.org/2000/svg",
+      "line",
+    );
+    line.setAttribute("x1", String(parent.u * 100));
+    line.setAttribute("y1", String(parent.v * 100));
+    line.setAttribute("x2", String(point.u * 100));
+    line.setAttribute("y2", String(point.v * 100));
+    line.classList.toggle(
+      "is-hidden",
+      !point.visible || !parent.visible,
+    );
+    elements.sam3dManualPoseBones.append(line);
+  }
+
+  elements.sam3dManualPoseHandles.replaceChildren();
+  for (const controller of SAM3D_MANUAL_POSE_CONTROLLERS) {
+    const handle = pose.handles[controller.id];
+    const control = button("", "sam3d-manual-pose-handle");
+    control.type = "button";
+    control.dataset.sam3dManualHandle = controller.id;
+    control.style.left =
+      `${sam3dManualPoseStagePercent(handle.u)}%`;
+    control.style.top =
+      `${sam3dManualPoseStagePercent(handle.v)}%`;
+    control.classList.toggle(
+      "is-selected",
+      controller.id === pose.selectedControllerId,
+    );
+    control.classList.toggle("is-hidden", !handle.visible);
+    control.classList.toggle(
+      "is-off-frame",
+      sam3dManualPoseOffFrame(handle),
+    );
+    control.setAttribute(
+      "aria-label",
+      `${controller.label}${sam3dManualPoseOffFrame(handle) ? ", off frame" : ""}${handle.visible ? "" : ", released to follow body"}`,
+    );
+    const label = document.createElement("span");
+    label.textContent = controller.label;
+    control.append(label);
+    elements.sam3dManualPoseHandles.append(control);
+  }
+
+  elements.sam3dManualPoseJointList.replaceChildren();
+  let visibleCount = 0;
+  for (const controller of SAM3D_MANUAL_POSE_CONTROLLERS) {
+    const handle = pose.handles[controller.id];
+    if (handle.visible) visibleCount += 1;
+    const row = createElement("div", "sam3d-manual-pose-joint");
+    row.classList.toggle(
+      "is-selected",
+      controller.id === pose.selectedControllerId,
+    );
+    row.classList.toggle("is-hidden", !handle.visible);
+    row.dataset.sam3dManualJoint = controller.id;
+    const visibility = document.createElement("input");
+    visibility.type = "checkbox";
+    visibility.checked = handle.visible;
+    visibility.disabled = controller.id === "hipControl";
+    visibility.dataset.sam3dManualJointVisible = controller.id;
+    visibility.setAttribute(
+      "aria-label",
+      `Include ${controller.label}`,
+    );
+    const name = button(controller.label, "quiet-button");
+    name.type = "button";
+    name.dataset.sam3dManualJoint = controller.id;
+    const state = document.createElement("span");
+    state.textContent = !handle.visible
+      ? "Released — follows body"
+      : sam3dManualPoseOffFrame(handle)
+        ? "Off frame"
+        : "Visible";
+    row.append(visibility, name, state);
+    elements.sam3dManualPoseJointList.append(row);
+  }
+  elements.sam3dManualPoseVisibleCount.textContent =
+    `${visibleCount} of ${SAM3D_MANUAL_POSE_CONTROLLERS.length} included`;
+
+  const selectedHandle = sam3dSelectedManualPoseHandle();
+  if (!selectedHandle) return;
+  elements.sam3dManualPoseSelectedLabel.textContent =
+    selectedHandle.controller.label;
+  elements.sam3dManualPoseDepthLabel.textContent =
+    selectedHandle.controller.id === "hipControl"
+      ? "Depth from primary hip plane"
+      : "Depth from manual hip plane";
+  elements.sam3dManualPoseVisible.checked =
+    selectedHandle.handle.visible;
+  elements.sam3dManualPoseVisible.disabled =
+    selectedHandle.controller.id === "hipControl";
+  elements.sam3dManualPoseVisible.title =
+    selectedHandle.controller.id === "hipControl"
+      ? "hipControl anchors the manual rig and is required."
+      : "";
+  elements.sam3dManualPoseDepth.value = String(
+    selectedHandle.handle.depthOffset,
+  );
+  elements.sam3dManualPoseDepthValue.textContent =
+    `${selectedHandle.handle.depthOffset.toFixed(2)} m`;
+}
+
+function defaultSam3dGenitalDraft() {
+  return {
+    subjectIndex: 0,
+    enabled: false,
+    baseLocked: true,
+    segmentLengthsLocked: true,
+    testesEnabled: false,
+    handles: {
+      base: [0.5, 0.64, 0],
+      mid: [0.5, 0.72, 0],
+      tip: [0.5, 0.8, 0],
+      testes: [0.5, 0.62, 0],
+    },
+  };
+}
+
+function resetSam3dGenitalDraft() {
+  app.sam3dGenitalDraft = defaultSam3dGenitalDraft();
+  app.sam3dGenitalDrag = null;
+  if (elements.sam3dGenitalPanel) renderSam3dGenitalEditor();
+}
+
+function boundedSam3dGenitalPoint(point) {
+  return [
+    Math.max(0, Math.min(1, Number(point?.[0]) || 0)),
+    Math.max(0, Math.min(1, Number(point?.[1]) || 0)),
+    Math.max(SAM3D_GENITAL_DEPTH_MIN, Math.min(SAM3D_GENITAL_DEPTH_MAX, Number(point?.[2]) || 0)),
+  ];
+}
+
+function sam3dPairDraftRequest() {
+  const assignments = ensureSam3dSubjectAssignments();
+  const genital = app.sam3dGenitalDraft || defaultSam3dGenitalDraft();
+  const subjectIndex = Math.max(0, Math.min(assignments.length - 1, genital.subjectIndex || 0));
+  return {
+    subjects: assignments.slice(0, SAM3D_MAX_SUBJECTS).map(
+      (assignment, index) => {
+        const subject = {
+          person_index: Math.max(
+            0,
+            integerValue(assignment.personIndex) ?? index,
+          ),
+          target_uid: String(assignment.targetUid || "").trim(),
+          height_m: Math.max(
+            0.5,
+            Math.min(3, Number(assignment.heightM) || 1.65),
+          ),
+        };
+        const manualPose = sam3dManualPoseRequest(assignment, index);
+        if (manualPose) {
+          subject.manual_editor = manualPose;
+        }
+        return subject;
+      },
+    ),
+    primary_subject_index: Math.max(0, Math.min(assignments.length - 1, app.sam3dPrimarySubjectIndex || 0)),
+    genital_editor: {
+      subject_index: subjectIndex,
+      enabled: genital.enabled === true,
+      base_locked: genital.baseLocked !== false,
+      segment_lengths_locked: genital.segmentLengthsLocked !== false,
+      testes_enabled: genital.testesEnabled === true,
+      handles: {
+        base: boundedSam3dGenitalPoint(genital.handles.base),
+        mid: boundedSam3dGenitalPoint(genital.handles.mid),
+        tip: boundedSam3dGenitalPoint(genital.handles.tip),
+        ...(genital.testesEnabled ? { testes: boundedSam3dGenitalPoint(genital.handles.testes) } : {}),
+      },
+    },
+  };
+}
+
+function sam3dPairApplyRequest(job = app.sam3dSelectedJob) {
+  if (!job || !SAM3D_JOB_ID_PATTERN.test(String(job.revision || ""))) {
+    throw new Error("The current SAM 3D job has no valid revision.");
+  }
+  const draft = sam3dPairDraftRequest();
+  if (draft.subjects.length !== 2) {
+    throw new Error("Atomic paired apply requires exactly two subjects.");
+  }
+  const targetUids = draft.subjects.map((subject) =>
+    String(subject.target_uid || "").trim());
+  if (targetUids.some((targetUid) => !targetUid)) {
+    throw new Error("Assign both subjects to existing VaM Person atoms.");
+  }
+  if (new Set(targetUids).size !== targetUids.length) {
+    throw new Error("Each subject must use a different VaM Person target.");
+  }
+  const autoSubjects = draft.subjects.filter(
+    (subject) => !subject.manual_editor,
+  );
+  const personIndices = draft.subjects.map((subject) =>
+    integerValue(subject.person_index),
+  );
+  if (
+    personIndices.some(
+      (personIndex) =>
+        personIndex === null ||
+        personIndex < 0 ||
+        personIndex >= 32,
+    ) ||
+    new Set(personIndices).size !== personIndices.length
+  ) {
+    throw new Error("Each subject must have a different pose provenance index.");
+  }
+  if (
+    autoSubjects.some(
+      (subject) =>
+        subject.person_index >= Math.max(1, job.bodies.length),
+    )
+  ) {
+    throw new Error("Each Auto (SAM) subject must use a detected body.");
+  }
+  if (
+    autoSubjects.length > 1 &&
+    app.sam3dManifestHydrationInFlight.has(job.id)
+  ) {
+    throw new Error(
+      "Checking the reconstruction manifest for duplicate auto skeletons…",
+    );
+  }
+  const primarySubjectIndex = integerValue(draft.primary_subject_index);
+  if (primarySubjectIndex === null || ![0, 1].includes(primarySubjectIndex)) {
+    throw new Error("Choose one of the two subjects as primary.");
+  }
+  if (draft.subjects[primarySubjectIndex]?.manual_editor) {
+    throw new Error(
+      "The primary subject must stay Auto (SAM) because it supplies the shared camera.",
+    );
+  }
+  const duplicateSkeletons = sam3dDuplicateAutoSkeletons();
+  if (duplicateSkeletons.length) {
+    const duplicate = duplicateSkeletons[0];
+    throw new Error(
+      `Subjects ${duplicate.first + 1} and ${duplicate.second + 1} appear to use the same auto skeleton. Switch one to Manual partial.`,
+    );
+  }
+  const cameraValue = String(elements.sam3dCameraTarget.value || "").trim();
+  if (!cameraValue) {
+    throw new Error(
+      "Choose or create a VR Video & Funscript camera before applying.",
+    );
+  }
+  const createCamera = cameraValue === "__create__";
+  const settings = sam3dApplySettings();
+  const subjects = draft.subjects.map((subject) => ({ ...subject }));
+  if (draft.genital_editor.enabled) {
+    const genitalSubjectIndex = integerValue(
+      draft.genital_editor.subject_index,
+    );
+    if (
+      genitalSubjectIndex === null ||
+      ![0, 1].includes(genitalSubjectIndex)
+    ) {
+      throw new Error("Choose which paired subject owns the genital controls.");
+    }
+    const {
+      subject_index: _subjectIndex,
+      ...genitalEditor
+    } = draft.genital_editor;
+    subjects[genitalSubjectIndex].genital_editor = genitalEditor;
+  }
+  const request = {
+    expected_job_revision: job.revision,
+    subjects,
+    primary_subject_index: primarySubjectIndex,
+    camera_uid: createCamera ? SAM3D_DEFAULT_CAMERA_UID : cameraValue,
+    create_camera: createCamera,
+    aspect_ratio: settings.aspectRatio,
+    output_resolution: settings.outputResolution,
+    image_format: settings.imageFormat,
+  };
+  if (settings.horizontalFov !== null) {
+    request.horizontal_fov = settings.horizontalFov;
+  }
+  return request;
+}
+
+function updateSam3dGenitalSubject() {
+  app.sam3dGenitalDraft.subjectIndex = Math.max(0, integerValue(elements.sam3dGenitalSubject.value) || 0);
+  renderSam3dGenitalEditor();
+}
+
+function updateSam3dGenitalBody() {
+  const assignment = ensureSam3dSubjectAssignments()[app.sam3dGenitalDraft.subjectIndex];
+  if (assignment?.poseMode !== "manual") {
+    assignment.personIndex = Math.max(
+      0,
+      integerValue(elements.sam3dGenitalBody.value) || 0,
+    );
+  }
+  renderSam3dSubjectAssignments();
+  renderSam3dReview();
+}
+
+function updateSam3dGenitalTarget() {
+  const assignment = ensureSam3dSubjectAssignments()[app.sam3dGenitalDraft.subjectIndex];
+  if (assignment) assignment.targetUid = String(elements.sam3dGenitalTarget.value || "").trim();
+  renderSam3dSubjectAssignments();
+  renderSam3dReview();
+}
+
+function updateSam3dGenitalOptions() {
+  const draft = app.sam3dGenitalDraft;
+  draft.enabled = elements.sam3dGenitalEnabled.checked;
+  draft.baseLocked = !elements.sam3dGenitalUnlockBase.checked;
+  draft.segmentLengthsLocked = elements.sam3dGenitalLockLengths.checked;
+  draft.testesEnabled = elements.sam3dGenitalTestes.checked;
+  renderSam3dGenitalEditor();
+  renderSam3dReview();
+}
+
+function updateSam3dGenitalDepth(handleName) {
+  const key = handleName.charAt(0).toUpperCase() + handleName.slice(1);
+  app.sam3dGenitalDraft.handles[handleName][2] =
+    boundedSam3dGenitalPoint([0, 0, elements[`sam3dGenitalDepth${key}`].value])[2];
+  renderSam3dGenitalEditor();
+}
+
+function beginSam3dGenitalDrag(event) {
+  const handle = event.target.closest("[data-sam3d-genital-handle]")?.dataset.sam3dGenitalHandle;
+  if (!handle || !app.sam3dGenitalDraft.enabled || (handle === "base" && app.sam3dGenitalDraft.baseLocked)) return;
+  event.preventDefault();
+  app.sam3dGenitalDrag = { pointerId: event.pointerId, handle };
+  elements.sam3dGenitalStage.setPointerCapture(event.pointerId);
+}
+
+function sam3dProjectedDistance(first, second) {
+  return Math.hypot(second[0] - first[0], second[1] - first[1]);
+}
+
+function sam3dPointAtProjectedDistance(anchor, desired, distance, fallback) {
+  let dx = desired[0] - anchor[0];
+  let dy = desired[1] - anchor[1];
+  let magnitude = Math.hypot(dx, dy);
+  if (magnitude < 1e-6) {
+    dx = fallback[0] - anchor[0];
+    dy = fallback[1] - anchor[1];
+    magnitude = Math.hypot(dx, dy);
+  }
+  if (magnitude < 1e-6) return [...fallback];
+  return boundedSam3dGenitalPoint([
+    anchor[0] + (dx / magnitude) * distance,
+    anchor[1] + (dy / magnitude) * distance,
+    fallback[2],
+  ]);
+}
+
+function moveSam3dGenitalHandle(handleName, desired) {
+  const draft = app.sam3dGenitalDraft;
+  const handles = draft.handles;
+  if (
+    !draft.segmentLengthsLocked ||
+    handleName === "testes"
+  ) {
+    handles[handleName] = desired;
+    return;
+  }
+  if (handleName === "base") {
+    const chain = ["base", "mid", "tip"];
+    const oldBase = handles.base;
+    let deltaX = desired[0] - oldBase[0];
+    let deltaY = desired[1] - oldBase[1];
+    deltaX = Math.max(
+      Math.max(...chain.map((name) => -handles[name][0])),
+      Math.min(
+        Math.min(...chain.map((name) => 1 - handles[name][0])),
+        deltaX,
+      ),
+    );
+    deltaY = Math.max(
+      Math.max(...chain.map((name) => -handles[name][1])),
+      Math.min(
+        Math.min(...chain.map((name) => 1 - handles[name][1])),
+        deltaY,
+      ),
+    );
+    for (const name of chain) {
+      handles[name] = boundedSam3dGenitalPoint([
+        handles[name][0] + deltaX,
+        handles[name][1] + deltaY,
+        handles[name][2],
+      ]);
+    }
+    return;
+  }
+  if (handleName === "tip") {
+    handles.tip = sam3dPointAtProjectedDistance(
+      handles.mid,
+      desired,
+      sam3dProjectedDistance(handles.mid, handles.tip),
+      handles.tip,
+    );
+    return;
+  }
+  const oldMid = handles.mid;
+  const oldTip = handles.tip;
+  const oldBaseAngle = Math.atan2(
+    oldMid[1] - handles.base[1],
+    oldMid[0] - handles.base[0],
+  );
+  const newMid = sam3dPointAtProjectedDistance(
+    handles.base,
+    desired,
+    sam3dProjectedDistance(handles.base, oldMid),
+    oldMid,
+  );
+  const newBaseAngle = Math.atan2(
+    newMid[1] - handles.base[1],
+    newMid[0] - handles.base[0],
+  );
+  const rotation = newBaseAngle - oldBaseAngle;
+  const tipX = oldTip[0] - oldMid[0];
+  const tipY = oldTip[1] - oldMid[1];
+  handles.mid = newMid;
+  handles.tip = boundedSam3dGenitalPoint([
+    newMid[0] + tipX * Math.cos(rotation) - tipY * Math.sin(rotation),
+    newMid[1] + tipX * Math.sin(rotation) + tipY * Math.cos(rotation),
+    oldTip[2],
+  ]);
+}
+
+function continueSam3dGenitalDrag(event) {
+  const drag = app.sam3dGenitalDrag;
+  if (!drag || drag.pointerId !== event.pointerId) return;
+  const bounds = elements.sam3dGenitalStage.getBoundingClientRect();
+  if (!bounds.width || !bounds.height) return;
+  const point = boundedSam3dGenitalPoint([
+    (event.clientX - bounds.left) / bounds.width,
+    (event.clientY - bounds.top) / bounds.height,
+    app.sam3dGenitalDraft.handles[drag.handle][2],
+  ]);
+  moveSam3dGenitalHandle(drag.handle, point);
+  renderSam3dGenitalEditor();
+}
+
+function finishSam3dGenitalDrag(event) {
+  if (!app.sam3dGenitalDrag || app.sam3dGenitalDrag.pointerId !== event.pointerId) return;
+  continueSam3dGenitalDrag(event);
+  app.sam3dGenitalDrag = null;
+  if (elements.sam3dGenitalStage.hasPointerCapture(event.pointerId)) {
+    elements.sam3dGenitalStage.releasePointerCapture(event.pointerId);
+  }
+}
+
+function renderSam3dGenitalEditor() {
+  if (!elements.sam3dGenitalPanel || !app.sam3dGenitalDraft) return;
+  const draft = app.sam3dGenitalDraft;
+  const subjects = sam3dDraftSubjects();
+  const assignments = ensureSam3dSubjectAssignments();
+  draft.subjectIndex = Math.max(0, Math.min(subjects.length - 1, draft.subjectIndex || 0));
+  elements.sam3dGenitalSubject.replaceChildren(...subjects.map((subject, index) => new Option(subject.label, String(index))));
+  elements.sam3dGenitalSubject.value = String(draft.subjectIndex);
+  const bodies = app.sam3dSelectedJob?.bodies?.length ? app.sam3dSelectedJob.bodies : [{}];
+  const genitalAssignment = assignments[draft.subjectIndex];
+  elements.sam3dGenitalBody.replaceChildren(
+    ...(genitalAssignment?.poseMode === "manual"
+      ? [
+          new Option(
+            "Manual partial rig",
+            String(genitalAssignment.personIndex),
+          ),
+        ]
+      : bodies.map(
+          (body, index) =>
+            new Option(sam3dBodyLabel(body, index), String(index)),
+        )),
+  );
+  elements.sam3dGenitalBody.value = String(
+    genitalAssignment?.personIndex || 0,
+  );
+  elements.sam3dGenitalBody.disabled =
+    genitalAssignment?.poseMode === "manual";
+  elements.sam3dGenitalBody.title =
+    genitalAssignment?.poseMode === "manual"
+      ? "This subject uses the manual partial-body rig."
+      : "";
+  const targets = Array.from(elements.sam3dPersonTarget.options);
+  elements.sam3dGenitalTarget.replaceChildren(
+    new Option("Not assigned", ""),
+    ...targets.map((option) => new Option(option.textContent, option.value)),
+  );
+  elements.sam3dGenitalTarget.value = assignments[draft.subjectIndex]?.targetUid || "";
+  elements.sam3dGenitalEnabled.checked = draft.enabled;
+  elements.sam3dGenitalUnlockBase.checked = !draft.baseLocked;
+  elements.sam3dGenitalLockLengths.checked = draft.segmentLengthsLocked;
+  elements.sam3dGenitalTestes.checked = draft.testesEnabled;
+  elements.sam3dGenitalWorkspace.classList.toggle("is-disabled", !draft.enabled);
+  elements.sam3dGenitalHandleTestes.hidden = !draft.testesEnabled;
+  elements.sam3dGenitalDepthTestesRow.hidden = !draft.testesEnabled;
+  for (const name of ["base", "mid", "tip", "testes"]) {
+    const point = boundedSam3dGenitalPoint(draft.handles[name]);
+    const key = name.charAt(0).toUpperCase() + name.slice(1);
+    const handle = elements[`sam3dGenitalHandle${key}`];
+    handle.style.left = `${point[0] * 100}%`;
+    handle.style.top = `${point[1] * 100}%`;
+    elements[`sam3dGenitalDepth${key}`].value = String(point[2]);
+    elements[`sam3dGenitalDepth${key}Value`].textContent = point[2].toFixed(2);
+  }
+  elements.sam3dGenitalHandleBase.disabled = draft.baseLocked || !draft.enabled;
+  elements.sam3dGenitalChain.setAttribute("points", ["base", "mid", "tip"].map((name) => {
+    const point = draft.handles[name];
+    return `${point[0] * 100},${point[1] * 100}`;
+  }).join(" "));
+  const sourceWidth = Number(app.sam3dSelectedJob?.sourceWidth) || 0;
+  const sourceHeight = Number(app.sam3dSelectedJob?.sourceHeight) || 0;
+  if (sourceWidth > 0 && sourceHeight > 0) {
+    elements.sam3dGenitalStage.style.aspectRatio =
+      `${sourceWidth} / ${sourceHeight}`;
+    elements.sam3dGenitalStage.style.minHeight = "0";
+  } else {
+    elements.sam3dGenitalStage.style.removeProperty("aspect-ratio");
+    elements.sam3dGenitalStage.style.removeProperty("min-height");
+  }
+  const sourceUrl = app.sam3dSelectedJob ? sam3dArtifactUrl(app.sam3dSelectedJob, "source") : app.sam3dSourceUrl;
+  if (sourceUrl && elements.sam3dGenitalSource.src !== sourceUrl) elements.sam3dGenitalSource.src = sourceUrl;
+}
+
+function renderSam3dReview() {
+  if (!elements.sam3dReviewSummary) return;
+  const request = sam3dPairDraftRequest();
+  elements.sam3dReviewSummary.replaceChildren();
+  request.subjects.forEach((subject, index) => {
+    const card = createElement("article", "sam3d-review-card");
+    const title = document.createElement("strong");
+    title.textContent = `Subject ${index + 1}${index === request.primary_subject_index ? " · primary" : ""}`;
+    const detail = document.createElement("span");
+    if (subject.manual_editor) {
+      const handles = Object.values(
+        subject.manual_editor.controllers || {},
+      );
+      const included = handles.length;
+      const released =
+        SAM3D_MANUAL_POSE_CONTROLLERS.length - included;
+      const offFrame = handles.filter((position) => {
+        return (
+          Array.isArray(position) &&
+          (
+            position[0] < 0 ||
+            position[0] > 1 ||
+            position[1] < 0 ||
+            position[1] > 1
+          )
+        );
+      }).length;
+      detail.textContent =
+        `Manual partial → ${subject.target_uid || "not assigned"} · ` +
+        `${subject.height_m.toFixed(2)} m · ${included} posed · ` +
+        `${released} released — follow${released === 1 ? "s" : ""} body` +
+        `${offFrame ? ` · ${offFrame} off-frame` : ""} · ` +
+        `facing ${subject.manual_editor.facing === "away" ? "away" : "camera"}`;
+    } else {
+      detail.textContent =
+        `Auto (SAM) body ${subject.person_index + 1} → ` +
+        `${subject.target_uid || "not assigned"} · ` +
+        `${subject.height_m.toFixed(2)} m`;
+    }
+    card.append(title, detail);
+    elements.sam3dReviewSummary.append(card);
+  });
+  if (request.genital_editor.enabled) {
+    const genitalCard = createElement("article", "sam3d-review-card");
+    const title = document.createElement("strong");
+    title.textContent =
+      `Genital controls → Subject ${request.genital_editor.subject_index + 1}`;
+    const detail = document.createElement("span");
+    detail.textContent =
+      `Base / mid / tip${request.genital_editor.testes_enabled ? " / testes" : ""}` +
+      ` · base ${request.genital_editor.base_locked ? "locked" : "editable"}` +
+      ` · projected lengths ${request.genital_editor.segment_lengths_locked ? "locked" : "editable"}`;
+    genitalCard.append(title, detail);
+    elements.sam3dReviewSummary.append(genitalCard);
+  }
+  const subjectCount = request.subjects.length;
+  let message =
+    "Single-subject pose + camera can use the existing revision-checked apply.";
+  let warning = false;
+  if (subjectCount === 2) {
+    try {
+      sam3dPairApplyRequest();
+      message = sam3dPairApplyCapabilityAvailable()
+        ? "Atomic pair ready: both Persons, the shared camera, and enabled genital controls will apply as one undoable transaction."
+        : "The pair is configured, but VaM must reload the updated VAM-PIP bridge before Apply is available.";
+      warning = !sam3dPairApplyCapabilityAvailable();
+    } catch (error) {
+      message = errorMessage(error);
+      warning = true;
+    }
+  } else if (subjectCount > 2) {
+    message =
+      "Inference supports up to four subjects; atomic VaM apply currently requires exactly two. Re-run with two subject boxes to apply this scene.";
+    warning = true;
+  } else if (request.genital_editor.enabled) {
+    message =
+      "The bounded genital editor currently applies only as part of an atomic two-Person reconstruction.";
+    warning = true;
+  }
+  if (request.subjects.some((subject) => subject.manual_editor)) {
+    message +=
+      " Unused manual controls are released (position + rotation Off) to follow and settle with the body; Undo restores their original states and transforms. Include enough connected controls for the intended pose.";
+  }
+  elements.sam3dPairDraftNote.className =
+    `sam3d-pair-draft-note${warning ? " is-warning" : ""}`;
+  elements.sam3dPairDraftNote.textContent = message;
+}
+
 function setSam3dHandoffTab(tab) {
-  if (!["morph", "pose"].includes(tab)) return;
+  if (!["morph", "pose", "genital", "review"].includes(tab)) return;
   if (tab === "morph" && !app.sam3dJobs.some(sam3dJobSucceeded)) return;
   if (
-    tab === "pose" &&
+    tab !== "morph" &&
     !(
       app.sam3dSelectedJob &&
       sam3dJobSucceeded(app.sam3dSelectedJob)
@@ -11261,7 +13502,12 @@ function setSam3dHandoffTab(tab) {
   app.sam3dHandoffTab = tab;
   renderSam3dHandoff();
   if (tab === "morph") renderSam3dBodyProportions();
-  if (tab === "pose") renderSam3dApplyState();
+  if (tab === "pose") {
+    renderSam3dManualPoseEditor();
+    renderSam3dApplyState();
+  }
+  if (tab === "genital") renderSam3dGenitalEditor();
+  if (tab === "review") renderSam3dReview();
 }
 
 function renderSam3dHandoff() {
@@ -11272,24 +13518,26 @@ function renderSam3dHandoff() {
   const visible = morphAvailable || poseAvailable;
   elements.sam3dHandoff.hidden = !visible;
   if (!visible) return;
-  if (app.sam3dHandoffTab === "pose" && !poseAvailable) {
+  if (app.sam3dHandoffTab !== "morph" && !poseAvailable) {
     app.sam3dHandoffTab = "morph";
   }
-  const morphActive = app.sam3dHandoffTab === "morph";
-  elements.sam3dHandoffMorphTab.disabled = !morphAvailable;
-  elements.sam3dHandoffPoseTab.disabled = !poseAvailable;
-  elements.sam3dHandoffMorphTab.classList.toggle("active", morphActive);
-  elements.sam3dHandoffMorphTab.setAttribute(
-    "aria-selected",
-    String(morphActive),
-  );
-  elements.sam3dHandoffPoseTab.classList.toggle("active", !morphActive);
-  elements.sam3dHandoffPoseTab.setAttribute(
-    "aria-selected",
-    String(!morphActive),
-  );
-  elements.sam3dProportionsPanel.hidden = !morphActive;
-  elements.sam3dApplyPanel.hidden = morphActive;
+  const tabs = [
+    ["morph", elements.sam3dHandoffMorphTab, elements.sam3dProportionsPanel],
+    ["pose", elements.sam3dHandoffPoseTab, elements.sam3dApplyPanel],
+    ["genital", elements.sam3dHandoffGenitalTab, elements.sam3dGenitalPanel],
+    ["review", elements.sam3dHandoffReviewTab, elements.sam3dReviewPanel],
+  ];
+  for (const [name, button, panel] of tabs) {
+    const active = app.sam3dHandoffTab === name;
+    button.disabled = name === "morph" ? !morphAvailable : !poseAvailable;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-selected", String(active));
+    panel.hidden = !active;
+  }
+  renderSam3dSubjectAssignments();
+  renderSam3dManualPoseEditor();
+  renderSam3dGenitalEditor();
+  renderSam3dReview();
 }
 
 function sam3dBodyProportionRegionControl(region) {
@@ -13183,6 +15431,17 @@ function sam3dApplyCapabilityAvailable() {
   );
 }
 
+function sam3dPairApplyCapabilityAvailable() {
+  const capabilities = new Set([
+    ...sam3dCapabilitySet(),
+    ...personCapabilities(),
+  ]);
+  return (
+    capabilities.has("sam3d-pair-apply-v1") &&
+    capabilities.has("sam3d-camera-vrfunscript-v1")
+  );
+}
+
 function sam3dCaptureCapabilityAvailable() {
   const capabilities = new Set([
     ...sam3dCapabilitySet(),
@@ -13534,6 +15793,15 @@ function sam3dApplySettingsError() {
   }
 }
 
+function sam3dPairApplySettingsError(job = app.sam3dSelectedJob) {
+  try {
+    sam3dPairApplyRequest(job);
+    return "";
+  } catch (error) {
+    return errorMessage(error);
+  }
+}
+
 function setSam3dApplyControlsDisabled(disabled) {
   for (const control of [
     elements.sam3dCameraFov,
@@ -13549,9 +15817,17 @@ function setSam3dApplyControlsDisabled(disabled) {
 function renderSam3dApplyState() {
   const job = app.sam3dSelectedJob;
   if (!job || !sam3dJobSucceeded(job)) return;
+  const pairDraft = sam3dPairDraftRequest();
+  const subjectCount = pairDraft.subjects.length;
+  const paired = subjectCount === 2;
+  const unsupportedSubjectCount = subjectCount > 2;
+  const genitalRequiresPair =
+    subjectCount === 1 && pairDraft.genital_editor.enabled;
   const revisionReady = SAM3D_JOB_ID_PATTERN.test(job.revision);
   const solutionRevision = sam3dSolutionRevision(job);
-  const hasPerson = Boolean(elements.sam3dPersonTarget.value);
+  const hasPerson = paired
+    ? pairDraft.subjects.every((subject) => Boolean(subject.target_uid))
+    : Boolean(elements.sam3dPersonTarget.value);
   const hasCamera = Boolean(elements.sam3dCameraTarget.value);
   const alreadyApplied = sam3dJobIsApplied(job);
   const appliedCameraUid = String(job.cameraUid || "").trim();
@@ -13568,13 +15844,25 @@ function renderSam3dApplyState() {
     personVamRunning() &&
     Boolean(app.person?.available) &&
     !Boolean(app.person?.loading);
-  const canApply = sam3dApplyCapabilityAvailable();
+  const canApply = paired
+    ? sam3dPairApplyCapabilityAvailable()
+    : sam3dApplyCapabilityAvailable();
   const canCapture = sam3dCaptureCapabilityAvailable();
   const busy = app.sam3dMutationInFlight || bridgeBusy;
-  const settingsError = sam3dApplySettingsError();
+  const settingsError = paired
+    ? sam3dPairApplySettingsError(job)
+    : sam3dApplySettingsError();
   const actionState = sam3dVamActionState(job);
 
   setSam3dApplyControlsDisabled(busy || alreadyApplied);
+  if (paired) {
+    elements.sam3dKeepReference.disabled = true;
+    elements.sam3dKeepReference.title =
+      "Reference alignment is not part of the atomic paired-person apply.";
+  }
+  elements.sam3dApplyButton.textContent = paired
+    ? "Apply 2 Persons + camera"
+    : "Apply pose + camera";
   elements.sam3dApplyButton.disabled =
     busy ||
     alreadyApplied ||
@@ -13583,6 +15871,8 @@ function renderSam3dApplyState() {
     !hasCamera ||
     !vamReady ||
     !canApply ||
+    unsupportedSubjectCount ||
+    genitalRequiresPair ||
     Boolean(settingsError);
   elements.sam3dUndoButton.disabled =
     busy ||
@@ -13597,9 +15887,18 @@ function renderSam3dApplyState() {
     !(job.applied || app.sam3dAppliedRevision);
 
   elements.sam3dApplyNote.classList.remove("is-error");
-  let note =
-    "Auto FOV uses SAM intrinsics. Pose and camera are applied as one revision-checked bridge request.";
-  if (!revisionReady) {
+  let note = paired
+    ? "Both Persons, the optional genital controls, and the shared camera are applied atomically with one-level undo."
+    : "Auto FOV uses SAM intrinsics. Pose and camera are applied as one revision-checked bridge request.";
+  if (unsupportedSubjectCount) {
+    note =
+      "VaM apply currently supports one subject or an atomic pair. Re-run this reconstruction with exactly two source boxes.";
+    elements.sam3dApplyNote.classList.add("is-error");
+  } else if (genitalRequiresPair) {
+    note =
+      "Genital control placement currently requires an atomic two-Person reconstruction.";
+    elements.sam3dApplyNote.classList.add("is-error");
+  } else if (!revisionReady) {
     note = "The result has no valid job revision. Refresh it before applying.";
     elements.sam3dApplyNote.classList.add("is-error");
   } else if (settingsError) {
@@ -13623,7 +15922,9 @@ function renderSam3dApplyState() {
         : "The previous SAM 3D action failed inside VaM.");
     elements.sam3dApplyNote.classList.add("is-error");
   } else if (!canApply) {
-    note = "Reload the updated VAM-PIP bridge to enable SAM 3D pose + VR/Funscript camera apply.";
+    note = paired
+      ? "Reload the updated VAM-PIP bridge to enable atomic paired-person apply."
+      : "Reload the updated VAM-PIP bridge to enable SAM 3D pose + VR/Funscript camera apply.";
   } else if (!hasPerson) {
     note = "Add or select a Person atom in VaM.";
   } else if (!hasCamera) {
@@ -13647,29 +15948,93 @@ function renderSam3dApplyState() {
 async function applySam3dResult() {
   const job = app.sam3dSelectedJob;
   if (!job || elements.sam3dApplyButton.disabled) return;
-  const personUid = elements.sam3dPersonTarget.value;
-  const cameraValue = elements.sam3dCameraTarget.value;
-  const createCamera = cameraValue === "__create__";
-  const settings = sam3dApplySettings();
-  const keepReference = sam3dKeepReferenceRequested();
+  const pairDraft = sam3dPairDraftRequest();
+  const paired = pairDraft.subjects.length === 2;
+  let request;
+  let keepReference = false;
+  try {
+    if (paired) {
+      request = sam3dPairApplyRequest(job);
+    } else {
+      const personUid = elements.sam3dPersonTarget.value;
+      const cameraValue = elements.sam3dCameraTarget.value;
+      const createCamera = cameraValue === "__create__";
+      const settings = sam3dApplySettings();
+      keepReference = sam3dKeepReferenceRequested();
+      request = {
+        expected_job_revision: job.revision,
+        target_uid: personUid,
+        camera_uid: createCamera
+          ? SAM3D_DEFAULT_CAMERA_UID
+          : cameraValue,
+        create_camera: createCamera,
+        person_index: app.sam3dSelectedBodyIndex,
+        height_m: settings.heightM,
+        aspect_ratio: settings.aspectRatio,
+        output_resolution: settings.outputResolution,
+        image_format: settings.imageFormat,
+        keep_reference: keepReference,
+      };
+      if (settings.horizontalFov !== null) {
+        request.horizontal_fov = settings.horizontalFov;
+      }
+    }
+  } catch (error) {
+    toast("Could not prepare SAM 3D apply", errorMessage(error), "error");
+    renderSam3dApplyState();
+    return;
+  }
+  const cameraLabel = request.create_camera
+    ? "Create camera"
+    : request.camera_uid;
+  const plan = paired
+    ? [
+        ...request.subjects.map((subject, index) => [
+          `Subject ${index + 1}`,
+          subject.manual_editor
+            ? (
+                `Manual partial rig → ${subject.target_uid} · ` +
+                `${Object.keys(subject.manual_editor.controllers || {}).length} posed · ` +
+                `${SAM3D_MANUAL_POSE_CONTROLLERS.length - Object.keys(subject.manual_editor.controllers || {}).length} released — follow body`
+              )
+            : `Auto body ${subject.person_index + 1} → ${subject.target_uid}`,
+        ]),
+        ["Camera", cameraLabel],
+        [
+          "Genital controls",
+          pairDraft.genital_editor.enabled
+            ? `Subject ${pairDraft.genital_editor.subject_index + 1}` +
+              `${pairDraft.genital_editor.testes_enabled ? " + testes" : ""}`
+            : "Not included",
+        ],
+        ["Undo", "One atomic snapshot"],
+      ]
+    : [
+        ["Person", request.target_uid],
+        ["Camera", cameraLabel],
+        ["Body", request.person_index + 1],
+        ["Reference", keepReference ? "Keep aligned" : "Do not align"],
+      ];
   const confirmed = await showDialog({
-    eyebrow: "Apply SAM 3D reconstruction",
-    title: "Replace this Person’s pose and move the camera?",
-    message:
-      "VAM-PIP will change the mapped Person controllers and the VR Video & Funscript camera together. One-level undo is kept for this apply." +
-      (
-        keepReference
-          ? " The full source image will stay aligned behind the posed Person."
-          : ""
-      ),
-    confirmLabel: "Apply pose + camera",
+    eyebrow: paired
+      ? "Apply paired SAM 3D reconstruction"
+      : "Apply SAM 3D reconstruction",
+    title: paired
+      ? "Replace both Persons’ poses and move the shared camera?"
+      : "Replace this Person’s pose and move the camera?",
+    message: paired
+      ? "VAM-PIP will update both mapped Persons, the optional genital controls, and the VR Video & Funscript camera as one transaction. If any part fails, the bridge restores everything."
+      : "VAM-PIP will change the mapped Person controllers and the VR Video & Funscript camera together. One-level undo is kept for this apply." +
+        (
+          keepReference
+            ? " The full source image will stay aligned behind the posed Person."
+            : ""
+        ),
+    confirmLabel: paired
+      ? "Apply pair + camera"
+      : "Apply pose + camera",
     icon: "warning",
-    plan: [
-      ["Person", personUid],
-      ["Camera", createCamera ? "Create camera" : cameraValue],
-      ["Body", app.sam3dSelectedBodyIndex + 1],
-      ["Reference", keepReference ? "Keep aligned" : "Do not align"],
-    ],
+    plan,
   });
   if (!confirmed) return;
 
@@ -13677,22 +16042,9 @@ async function applySam3dResult() {
   setButtonBusy(elements.sam3dApplyButton, true, "Applying…");
   renderSam3dApplyState();
   try {
-    const request = {
-      expected_job_revision: job.revision,
-      target_uid: personUid,
-      camera_uid: createCamera ? SAM3D_DEFAULT_CAMERA_UID : cameraValue,
-      create_camera: createCamera,
-      person_index: app.sam3dSelectedBodyIndex,
-      height_m: settings.heightM,
-      aspect_ratio: settings.aspectRatio,
-      output_resolution: settings.outputResolution,
-      image_format: settings.imageFormat,
-      keep_reference: keepReference,
-    };
-    if (settings.horizontalFov !== null) {
-      request.horizontal_fov = settings.horizontalFov;
-    }
-    const payload = await Sam3dClient.apply(job.id, request);
+    const payload = paired
+      ? await Sam3dClient.applyPair(job.id, request)
+      : await Sam3dClient.apply(job.id, request);
     const solutionRevision = String(
       payload.solution_revision || "",
     ).toLowerCase();
@@ -13708,14 +16060,21 @@ async function applySam3dResult() {
       captureRequested: false,
       captureRequestId: "",
       solutionRevision,
+      targetUid: paired
+        ? request.subjects[request.primary_subject_index].target_uid
+        : request.target_uid,
       cameraUid: String(payload.camera_uid || request.camera_uid),
       vamActionState: "queued",
       vamActionMessage:
-        "Waiting for the VaM bridge to apply the reconstruction.",
+        paired
+          ? "Waiting for the VaM bridge to apply the atomic paired reconstruction."
+          : "Waiting for the VaM bridge to apply the reconstruction.",
     });
     toast(
-      "Pose and camera queued",
-      "The bridge is applying the reconstruction inside VaM.",
+      paired ? "Pair and camera queued" : "Pose and camera queued",
+      paired
+        ? "The bridge is applying both Persons as one transaction inside VaM."
+        : "The bridge is applying the reconstruction inside VaM.",
     );
     await loadPersons({ quiet: true });
     await loadSam3dJob(job.id, { quiet: true });

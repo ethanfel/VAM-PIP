@@ -4,6 +4,7 @@ import hashlib
 import json
 import math
 SAM3D_SOLUTION_SCHEMA = 1
+SAM3D_PAIR_SOLUTION_SCHEMA = 2
 MHR70_NAMES = (
     "nose",
     "left-eye",
@@ -99,6 +100,38 @@ VAM_CONTROLLER_IDS = frozenset(
         "lFootControl",
         "rFootControl",
     }
+)
+VAM_GENITAL_CONTROLLER_IDS = frozenset(
+    {
+        "penisBaseControl",
+        "penisMidControl",
+        "penisTipControl",
+        "testesControl",
+    }
+)
+_MANUAL_CANVAS_MIN = -0.5
+_MANUAL_CANVAS_MAX = 1.5
+_MANUAL_DEPTH_OFFSET_MIN = -1.0
+_MANUAL_DEPTH_OFFSET_MAX = 1.0
+_MANUAL_MIN_SEGMENT_PER_HEIGHT = 0.01
+_MANUAL_MIN_SEGMENT_METERS = 0.01
+_MANUAL_MAX_MIN_SEGMENT_METERS = 0.03
+_DUPLICATE_AUTO_BODY_DISTANCE = 0.025
+_DUPLICATE_AUTO_BODY_LANDMARKS = (
+    "nose",
+    "neck",
+    "left-shoulder",
+    "right-shoulder",
+    "left-elbow",
+    "right-elbow",
+    "left-wrist",
+    "right-wrist",
+    "left-hip",
+    "right-hip",
+    "left-knee",
+    "right-knee",
+    "left-ankle",
+    "right-ankle",
 )
 
 VR_RENDERER_RESOLUTIONS: dict[str, dict[str, tuple[int, int]]] = {
@@ -882,6 +915,743 @@ def build_vam_solution(
             "imageFormat": image_format,
             "basename": basename,
         },
+    }
+    solution["revision"] = sam3d_solution_revision(solution)
+    return solution
+
+
+def _pair_target_uid(value: object) -> str:
+    if not isinstance(value, str):
+        raise TypeError("pair target_uid must be a string")
+    target_uid = value.strip()
+    if (
+        not target_uid
+        or len(target_uid) > 256
+        or any(ord(character) < 32 for character in target_uid)
+    ):
+        raise ValueError("pair target_uid is invalid")
+    return target_uid
+
+
+def _genital_image_handle(value: object, *, label: str) -> tuple[float, float, float]:
+    if not isinstance(value, (list, tuple)) or len(value) not in {2, 3}:
+        raise ValueError(f"{label} must contain u, v, and optional depth offset")
+    numbers = _finite_vector(value, size=len(value), label=label)
+    u, v = numbers[:2]
+    depth_offset = numbers[2] if len(numbers) == 3 else 0.0
+    if not 0.0 <= u <= 1.0 or not 0.0 <= v <= 1.0:
+        raise ValueError(f"{label} must remain inside the source image")
+    if depth_offset < -1.0 or depth_offset > 1.0:
+        raise ValueError(f"{label} depth offset must be between -1 and 1 meter")
+    return (u, v, depth_offset)
+
+
+def _image_handle_to_hip_position(
+    handle: tuple[float, float, float],
+    *,
+    camera_from_hip: tuple[float, float, float],
+    horizontal_fov: float,
+    source_width: int,
+    source_height: int,
+) -> list[float]:
+    u, v, depth_offset = handle
+    base_depth = -camera_from_hip[2]
+    depth = base_depth + depth_offset
+    if not math.isfinite(depth) or depth < 0.05 or depth > 10.0:
+        raise ValueError("genital handle depth is outside the camera frustum")
+    tangent_x = math.tan(math.radians(horizontal_fov) * 0.5)
+    tangent_y = tangent_x * source_height / source_width
+    position = (
+        camera_from_hip[0] + (u * 2.0 - 1.0) * depth * tangent_x,
+        camera_from_hip[1] + (1.0 - v * 2.0) * depth * tangent_y,
+        camera_from_hip[2] + depth,
+    )
+    if max(map(abs, position)) > 5.0:
+        raise ValueError("image handle resolves outside the Person workspace")
+    return [round(component, 7) for component in position]
+
+
+def _pair_genital_controllers(
+    editor: object,
+    *,
+    camera_from_hip: tuple[float, float, float],
+    horizontal_fov: float,
+    source_width: int,
+    source_height: int,
+) -> list[dict[str, object]]:
+    if editor is None:
+        return []
+    if not isinstance(editor, dict):
+        raise TypeError("genital_editor must be an object")
+    allowed = {
+        "enabled",
+        "handles",
+        "testes_enabled",
+        "base_locked",
+        "segment_lengths_locked",
+    }
+    if set(editor) - allowed:
+        raise ValueError("genital_editor contains unsupported fields")
+    for flag in (
+        "enabled",
+        "testes_enabled",
+        "base_locked",
+        "segment_lengths_locked",
+    ):
+        if flag in editor and not isinstance(editor[flag], bool):
+            raise TypeError(f"genital_editor {flag} must be a boolean")
+    if editor.get("enabled") is not True:
+        return []
+    handles = editor.get("handles")
+    if not isinstance(handles, dict):
+        raise ValueError("enabled genital_editor requires handles")
+    required = {"base", "mid", "tip"}
+    allowed_handles = required | {"testes"}
+    if set(handles) - allowed_handles or not required.issubset(handles):
+        raise ValueError("genital_editor requires only base, mid, tip, and testes handles")
+    controller_handles: list[tuple[str, object]] = [
+        ("penisBaseControl", handles["base"]),
+        ("penisMidControl", handles["mid"]),
+        ("penisTipControl", handles["tip"]),
+    ]
+    if editor.get("testes_enabled") is True:
+        if "testes" not in handles:
+            raise ValueError("testes_enabled requires a testes handle")
+        controller_handles.append(("testesControl", handles["testes"]))
+    result: list[dict[str, object]] = []
+    for controller_id, raw_handle in controller_handles:
+        if controller_id not in VAM_GENITAL_CONTROLLER_IDS:
+            raise ValueError("genital controller ID is not allowlisted")
+        handle = _genital_image_handle(
+            raw_handle,
+            label=f"{controller_id} handle",
+        )
+        result.append(
+            {
+                "id": controller_id,
+                "position": _image_handle_to_hip_position(
+                    handle,
+                    camera_from_hip=camera_from_hip,
+                    horizontal_fov=horizontal_fov,
+                    source_width=source_width,
+                    source_height=source_height,
+                ),
+            }
+        )
+    return result
+
+
+def _manual_image_handle(
+    value: object,
+    *,
+    label: str,
+) -> tuple[float, float, float]:
+    if not isinstance(value, (list, tuple)) or len(value) not in {2, 3}:
+        raise ValueError(f"{label} must contain u, v, and optional depth offset")
+    numbers = _finite_vector(value, size=len(value), label=label)
+    u, v = numbers[:2]
+    depth_offset = numbers[2] if len(numbers) == 3 else 0.0
+    if (
+        u < _MANUAL_CANVAS_MIN
+        or u > _MANUAL_CANVAS_MAX
+        or v < _MANUAL_CANVAS_MIN
+        or v > _MANUAL_CANVAS_MAX
+    ):
+        raise ValueError(
+            f"{label} must remain inside the extended source canvas "
+            f"({_MANUAL_CANVAS_MIN} to {_MANUAL_CANVAS_MAX})"
+        )
+    if (
+        depth_offset < _MANUAL_DEPTH_OFFSET_MIN
+        or depth_offset > _MANUAL_DEPTH_OFFSET_MAX
+    ):
+        raise ValueError(
+            f"{label} depth offset must be between "
+            f"{_MANUAL_DEPTH_OFFSET_MIN:g} and "
+            f"{_MANUAL_DEPTH_OFFSET_MAX:g} meters"
+        )
+    return (u, v, depth_offset)
+
+
+def _manual_neutral_positions(height_m: float) -> dict[str, Vector]:
+    """Return a conservative hip-relative neutral controller template."""
+
+    ratios: dict[str, Vector] = {
+        "hipControl": (0.0, 0.0, 0.0),
+        "abdomen2Control": (0.0, 0.10, 0.0),
+        "chestControl": (0.0, 0.22, 0.0),
+        "neckControl": (0.0, 0.36, 0.0),
+        "headControl": (0.0, 0.455, 0.0),
+        "lShoulderControl": (-0.05, 0.34, 0.0),
+        "rShoulderControl": (0.05, 0.34, 0.0),
+        "lArmControl": (-0.13, 0.31, 0.0),
+        "rArmControl": (0.13, 0.31, 0.0),
+        "lElbowControl": (-0.23, 0.23, 0.0),
+        "rElbowControl": (0.23, 0.23, 0.0),
+        "lHandControl": (-0.32, 0.15, 0.0),
+        "rHandControl": (0.32, 0.15, 0.0),
+        "lThighControl": (-0.065, -0.02, 0.0),
+        "rThighControl": (0.065, -0.02, 0.0),
+        "lKneeControl": (-0.07, -0.27, 0.0),
+        "rKneeControl": (0.07, -0.27, 0.0),
+        "lFootControl": (-0.07, -0.53, 0.03),
+        "rFootControl": (0.07, -0.53, 0.03),
+    }
+    return {
+        controller_id: _mul(position, height_m)
+        for controller_id, position in ratios.items()
+    }
+
+
+def _manual_minimum_segment_length(height_m: float) -> float:
+    return min(
+        _MANUAL_MAX_MIN_SEGMENT_METERS,
+        max(
+            _MANUAL_MIN_SEGMENT_METERS,
+            height_m * _MANUAL_MIN_SEGMENT_PER_HEIGHT,
+        ),
+    )
+
+
+def _validate_manual_controller_lengths(
+    positions: dict[str, Vector],
+    *,
+    height_m: float,
+    enabled_ids: frozenset[str],
+) -> float:
+    minimum = _manual_minimum_segment_length(height_m)
+    chains = (
+        ("hipControl", "abdomen2Control"),
+        ("abdomen2Control", "chestControl"),
+        ("chestControl", "neckControl"),
+        ("neckControl", "headControl"),
+        ("chestControl", "lShoulderControl"),
+        ("lShoulderControl", "lArmControl"),
+        ("lArmControl", "lElbowControl"),
+        ("lElbowControl", "lHandControl"),
+        ("chestControl", "rShoulderControl"),
+        ("rShoulderControl", "rArmControl"),
+        ("rArmControl", "rElbowControl"),
+        ("rElbowControl", "rHandControl"),
+        ("hipControl", "lThighControl"),
+        ("lThighControl", "lKneeControl"),
+        ("lKneeControl", "lFootControl"),
+        ("hipControl", "rThighControl"),
+        ("rThighControl", "rKneeControl"),
+        ("rKneeControl", "rFootControl"),
+    )
+    for parent_id, child_id in chains:
+        if parent_id not in enabled_ids or child_id not in enabled_ids:
+            continue
+        if _length(_sub(positions[child_id], positions[parent_id])) < minimum:
+            raise ValueError(
+                f"manual {parent_id} to {child_id} chain is too short; "
+                f"minimum is {minimum:.3f} meters"
+            )
+    if (
+        "chestControl" in enabled_ids
+        and _length(_sub(positions["chestControl"], positions["hipControl"]))
+        < minimum
+    ):
+        raise ValueError(
+            "manual hipControl to chestControl torso axis is too short"
+        )
+    if (
+        {"lShoulderControl", "rShoulderControl"}.issubset(enabled_ids)
+        and _length(
+            _sub(
+                positions["rShoulderControl"],
+                positions["lShoulderControl"],
+            )
+        )
+        < minimum
+    ):
+        raise ValueError("manual bilateral shoulder axis is too short")
+    return minimum
+
+
+def _manual_torso_axes(
+    positions: dict[str, Vector],
+    *,
+    camera_from_hip: Vector,
+    facing: str,
+    minimum_length: float,
+    enabled_ids: frozenset[str],
+) -> tuple[Vector, Vector, Vector]:
+    up = _unit(
+        _sub(positions["chestControl"], positions["hipControl"]),
+        (0.0, 1.0, 0.0),
+    )
+    shoulder_axis = _sub(
+        positions["rShoulderControl"],
+        positions["lShoulderControl"],
+    )
+    lateral = _sub(shoulder_axis, _mul(up, _dot(shoulder_axis, up)))
+    if _length(lateral) < minimum_length:
+        if {"lShoulderControl", "rShoulderControl"}.issubset(enabled_ids):
+            raise ValueError(
+                "manual bilateral shoulder axis is parallel to the torso up axis"
+            )
+        lateral = _sub((1.0, 0.0, 0.0), _mul(up, up[0]))
+        if _length(lateral) < 1e-8:
+            lateral = _sub((0.0, 0.0, 1.0), _mul(up, up[2]))
+    right = _unit(lateral, (1.0, 0.0, 0.0))
+    forward = _unit(_cross(right, up), (0.0, 0.0, 1.0))
+
+    camera_direction = _sub(
+        camera_from_hip,
+        _mul(up, _dot(camera_from_hip, up)),
+    )
+    if _length(camera_direction) < minimum_length:
+        # Looking directly along the torso up axis does not distinguish the
+        # two sides of the shoulder plane. Preserve the bilateral solution
+        # for "camera" and give "away" its exact opposite.
+        if facing == "away":
+            right = _mul(right, -1.0)
+            forward = _mul(forward, -1.0)
+    else:
+        wanted_forward = _unit(camera_direction, forward)
+        if facing == "away":
+            wanted_forward = _mul(wanted_forward, -1.0)
+        if _dot(forward, wanted_forward) < 0.0:
+            right = _mul(right, -1.0)
+            forward = _mul(forward, -1.0)
+
+    # Re-orthogonalize after resolving the facing sign. The shoulder span is
+    # intentionally treated as a bilateral axis (an unsigned line); facing
+    # selects which direction along that line is canonical body-right.
+    right = _unit(_cross(up, forward), right)
+    forward = _unit(_cross(right, up), forward)
+    return right, up, forward
+
+
+def _manual_head_axes(
+    positions: dict[str, Vector],
+    torso_axes: tuple[Vector, Vector, Vector],
+) -> tuple[Vector, Vector, Vector]:
+    torso_right, _, torso_forward = torso_axes
+    up = _unit(
+        _sub(positions["headControl"], positions["neckControl"]),
+        torso_axes[1],
+    )
+    lateral = _sub(torso_right, _mul(up, _dot(torso_right, up)))
+    if _length(lateral) < 1e-8:
+        lateral = _cross(up, torso_forward)
+    right = _unit(lateral, torso_right)
+    forward = _unit(_cross(right, up), torso_forward)
+    if _dot(forward, torso_forward) < 0.0:
+        right = _mul(right, -1.0)
+        forward = _mul(forward, -1.0)
+    right = _unit(_cross(up, forward), right)
+    forward = _unit(_cross(right, up), forward)
+    return right, up, forward
+
+
+def _manual_controller_rotations(
+    positions: dict[str, Vector],
+    *,
+    camera_from_hip: Vector,
+    facing: str,
+    minimum_length: float,
+    enabled_ids: frozenset[str],
+) -> dict[str, Quaternion]:
+    down = (0.0, -1.0, 0.0)
+    torso_axes = _manual_torso_axes(
+        positions,
+        camera_from_hip=camera_from_hip,
+        facing=facing,
+        minimum_length=minimum_length,
+        enabled_ids=enabled_ids,
+    )
+    torso = _quat_from_basis(*torso_axes)
+    head = _quat_from_basis(*_manual_head_axes(positions, torso_axes))
+    rotations: dict[str, Quaternion] = {
+        "hipControl": torso,
+        "abdomen2Control": torso,
+        "chestControl": torso,
+        "neckControl": head,
+        "headControl": head,
+    }
+    for prefix, rest_side in (
+        ("l", (-1.0, 0.0, 0.0)),
+        ("r", (1.0, 0.0, 0.0)),
+    ):
+        shoulder_id = f"{prefix}ShoulderControl"
+        arm_id = f"{prefix}ArmControl"
+        elbow_id = f"{prefix}ElbowControl"
+        hand_id = f"{prefix}HandControl"
+        thigh_id = f"{prefix}ThighControl"
+        knee_id = f"{prefix}KneeControl"
+        foot_id = f"{prefix}FootControl"
+        rotations[shoulder_id] = _segment_rotation(
+            positions[shoulder_id],
+            positions[arm_id],
+            rest_side,
+        )
+        rotations[arm_id] = _segment_rotation(
+            positions[arm_id],
+            positions[elbow_id],
+            rest_side,
+        )
+        forearm_rotation = _segment_rotation(
+            positions[elbow_id],
+            positions[hand_id],
+            rest_side,
+        )
+        rotations[elbow_id] = forearm_rotation
+        rotations[hand_id] = forearm_rotation
+        rotations[thigh_id] = _segment_rotation(
+            positions[thigh_id],
+            positions[knee_id],
+            down,
+        )
+        lower_leg_rotation = _segment_rotation(
+            positions[knee_id],
+            positions[foot_id],
+            down,
+        )
+        rotations[knee_id] = lower_leg_rotation
+        rotations[foot_id] = lower_leg_rotation
+    return rotations
+
+
+def _manual_pair_subject(
+    editor: object,
+    *,
+    primary_camera_from_hip: tuple[float, float, float],
+    horizontal_fov: float,
+    source_width: int,
+    source_height: int,
+    height_m: float,
+) -> tuple[list[float], list[dict[str, object]]]:
+    if not isinstance(editor, dict):
+        raise TypeError("manual_editor must be an object")
+    if set(editor) - {"enabled", "controllers", "facing"}:
+        raise ValueError("manual_editor contains unsupported fields")
+    if editor.get("enabled") is not True:
+        raise ValueError("manual_editor enabled must be true")
+    facing = editor.get("facing", "camera")
+    if not isinstance(facing, str) or facing not in {"camera", "away"}:
+        raise ValueError("manual_editor facing must be camera or away")
+    raw_controllers = editor.get("controllers")
+    if not isinstance(raw_controllers, dict):
+        raise ValueError("manual_editor controllers must be an object")
+    if set(raw_controllers) - VAM_CONTROLLER_IDS:
+        raise ValueError(
+            "manual_editor contains a body controller that is not allowlisted"
+        )
+    if "hipControl" not in raw_controllers:
+        raise ValueError("manual_editor requires a hipControl handle")
+
+    hip_handle = _manual_image_handle(
+        raw_controllers["hipControl"],
+        label="manual hipControl handle",
+    )
+    hip_from_primary = _finite_vector(
+        _image_handle_to_hip_position(
+            hip_handle,
+            camera_from_hip=primary_camera_from_hip,
+            horizontal_fov=horizontal_fov,
+            source_width=source_width,
+            source_height=source_height,
+        ),
+        size=3,
+        label="manual hip position",
+    )
+    camera_from_hip = _sub(primary_camera_from_hip, hip_from_primary)
+    if max(map(abs, camera_from_hip)) > 10.0:
+        raise ValueError("manual subject camera position is out of bounds")
+
+    positions = _manual_neutral_positions(height_m)
+    for controller_id, raw_handle in raw_controllers.items():
+        if controller_id == "hipControl":
+            continue
+        handle = _manual_image_handle(
+            raw_handle,
+            label=f"manual {controller_id} handle",
+        )
+        position = _finite_vector(
+            _image_handle_to_hip_position(
+                handle,
+                camera_from_hip=camera_from_hip,
+                horizontal_fov=horizontal_fov,
+                source_width=source_width,
+                source_height=source_height,
+            ),
+            size=3,
+            label=f"manual {controller_id} position",
+        )
+        positions[controller_id] = position
+
+    enabled_ids = frozenset(raw_controllers)
+    minimum_length = _validate_manual_controller_lengths(
+        positions,
+        height_m=height_m,
+        enabled_ids=enabled_ids,
+    )
+    rotations = _manual_controller_rotations(
+        positions,
+        camera_from_hip=camera_from_hip,
+        facing=facing,
+        minimum_length=minimum_length,
+        enabled_ids=enabled_ids,
+    )
+    controllers = [
+        (
+            _controller(
+                controller_id,
+                positions[controller_id],
+                rotations[controller_id],
+            )
+            if controller_id in enabled_ids
+            else {
+                "id": controller_id,
+                "enabled": False,
+            }
+        )
+        for controller_id in sorted(VAM_CONTROLLER_IDS)
+    ]
+    return (
+        [round(component, 7) for component in camera_from_hip],
+        controllers,
+    )
+
+
+def _reject_duplicate_automatic_pair(
+    manifest: dict[str, object],
+    person_indices: list[int],
+) -> None:
+    if len(person_indices) != 2:
+        return
+    people = manifest.get("people")
+    source = manifest.get("source")
+    if not isinstance(people, list) or not isinstance(source, dict):
+        return
+    width = source.get("width")
+    height = source.get("height")
+    if (
+        isinstance(width, bool)
+        or not isinstance(width, int)
+        or isinstance(height, bool)
+        or not isinstance(height, int)
+        or width < 1
+        or height < 1
+    ):
+        return
+    try:
+        first = _points2d_from_person(people[person_indices[0]])
+        second = _points2d_from_person(people[person_indices[1]])
+    except (IndexError, TypeError, ValueError):
+        return
+    distances = [
+        math.hypot(
+            first[name][0] - second[name][0],
+            first[name][1] - second[name][1],
+        )
+        for name in _DUPLICATE_AUTO_BODY_LANDMARKS
+    ]
+    normalized_distance = (
+        sum(distances) / len(distances) / math.hypot(width, height)
+    )
+    if normalized_distance <= _DUPLICATE_AUTO_BODY_DISTANCE:
+        raise ValueError(
+            "paired automatic subjects resolve to the same reconstructed body; "
+            "make one subject manual"
+        )
+
+
+def build_vam_pair_solution(
+    manifest: dict[str, object],
+    *,
+    job_id: str,
+    subjects: list[dict[str, object]],
+    primary_subject_index: int = 0,
+    aspect_ratio: str = "16:9",
+    output_resolution: str = "1280x720 (HD)",
+    image_format: str = "jpeg",
+    horizontal_fov: float | None = None,
+) -> dict[str, object]:
+    """Build one bounded, shared-camera two-Person bridge transaction."""
+
+    if not isinstance(subjects, list) or len(subjects) != 2:
+        raise ValueError("paired SAM3D apply requires exactly two subjects")
+    if (
+        isinstance(primary_subject_index, bool)
+        or not isinstance(primary_subject_index, int)
+        or primary_subject_index < 0
+        or primary_subject_index >= len(subjects)
+    ):
+        raise ValueError("primary_subject_index is invalid")
+    source = manifest.get("source")
+    if not isinstance(source, dict):
+        raise ValueError("SAM 3D Body manifest has no source")
+    source_width = source.get("width")
+    source_height = source.get("height")
+    if (
+        isinstance(source_width, bool)
+        or not isinstance(source_width, int)
+        or isinstance(source_height, bool)
+        or not isinstance(source_height, int)
+        or source_width < 1
+        or source_height < 1
+    ):
+        raise ValueError("SAM 3D Body source dimensions are invalid")
+
+    normalized: list[dict[str, object]] = []
+    target_uids: set[str] = set()
+    person_indices: set[int] = set()
+    people = manifest.get("people")
+    if not isinstance(people, list):
+        raise ValueError("SAM 3D Body manifest has no people")
+    for subject in subjects:
+        if not isinstance(subject, dict):
+            raise TypeError("pair subjects must be objects")
+        if set(subject) - {
+            "target_uid",
+            "person_index",
+            "height_m",
+            "genital_editor",
+            "manual_editor",
+        }:
+            raise ValueError("pair subject contains unsupported fields")
+        target_uid = _pair_target_uid(subject.get("target_uid"))
+        person_index = subject.get("person_index")
+        if isinstance(person_index, bool) or not isinstance(person_index, int):
+            raise TypeError("pair person_index must be an integer")
+        manual_editor = subject.get("manual_editor")
+        if manual_editor is None and (
+            person_index < 0 or person_index >= len(people)
+        ):
+            raise ValueError(
+                "pair person_index is not available in this SAM3D result"
+            )
+        if manual_editor is not None and (
+            person_index < 0 or person_index >= 32
+        ):
+            raise ValueError(
+                "manual pair person_index must be between 0 and 31"
+            )
+        if target_uid in target_uids or person_index in person_indices:
+            raise ValueError("pair subjects must use distinct targets and bodies")
+        target_uids.add(target_uid)
+        person_indices.add(person_index)
+        height_m = subject.get("height_m", 1.65)
+        if isinstance(height_m, bool) or not isinstance(height_m, (int, float)):
+            raise TypeError("pair height_m must be a number")
+        height_m = float(height_m)
+        if not math.isfinite(height_m) or height_m < 0.5 or height_m > 3.0:
+            raise ValueError("pair height_m must be between 0.5 and 3.0")
+        normalized.append(
+            {
+                "target_uid": target_uid,
+                "person_index": person_index,
+                "height_m": height_m,
+                "genital_editor": subject.get("genital_editor"),
+                "manual_editor": manual_editor,
+            }
+        )
+
+    manual_indices = [
+        index
+        for index, subject in enumerate(normalized)
+        if subject["manual_editor"] is not None
+    ]
+    if len(manual_indices) > 1:
+        raise ValueError("paired SAM3D apply supports at most one manual subject")
+    if manual_indices and primary_subject_index == manual_indices[0]:
+        raise ValueError("the primary shared-camera subject must use SAM3D")
+    if not manual_indices:
+        _reject_duplicate_automatic_pair(
+            manifest,
+            [int(subject["person_index"]) for subject in normalized],
+        )
+
+    primary_spec = normalized[primary_subject_index]
+    primary = build_vam_solution(
+        manifest,
+        job_id=job_id,
+        person_index=int(primary_spec["person_index"]),
+        height_m=float(primary_spec["height_m"]),
+        aspect_ratio=aspect_ratio,
+        output_resolution=output_resolution,
+        image_format=image_format,
+        horizontal_fov=horizontal_fov,
+    )
+    shared_fov = float(primary["camera"]["flatHorizontalFov"])
+    built_subjects: list[dict[str, object]] = []
+    for index, subject in enumerate(normalized):
+        manual_editor = subject["manual_editor"]
+        if manual_editor is not None:
+            camera_from_hip_list, controllers = _manual_pair_subject(
+                manual_editor,
+                primary_camera_from_hip=_finite_vector(
+                    primary["camera"]["position"],
+                    size=3,
+                    label="primary cameraFromHip",
+                ),
+                horizontal_fov=shared_fov,
+                source_width=source_width,
+                source_height=source_height,
+                height_m=float(subject["height_m"]),
+            )
+            camera_from_hip = _finite_vector(
+                camera_from_hip_list,
+                size=3,
+                label="manual cameraFromHip",
+            )
+        else:
+            single = (
+                primary
+                if index == primary_subject_index
+                else build_vam_solution(
+                    manifest,
+                    job_id=job_id,
+                    person_index=int(subject["person_index"]),
+                    height_m=float(subject["height_m"]),
+                    aspect_ratio=aspect_ratio,
+                    output_resolution=output_resolution,
+                    image_format=image_format,
+                    horizontal_fov=shared_fov,
+                )
+            )
+            camera_from_hip = _finite_vector(
+                single["camera"]["position"],
+                size=3,
+                label="cameraFromHip",
+            )
+            controllers = single["controllers"]
+        built_subjects.append(
+            {
+                "targetUid": subject["target_uid"],
+                "personIndex": subject["person_index"],
+                "targetHeight": round(float(subject["height_m"]), 6),
+                "cameraFromHip": [
+                    round(component, 7) for component in camera_from_hip
+                ],
+                "controllers": controllers,
+                "genitals": _pair_genital_controllers(
+                    subject["genital_editor"],
+                    camera_from_hip=camera_from_hip,
+                    horizontal_fov=shared_fov,
+                    source_width=source_width,
+                    source_height=source_height,
+                ),
+            }
+        )
+
+    solution: dict[str, object] = {
+        "schema": SAM3D_PAIR_SOLUTION_SCHEMA,
+        "jobId": job_id,
+        "coordinateSpace": "shared-camera-subjects",
+        "units": "meters",
+        "canonicalAxes": {
+            "right": "+X",
+            "up": "+Y",
+            "forward": "+Z",
+        },
+        "primarySubjectIndex": primary_subject_index,
+        "subjects": built_subjects,
+        "camera": primary["camera"],
     }
     solution["revision"] = sam3d_solution_revision(solution)
     return solution

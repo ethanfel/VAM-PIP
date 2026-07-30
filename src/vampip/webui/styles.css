@@ -4170,6 +4170,85 @@ body.resource-detail-open {
   font-size: 11px;
 }
 
+.sam3d-subject-boxes,
+.sam3d-subject-assignments {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  background: var(--surface);
+  border: 1px solid var(--border-soft);
+  border-radius: 10px;
+}
+
+.sam3d-subject-boxes > header,
+.sam3d-subject-assignments > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.sam3d-subject-boxes header strong,
+.sam3d-subject-boxes header small,
+.sam3d-subject-assignments header strong,
+.sam3d-subject-assignments header small {
+  display: block;
+}
+
+.sam3d-subject-boxes header small,
+.sam3d-subject-assignments header small,
+.sam3d-subject-boxes > header > span,
+.sam3d-subject-assignments > header > span {
+  color: var(--text-faint);
+  font-size: 9px;
+}
+
+.sam3d-subject-box-list {
+  display: grid;
+  gap: 6px;
+}
+
+.sam3d-subject-box-item {
+  display: grid;
+  grid-template-columns: 10px minmax(0, 1fr);
+  gap: 9px;
+  align-items: center;
+  padding: 8px;
+  color: var(--text-soft);
+  background: var(--surface-soft);
+  border: 1px solid transparent;
+  border-radius: 8px;
+  text-align: left;
+}
+
+.sam3d-subject-box-item.is-selected {
+  color: var(--text);
+  border-color: var(--border);
+  background: var(--surface-hover);
+}
+
+.sam3d-subject-box-item strong,
+.sam3d-subject-box-item small {
+  display: block;
+}
+
+.sam3d-subject-box-item small {
+  margin-top: 2px;
+  color: var(--text-faint);
+}
+
+.sam3d-subject-swatch {
+  width: 8px;
+  height: 28px;
+  border-radius: 999px;
+}
+
+.sam3d-subject-box-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
 .sam3d-bbox-toggle {
   padding: 12px;
   background: var(--surface);
@@ -4698,12 +4777,628 @@ body.resource-detail-open {
 
 .sam3d-handoff-tabs {
   display: inline-grid;
-  grid-template-columns: repeat(2, minmax(130px, 1fr));
+  grid-template-columns: repeat(4, minmax(112px, 1fr));
   gap: 3px;
   padding: 3px;
   background: var(--surface-soft);
   border: 1px solid var(--border-soft);
   border-radius: 11px;
+}
+
+.sam3d-subject-assignments {
+  margin: 14px 18px 0;
+}
+
+.sam3d-subject-assignments > p {
+  margin: 0;
+  color: var(--text-faint);
+  font-size: 9px;
+}
+
+#sam3d-subject-assignment-list {
+  display: grid;
+  gap: 7px;
+}
+
+.sam3d-subject-assignment {
+  display: grid;
+  grid-template-columns:
+    minmax(48px, auto)
+    minmax(92px, 0.7fr)
+    minmax(115px, 0.9fr)
+    minmax(120px, 1fr)
+    minmax(120px, 1fr)
+    minmax(115px, 0.8fr)
+    auto;
+  gap: 8px;
+  align-items: center;
+  padding: 9px;
+  background: var(--surface-soft);
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+}
+
+.sam3d-subject-assignment.is-manual {
+  background:
+    linear-gradient(135deg, rgba(128, 191, 255, 0.08), transparent 48%),
+    var(--surface-soft);
+  border-color: rgba(128, 191, 255, 0.3);
+}
+
+.sam3d-subject-assignment.has-duplicate {
+  border-color: rgba(246, 199, 106, 0.55);
+}
+
+.sam3d-assignment-heading-actions,
+.sam3d-assignment-actions {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.sam3d-assignment-identity strong,
+.sam3d-assignment-identity small,
+.sam3d-assignment-field > span,
+.sam3d-assignment-primary > span {
+  display: block;
+}
+
+.sam3d-assignment-identity small,
+.sam3d-assignment-field > span,
+.sam3d-assignment-primary > span {
+  color: var(--text-faint);
+  font-size: 8px;
+}
+
+.sam3d-assignment-field,
+.sam3d-assignment-primary {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.sam3d-assignment-primary {
+  justify-items: center;
+}
+
+.sam3d-assignment-height-input {
+  position: relative;
+  display: block;
+}
+
+.sam3d-assignment-height-input > input {
+  padding-right: 26px;
+}
+
+.sam3d-assignment-height-input > span {
+  position: absolute;
+  top: 50%;
+  right: 9px;
+  color: var(--text-faint);
+  font-size: 9px;
+  transform: translateY(-50%);
+  pointer-events: none;
+}
+
+.sam3d-assignment-warning {
+  grid-column: 1 / -1;
+  margin: 0;
+  padding: 8px 10px;
+  color: var(--warning);
+  background: rgba(246, 199, 106, 0.08);
+  border-radius: 7px;
+  font-size: 9px;
+  line-height: 1.45;
+}
+
+.sam3d-subject-assignment select,
+.sam3d-subject-assignment input[type="number"],
+.sam3d-genital-controls select {
+  width: 100%;
+  min-width: 0;
+  height: 36px;
+  padding: 0 8px;
+  color: var(--text);
+  background: var(--surface-raised);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+}
+
+.sam3d-manual-pose {
+  margin: 14px 18px 18px;
+  overflow: hidden;
+  background: var(--surface-soft);
+  border: 1px solid rgba(128, 191, 255, 0.24);
+  border-radius: 12px;
+}
+
+.sam3d-manual-pose[hidden] {
+  display: none;
+}
+
+.sam3d-manual-pose-heading {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 15px;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.sam3d-manual-pose-heading h4 {
+  margin: 3px 0 0;
+  font-size: 14px;
+}
+
+.sam3d-manual-pose-heading p:last-child {
+  max-width: 720px;
+  margin: 5px 0 0;
+  color: var(--text-faint);
+  font-size: 9px;
+  line-height: 1.45;
+}
+
+.sam3d-manual-pose-heading > label,
+.sam3d-manual-pose-toolbar > label {
+  display: grid;
+  flex: 0 0 auto;
+  gap: 5px;
+  color: var(--text-faint);
+  font-size: 8px;
+}
+
+.sam3d-manual-pose-heading select,
+.sam3d-manual-pose-toolbar select {
+  min-width: 180px;
+  height: 36px;
+  padding: 0 30px 0 9px;
+  color: var(--text);
+  background: var(--surface-raised);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+}
+
+.sam3d-manual-pose-warning {
+  margin: 12px 15px 0;
+  padding: 10px 12px;
+  color: var(--warning);
+  background: rgba(246, 199, 106, 0.08);
+  border: 1px solid rgba(246, 199, 106, 0.3);
+  border-radius: 8px;
+  font-size: 9px;
+}
+
+.sam3d-manual-pose-warning[hidden] {
+  display: none;
+}
+
+.sam3d-manual-pose-toolbar {
+  display: flex;
+  align-items: flex-end;
+  gap: 10px;
+  padding: 12px 15px;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.sam3d-manual-pose-toolbar > p {
+  margin: 0 0 2px auto;
+  color: var(--text-faint);
+  font-size: 8px;
+  line-height: 1.45;
+}
+
+.sam3d-manual-pose-workspace {
+  display: grid;
+  grid-template-columns: minmax(390px, 1fr) minmax(270px, 0.42fr);
+  gap: 15px;
+  padding: 15px;
+}
+
+.sam3d-manual-pose-preview {
+  min-width: 0;
+}
+
+.sam3d-manual-pose-stage {
+  position: relative;
+  overflow: hidden;
+  width: 100%;
+  min-height: 430px;
+  background:
+    linear-gradient(rgba(128, 191, 255, 0.045) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(128, 191, 255, 0.045) 1px, transparent 1px),
+    #0b0e12;
+  background-size: 5% 5%;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  touch-action: none;
+  user-select: none;
+}
+
+.sam3d-manual-pose-source-frame {
+  position: absolute;
+  inset: 25%;
+  z-index: 1;
+  overflow: visible;
+  background: #101419;
+  border: 2px solid rgba(246, 199, 106, 0.8);
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.6);
+  pointer-events: none;
+}
+
+.sam3d-manual-pose-source-frame > img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+.sam3d-manual-pose-source-frame > span {
+  position: absolute;
+  top: 6px;
+  left: 7px;
+  padding: 2px 5px;
+  color: #17130a;
+  background: rgba(246, 199, 106, 0.86);
+  border-radius: 4px;
+  font-size: 7px;
+  font-weight: 850;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.sam3d-manual-pose-stage > svg,
+#sam3d-manual-pose-handles {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  width: 100%;
+  height: 100%;
+}
+
+.sam3d-manual-pose-stage > svg {
+  pointer-events: none;
+}
+
+.sam3d-manual-pose-stage line {
+  stroke: #80bfff;
+  stroke-width: 0.75;
+  vector-effect: non-scaling-stroke;
+}
+
+.sam3d-manual-pose-stage line.is-hidden {
+  opacity: 0.28;
+  stroke-dasharray: 2.5 2.5;
+}
+
+.sam3d-manual-pose-handle {
+  position: absolute;
+  z-index: 3;
+  width: 17px;
+  height: 17px;
+  padding: 0;
+  color: #0d1116;
+  background: #80bfff;
+  border: 2px solid white;
+  border-radius: 50%;
+  transform: translate(-50%, -50%);
+  touch-action: none;
+}
+
+.sam3d-manual-pose-handle:hover,
+.sam3d-manual-pose-handle.is-selected {
+  z-index: 4;
+  box-shadow:
+    0 0 0 4px rgba(128, 191, 255, 0.22),
+    0 3px 10px rgba(0, 0, 0, 0.45);
+}
+
+.sam3d-manual-pose-handle.is-off-frame {
+  background:
+    repeating-linear-gradient(
+      135deg,
+      #f6c76a 0 4px,
+      #80bfff 4px 8px
+    );
+  border-color: #f6c76a;
+}
+
+.sam3d-manual-pose-handle.is-hidden {
+  opacity: 0.32;
+  background: transparent;
+  border-style: dashed;
+}
+
+.sam3d-manual-pose-handle > span {
+  position: absolute;
+  top: calc(100% + 5px);
+  left: 50%;
+  display: none;
+  width: max-content;
+  max-width: 130px;
+  padding: 3px 5px;
+  color: var(--text);
+  background: rgba(8, 11, 15, 0.9);
+  border-radius: 4px;
+  font-size: 8px;
+  transform: translateX(-50%);
+  pointer-events: none;
+}
+
+.sam3d-manual-pose-handle:hover > span,
+.sam3d-manual-pose-handle.is-selected > span {
+  display: block;
+}
+
+.sam3d-manual-pose-preview > p {
+  margin: 8px 2px 0;
+  color: var(--text-faint);
+  font-size: 8px;
+  line-height: 1.5;
+}
+
+.sam3d-manual-pose-controls {
+  display: grid;
+  align-content: start;
+  gap: 11px;
+}
+
+.sam3d-manual-pose-selected,
+.sam3d-manual-pose-joints {
+  padding: 12px;
+  background: var(--surface-raised);
+  border: 1px solid var(--border-soft);
+  border-radius: 9px;
+}
+
+.sam3d-manual-pose-selected {
+  display: grid;
+  gap: 12px;
+}
+
+.sam3d-manual-pose-selected > div > span,
+.sam3d-manual-pose-selected > div > strong {
+  display: block;
+}
+
+.sam3d-manual-pose-selected > div > span {
+  color: var(--text-faint);
+  font-size: 8px;
+}
+
+.sam3d-manual-pose-selected > div > strong {
+  margin-top: 3px;
+}
+
+.sam3d-manual-pose-selected > label {
+  display: grid;
+  gap: 6px;
+  color: var(--text-soft);
+  font-size: 9px;
+}
+
+.sam3d-manual-pose-selected > label:first-of-type {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.sam3d-manual-pose-selected label > span {
+  display: flex;
+  justify-content: space-between;
+  gap: 9px;
+}
+
+.sam3d-manual-pose-selected output {
+  color: var(--blue);
+}
+
+.sam3d-manual-pose-joints > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.sam3d-manual-pose-joints > header span {
+  color: var(--text-faint);
+  font-size: 8px;
+}
+
+#sam3d-manual-pose-joint-list {
+  display: grid;
+  max-height: 390px;
+  overflow-y: auto;
+  scrollbar-color: var(--border) transparent;
+}
+
+.sam3d-manual-pose-joint {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 5px;
+  min-height: 32px;
+  padding: 2px 5px;
+  border-top: 1px solid var(--border-soft);
+}
+
+.sam3d-manual-pose-joint.is-selected {
+  background: var(--blue-wash);
+}
+
+.sam3d-manual-pose-joint.is-hidden {
+  opacity: 0.58;
+}
+
+.sam3d-manual-pose-joint .quiet-button {
+  min-width: 0;
+  padding: 0;
+  overflow: hidden;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sam3d-manual-pose-joint > span {
+  color: var(--text-faint);
+  font-size: 7px;
+  text-transform: uppercase;
+}
+
+.sam3d-genital-enable-row {
+  padding: 14px 18px 0;
+}
+
+.sam3d-genital-enable-row .switch-row {
+  padding: 12px;
+  background: var(--surface-raised);
+  border: 1px solid var(--border-soft);
+  border-radius: 9px;
+}
+
+.sam3d-genital-workspace {
+  display: grid;
+  grid-template-columns: minmax(320px, 1.2fr) minmax(280px, 0.8fr);
+  gap: 16px;
+  padding: 18px;
+}
+
+.sam3d-genital-workspace.is-disabled {
+  opacity: 0.55;
+}
+
+.sam3d-genital-stage {
+  position: relative;
+  overflow: hidden;
+  min-height: 360px;
+  background: #0d1014;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  touch-action: none;
+}
+
+.sam3d-genital-stage > img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+.sam3d-genital-stage > svg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+
+.sam3d-genital-stage polyline {
+  fill: none;
+  stroke: #80bfff;
+  stroke-width: 0.7;
+  vector-effect: non-scaling-stroke;
+}
+
+.sam3d-genital-handle {
+  position: absolute;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  color: #0d1014;
+  background: #80bfff;
+  border: 2px solid white;
+  border-radius: 50%;
+  transform: translate(-50%, -50%);
+  touch-action: none;
+}
+
+.sam3d-genital-handle span {
+  position: absolute;
+  left: 50%;
+  top: calc(100% + 4px);
+  padding: 2px 4px;
+  color: var(--text);
+  background: rgba(10, 12, 15, 0.82);
+  border-radius: 4px;
+  font-size: 8px;
+  transform: translateX(-50%);
+  pointer-events: none;
+}
+
+.sam3d-genital-handle.is-testes {
+  background: #f6c76a;
+}
+
+.sam3d-genital-preview > p,
+.sam3d-pair-draft-note {
+  margin: 8px 0 0;
+  color: var(--text-faint);
+  font-size: 9px;
+  line-height: 1.5;
+}
+
+.sam3d-genital-controls,
+.sam3d-genital-options,
+.sam3d-genital-depths {
+  display: grid;
+  gap: 10px;
+}
+
+.sam3d-genital-options,
+.sam3d-genital-depths {
+  margin: 0 18px;
+  padding: 12px;
+  border: 1px solid var(--border-soft);
+  border-radius: 9px;
+}
+
+.sam3d-genital-options label,
+.sam3d-genital-depths label {
+  display: flex;
+  gap: 9px;
+  align-items: center;
+}
+
+.sam3d-genital-options strong,
+.sam3d-genital-options small {
+  display: block;
+}
+
+.sam3d-genital-options small {
+  color: var(--text-faint);
+  font-size: 9px;
+}
+
+.sam3d-review-summary {
+  display: grid;
+  gap: 8px;
+  padding: 18px;
+}
+
+.sam3d-review-card {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 11px;
+  background: var(--surface-raised);
+  border: 1px solid var(--border-soft);
+  border-radius: 9px;
+}
+
+.sam3d-review-card span {
+  color: var(--text-soft);
+}
+
+.sam3d-pair-draft-note {
+  margin: 0 18px 12px;
+  padding: 10px 12px;
+  background: var(--surface-raised);
+  border: 1px solid var(--border-soft);
+  border-radius: 9px;
+}
+
+.sam3d-pair-draft-note.is-warning {
+  color: var(--warning);
 }
 
 .sam3d-handoff-tabs button {
@@ -6115,6 +6810,17 @@ body.resource-detail-open {
     border-right: 0;
     border-bottom: 1px solid var(--border-soft);
   }
+
+  .sam3d-subject-assignment {
+    grid-template-columns:
+      minmax(48px, auto)
+      minmax(110px, 0.7fr)
+      repeat(2, minmax(130px, 1fr));
+  }
+
+  .sam3d-manual-pose-workspace {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 
 @media (max-width: 760px) {
@@ -6155,6 +6861,29 @@ body.resource-detail-open {
 
   .sam3d-manual-fit-workspace {
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  .sam3d-manual-pose-heading,
+  .sam3d-manual-pose-toolbar {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .sam3d-manual-pose-toolbar > p {
+    margin: 2px 0 0;
+  }
+
+  .sam3d-manual-pose-heading select,
+  .sam3d-manual-pose-toolbar select {
+    width: 100%;
+  }
+
+  .sam3d-subject-assignment {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  }
+
+  .sam3d-assignment-warning {
+    grid-column: 1 / -1;
   }
 
   .sam3d-title-row {
@@ -6280,6 +7009,18 @@ body.resource-detail-open {
 
   .sam3d-manual-fit {
     padding: 11px;
+  }
+
+  .sam3d-manual-pose {
+    margin: 12px;
+  }
+
+  .sam3d-manual-pose-workspace {
+    padding: 11px;
+  }
+
+  .sam3d-manual-pose-stage {
+    min-height: 310px;
   }
 
   .sam3d-manual-overlay-sliders {
