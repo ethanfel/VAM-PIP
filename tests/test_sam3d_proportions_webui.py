@@ -1280,7 +1280,15 @@ process.stdout.write(JSON.stringify({
         self.assertIn("error.status === 404 || error.status === 501", self.javascript)
         self.assertIn("Body-proportion fitting unavailable", self.javascript)
         self.assertIn("Body analysis could not be loaded", self.javascript)
-        self.assertIn("No VaM changes were made", self.javascript)
+        self.assertIn(
+            "The body-fit status could not be confirmed",
+            self.javascript,
+        )
+        self.assertIn(
+            "Body fit applied — preparing Undo…",
+            self.javascript,
+        )
+        self.assertNotIn("No VaM changes were made", self.javascript)
         self.assertIn(".sam3d-proportions-state.is-error", self.styles)
         self.assertIn(".sam3d-proportions-state.is-unavailable", self.styles)
 
@@ -1411,6 +1419,7 @@ const renderSam3dBodyProfileActionState = () => {};
 const errorMessage = (error) => String(error?.message || error || "");
 const toast = (title) => { toasts.push(title); };
 const startSam3dBodyProportionPolling = () => { rescheduled += 1; };
+const fetchLiveSceneSnapshot = async () => ({ persons: [] });
 async function loadSam3dBodyProportions() {
   app.sam3dBodyProportions = {
     ...app.sam3dBodyProportions,
@@ -1468,6 +1477,168 @@ async function loadSam3dBodyProportions() {
         self.assertEqual(result["stateTitle"], "Body fit applied")
         self.assertEqual(result["toasts"], ["Body fit applied"])
         self.assertEqual(result["rescheduled"], 0)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is not installed")
+    def test_apply_poll_stops_on_unchanged_or_reconciliation_error(self) -> None:
+        poll_start = self.javascript.index("async function pollSam3dBodyProportions(")
+        poll_end = self.javascript.index(
+            "function markSam3dBodyProportionsDirty(", poll_start
+        )
+        script = (
+            '"use strict";\n'
+            "const SAM3D_BODY_PROPORTION_ACTIONS = Object.freeze({\n"
+            '  analyze: "analyze", apply: "apply", undo: "undo",\n'
+            "});\n"
+            "const SAM3D_BODY_PROPORTION_POLL_ATTEMPTS = 300;\n"
+            """
+const app = {
+  managerAuthFailed: false,
+  view: "sam3d",
+  sam3dBodyProportionPollTimer: null,
+  sam3dBodyProportionPollAttempts: 0,
+  sam3dBodyProportionsPendingAction:
+    SAM3D_BODY_PROPORTION_ACTIONS.apply,
+  sam3dBodyProportionsError: null,
+  sam3dBodyProportions: null,
+};
+let outcome = "settling";
+let renders = 0;
+let rescheduled = 0;
+let analysisLoads = 0;
+const toasts = [];
+const sam3dBodyProportionJob = () => ({ id: "a".repeat(32) });
+const sam3dBodyProportionSettings = () => ({
+  targetUid: "Person",
+  shapeRegions: [],
+  manualShape: {},
+});
+const sam3dManualShapeHasCorrections = () => false;
+const renderSam3dBodyProportions = () => { renders += 1; };
+const startSam3dBodyProportionPolling = () => { rescheduled += 1; };
+const toast = (title) => { toasts.push(title); };
+const asArray = (value) => Array.isArray(value) ? value : [];
+const fetchLiveSceneSnapshot = async () => ({
+  persons: outcome === "settling"
+    ? [{
+        uid: "Person",
+        bodyProportions: {
+          undoPending: true,
+          bodyShapeReady: false,
+          bodyShapePreparing: true,
+        },
+      }]
+    : [],
+});
+async function loadSam3dBodyProportions() {
+  analysisLoads += 1;
+  if (outcome === "error") {
+    app.sam3dBodyProportionsError =
+      new Error("Could not read the bridge status.");
+    return null;
+  }
+  app.sam3dBodyProportionsError = null;
+  app.sam3dBodyProportions = {
+    ready: true,
+    state: "ok",
+    message: "Body-proportion morphs applied.",
+    applied: false,
+    canApply: true,
+    canUndo: false,
+    applyRevision: "",
+  };
+  return app.sam3dBodyProportions;
+}
+"""
+            f"{self.javascript[poll_start:poll_end]}\n"
+            """
+(async () => {
+  await pollSam3dBodyProportions();
+  const settling = {
+    pendingAction: app.sam3dBodyProportionsPendingAction,
+    state: app.sam3dBodyProportions.state,
+    message: app.sam3dBodyProportions.message,
+    hasError: Boolean(app.sam3dBodyProportionsError),
+    analysisLoads,
+    rescheduled,
+  };
+
+  outcome = "unchanged";
+  app.sam3dBodyProportionPollTimer = null;
+  const unchanged = {
+  };
+  await pollSam3dBodyProportions();
+  Object.assign(unchanged, {
+    pendingAction: app.sam3dBodyProportionsPendingAction,
+    pollAttempts: app.sam3dBodyProportionPollAttempts,
+    state: app.sam3dBodyProportions.state,
+    canApply: app.sam3dBodyProportions.canApply,
+    message: app.sam3dBodyProportions.message,
+    toasts: [...toasts],
+    rescheduled,
+  });
+
+  outcome = "error";
+  app.sam3dBodyProportionsPendingAction =
+    SAM3D_BODY_PROPORTION_ACTIONS.apply;
+  app.sam3dBodyProportionPollAttempts = 4;
+  app.sam3dBodyProportionsError = null;
+  await pollSam3dBodyProportions();
+  const errored = {
+    pendingAction: app.sam3dBodyProportionsPendingAction,
+    pollAttempts: app.sam3dBodyProportionPollAttempts,
+    error: app.sam3dBodyProportionsError.message,
+    rescheduled,
+  };
+  process.stdout.write(JSON.stringify({
+    settling, unchanged, errored, renders, analysisLoads,
+  }));
+})().catch((error) => {
+  process.stderr.write(String(error?.stack || error));
+  process.exitCode = 1;
+});
+"""
+        )
+        completed = subprocess.run(
+            ["node", "-"],
+            input=script,
+            text=True,
+            capture_output=True,
+            check=True,
+            timeout=10,
+        )
+        result = json.loads(completed.stdout)
+
+        self.assertEqual(
+            result["settling"]["pendingAction"],
+            "apply",
+        )
+        self.assertEqual(result["settling"]["state"], "settling")
+        self.assertIn(
+            "rebuilding neutral body-shape measurements",
+            result["settling"]["message"],
+        )
+        self.assertFalse(result["settling"]["hasError"])
+        self.assertEqual(result["settling"]["analysisLoads"], 0)
+        self.assertEqual(result["settling"]["rescheduled"], 1)
+        self.assertEqual(result["unchanged"]["pendingAction"], "")
+        self.assertEqual(result["unchanged"]["pollAttempts"], 0)
+        self.assertEqual(result["unchanged"]["state"], "unchanged")
+        self.assertFalse(result["unchanged"]["canApply"])
+        self.assertIn(
+            "every requested morph was already",
+            result["unchanged"]["message"],
+        )
+        self.assertEqual(result["unchanged"]["toasts"], ["Body fit unchanged"])
+        self.assertEqual(result["unchanged"]["rescheduled"], 1)
+        self.assertEqual(result["errored"]["pendingAction"], "")
+        self.assertEqual(result["errored"]["pollAttempts"], 0)
+        self.assertEqual(
+            result["errored"]["error"],
+            "Could not read the bridge status.",
+        )
+        self.assertEqual(result["errored"]["rescheduled"], 1)
+        self.assertEqual(result["renders"], 3)
+        self.assertEqual(result["analysisLoads"], 2)
 
     def test_panel_is_responsive(self) -> None:
         for selector in (

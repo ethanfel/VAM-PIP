@@ -12079,6 +12079,77 @@ async function pollSam3dBodyProportions() {
   const jobId = sam3dBodyProportionJob()?.id || "";
   if (!action || !jobId || app.view !== "sam3d") return;
   app.sam3dBodyProportionPollAttempts += 1;
+  const settings = sam3dBodyProportionSettings();
+  const bodyShapeReviewRequested =
+    action === SAM3D_BODY_PROPORTION_ACTIONS.undo &&
+    (
+      settings.shapeRegions.length > 0 ||
+      sam3dManualShapeHasCorrections(settings.manualShape)
+    );
+  let liveBodyStatus = null;
+  try {
+    const snapshot = await fetchLiveSceneSnapshot();
+    const target = asArray(snapshot?.persons).find(
+      (person) =>
+        person &&
+        typeof person === "object" &&
+        String(person.uid || "").trim() === settings.targetUid,
+    );
+    const rawStatus =
+      target?.bodyProportions &&
+      typeof target.bodyProportions === "object"
+        ? target.bodyProportions
+        : target?.body_proportions &&
+            typeof target.body_proportions === "object"
+          ? target.body_proportions
+          : null;
+    if (rawStatus) {
+      liveBodyStatus = {
+        undoPending: Boolean(
+          rawStatus.undoPending ?? rawStatus.undo_pending,
+        ),
+        bodyShapePreparing: Boolean(
+          rawStatus.bodyShapePreparing ??
+            rawStatus.body_shape_preparing,
+        ),
+      };
+    }
+  } catch {
+    // The full reconciliation request below owns connection/error reporting.
+  }
+  const waitingForLiveSettlement =
+    Boolean(liveBodyStatus?.undoPending) ||
+    Boolean(liveBodyStatus?.bodyShapePreparing);
+  if (waitingForLiveSettlement) {
+    const appliedAndPreparingUndo =
+      action === SAM3D_BODY_PROPORTION_ACTIONS.apply &&
+      Boolean(liveBodyStatus?.undoPending);
+    app.sam3dBodyProportionsError = null;
+    app.sam3dBodyProportions = {
+      ...app.sam3dBodyProportions,
+      state: appliedAndPreparingUndo ? "settling" : "reconciling",
+      message:
+        appliedAndPreparingUndo
+          ? "VaM changed the morph values and is rebuilding neutral body-shape measurements before publishing the exact undo revision."
+          : action === SAM3D_BODY_PROPORTION_ACTIONS.undo
+            ? "VaM restored the morph values and is rebuilding neutral body-shape measurements."
+            : "VaM is rebuilding neutral body-shape measurements before confirming whether any morph values changed.",
+    };
+    if (
+      app.sam3dBodyProportionPollAttempts >=
+      SAM3D_BODY_PROPORTION_POLL_ATTEMPTS
+    ) {
+      app.sam3dBodyProportionsPendingAction = "";
+      app.sam3dBodyProportionsError = new Error(
+        "VaM did not finish rebuilding the body-shape measurements before the five-minute timeout.",
+      );
+      renderSam3dBodyProportions();
+      return;
+    }
+    renderSam3dBodyProportions();
+    startSam3dBodyProportionPolling();
+    return;
+  }
   const analysis = await loadSam3dBodyProportions(jobId, { quiet: true });
   if (
     action !== app.sam3dBodyProportionsPendingAction ||
@@ -12089,13 +12160,13 @@ async function pollSam3dBodyProportions() {
   const failed = ["error", "failed", "stale"].includes(
     String(analysis?.state || "").toLowerCase(),
   );
-  const settings = sam3dBodyProportionSettings();
-  const bodyShapeReviewRequested =
-    action === SAM3D_BODY_PROPORTION_ACTIONS.undo &&
-    (
-      settings.shapeRegions.length > 0 ||
-      sam3dManualShapeHasCorrections(settings.manualShape)
-    );
+  const succeeded = [
+    "ok",
+    "success",
+    "succeeded",
+    "complete",
+    "completed",
+  ].includes(String(analysis?.state || "").toLowerCase());
   const restoredBodyShapeReady =
     !bodyShapeReviewRequested || Boolean(analysis?.bodyShapeReady);
   const complete =
@@ -12106,11 +12177,43 @@ async function pollSam3dBodyProportions() {
           !analysis?.canUndo &&
           restoredBodyShapeReady,
         );
+  const unchanged =
+    action === SAM3D_BODY_PROPORTION_ACTIONS.apply &&
+    succeeded &&
+    Boolean(analysis?.ready) &&
+    !analysis?.applied &&
+    !analysis?.canUndo &&
+    !analysis?.applyRevision;
+  if (!analysis && app.sam3dBodyProportionsError) {
+    app.sam3dBodyProportionsPendingAction = "";
+    app.sam3dBodyProportionPollAttempts = 0;
+    renderSam3dBodyProportions();
+    return;
+  }
   if (failed) {
     app.sam3dBodyProportionsPendingAction = "";
     app.sam3dBodyProportionsError = new Error(
       analysis?.message ||
         `VaM could not complete the body-proportion ${action}.`,
+    );
+    renderSam3dBodyProportions();
+    return;
+  }
+  if (unchanged) {
+    app.sam3dBodyProportionsPendingAction = "";
+    app.sam3dBodyProportionPollAttempts = 0;
+    app.sam3dBodyProportions = {
+      ...analysis,
+      state: "unchanged",
+      message:
+        "VaM completed the request, but every requested morph was already at its proposed value. Analyze again before retrying.",
+      canApply: false,
+      canUndo: false,
+      applied: false,
+    };
+    toast(
+      "Body fit unchanged",
+      "No morph values changed, so VaM did not create an undo revision.",
     );
     renderSam3dBodyProportions();
     return;
@@ -12468,10 +12571,14 @@ function renderSam3dBodyProportions() {
     const undoing =
       app.sam3dBodyProportionsPendingAction ===
       SAM3D_BODY_PROPORTION_ACTIONS.undo;
-    elements.sam3dProportionsStateTitle.textContent = undoing
-      ? "Restoring the previous body…"
-      : "Applying the combined body fit…";
+    elements.sam3dProportionsStateTitle.textContent =
+      analysis?.state === "settling" && !undoing
+        ? "Body fit applied — preparing Undo…"
+        : undoing
+          ? "Restoring the previous body…"
+          : "Applying the combined body fit…";
     elements.sam3dProportionsStateMessage.textContent =
+      analysis?.message ||
       "Waiting for VaM to publish the exact post-change morph revision.";
   } else if (app.sam3dBodyProportionsInFlight) {
     elements.sam3dProportionsStateTitle.textContent =
@@ -12525,6 +12632,12 @@ function renderSam3dBodyProportions() {
         : "Neutral body-shape calibration changed";
     elements.sam3dProportionsStateMessage.textContent =
       "Run Analyze again to bind the proposal to VaM’s current stable body revision before applying it.";
+  } else if (analysis?.state === "unchanged") {
+    elements.sam3dProportionsStateTitle.textContent =
+      "Body fit made no changes";
+    elements.sam3dProportionsStateMessage.textContent =
+      analysis.message ||
+      "Every requested morph was already at its proposed value.";
   } else if (dirty) {
     elements.sam3dProportionsStateTitle.textContent =
       "Analysis settings changed";
@@ -12615,7 +12728,9 @@ function renderSam3dBodyProportions() {
     note = "The reconstruction revision is invalid. Refresh this job before analysis.";
     elements.sam3dProportionsNote.classList.add("is-error");
   } else if (error) {
-    note = "No VaM changes were made. Retry the read-only analysis.";
+    note =
+      errorMessage(error) ||
+      "The body-fit status could not be confirmed. Retry the read-only analysis.";
     elements.sam3dProportionsNote.classList.add("is-error");
   } else if (bodyShapeCalibration.preparing) {
     note = settings.shapeRegions.length
@@ -12630,6 +12745,9 @@ function renderSam3dBodyProportions() {
   } else if (bodyShapeReadinessChanged) {
     note =
       "VaM’s neutral body-shape calibration changed after this proposal was analyzed. Run Analyze again before applying.";
+  } else if (analysis?.state === "unchanged") {
+    note =
+      "VaM made no morph changes and created no undo revision. Run Analyze again before retrying Apply body fit.";
   } else if (dirty) {
     note =
       "This proposal is stale because a region, fit strength, or Manual Fit correction changed.";
