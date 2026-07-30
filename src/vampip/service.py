@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import re
 import sqlite3
+import stat
 import subprocess
 import threading
 from typing import Callable, Iterator
@@ -38,6 +39,8 @@ from vampip.bridge import (
     request_select_person,
     request_sam3d_apply,
     request_sam3d_capture,
+    request_sam3d_reference,
+    request_remove_sam3d_reference,
     request_sam3d_undo,
     request_subscene_load,
     request_timeline_control,
@@ -111,8 +114,10 @@ from vampip.runtime import atomic_write_text, derive_vam_root, find_vam_processe
 from vampip.sam3d import (
     SAM3D_CAPTURE_FILE_LIMIT,
     SAM3D_CAPTURE_HISTORY_LIMIT,
+    SAM3D_UPLOAD_LIMIT,
     Sam3dJobManager,
     Sam3dJobError,
+    inspect_image,
     validate_job_id as validate_sam3d_job_id,
 )
 from vampip.sam3d_body_shape import (
@@ -152,6 +157,9 @@ _SAM3D_CAPTURE_CONTENT_TYPES = {
 _SAM3D_BODY_REFERENCE = re.compile(r"^([0-9a-f]{32}):([0-9]{1,2})$")
 _SAM3D_BODY_REFERENCE_LIMIT = 8
 _SAM3D_BODY_INDEX_LIMIT = 31
+_SAM3D_REFERENCE_RELATIVE_DIR = (
+    Path("Custom") / "Images" / "VAMPip" / "SAM3D"
+)
 
 
 class LiveActionBusyError(RuntimeError):
@@ -1162,6 +1170,8 @@ def _public_sam3d_status(value: object) -> dict[str, object] | None:
             "applySam3dResult": "apply",
             "undoSam3dResult": "undo",
             "captureSam3dResult": "capture",
+            "showSam3dReference": "reference-show",
+            "removeSam3dReference": "reference-remove",
         }
         if re.fullmatch(r"[0-9a-f]{32}", request_id) is not None:
             action["requestId"] = request_id
@@ -1184,6 +1194,38 @@ def _public_sam3d_status(value: object) -> dict[str, object] | None:
             action["message"] = message
         if action:
             result["lastAction"] = action
+    raw_reference = value.get("reference")
+    if isinstance(raw_reference, dict):
+        reference: dict[str, object] = {
+            "active": raw_reference.get("active") is True,
+            "alignedToPose": raw_reference.get("alignedToPose") is True,
+        }
+        for key in ("jobId", "jobRevision", "solutionRevision"):
+            token = _equipment_text(raw_reference.get(key), maximum=32).casefold()
+            if re.fullmatch(r"[0-9a-f]{32}", token) is not None:
+                reference[key] = token
+        for key in ("atomUid", "targetUid", "cameraUid"):
+            uid = _equipment_text(raw_reference.get(key), maximum=200)
+            if uid:
+                reference[key] = uid
+        mode = _equipment_text(raw_reference.get("mode"), maximum=32)
+        if mode in {"body-fit", "pose-aligned"}:
+            reference["mode"] = mode
+        state = _equipment_text(raw_reference.get("state"), maximum=32)
+        if state:
+            reference["state"] = state
+        message = _equipment_text(raw_reference.get("message"), maximum=1000)
+        if message:
+            reference["message"] = message
+        for key in ("sourceWidth", "sourceHeight"):
+            dimension = raw_reference.get(key)
+            if (
+                not isinstance(dimension, bool)
+                and isinstance(dimension, int)
+                and 0 <= dimension <= 32_768
+            ):
+                reference[key] = dimension
+        result["reference"] = reference
     settlement = _public_sam3d_settlement(value.get("settlement"))
     if settlement is not None:
         result["settlement"] = settlement
@@ -2085,6 +2127,7 @@ class ManagerService:
         result = dict(document)
         result.pop("settlement", None)
         result.pop("body_reference_support", None)
+        result.pop("reference", None)
         job_id = str(result.get("id") or "")
         raw_action = result.get("last_vam_action")
         action = dict(raw_action) if isinstance(raw_action, dict) else {}
@@ -2218,6 +2261,55 @@ class ManagerService:
                 "captured": captured,
             }
         )
+        raw_reference = live.get("reference")
+        raw_reference = raw_reference if isinstance(raw_reference, dict) else {}
+        reference_active = bool(
+            raw_reference.get("active") is True
+            and raw_reference.get("jobId") == job_id
+        )
+        reference_status: dict[str, object] = {
+            "active": reference_active,
+            "visible": reference_active,
+            "job_id": job_id if reference_active else None,
+            "job_revision": (
+                raw_reference.get("jobRevision") if reference_active else None
+            ),
+            "solution_revision": (
+                raw_reference.get("solutionRevision") if reference_active else None
+            ),
+            "target_uid": (
+                raw_reference.get("targetUid") if reference_active else None
+            ),
+            "atom_uid": (
+                raw_reference.get("atomUid") if reference_active else None
+            ),
+            "aligned_to_pose": bool(
+                reference_active and raw_reference.get("alignedToPose") is True
+            ),
+            "mode": (
+                raw_reference.get("mode")
+                if reference_active
+                and raw_reference.get("mode") in {"pose-aligned", "body-fit"}
+                else (
+                    "pose-aligned"
+                    if reference_active
+                    and raw_reference.get("alignedToPose") is True
+                    else ("body-fit" if reference_active else None)
+                )
+            ),
+        }
+        if reference_active:
+            reference_status["source_width"] = raw_reference.get("sourceWidth")
+            reference_status["source_height"] = raw_reference.get("sourceHeight")
+            for public_key, live_key in (
+                ("camera_uid", "cameraUid"),
+                ("state", "state"),
+                ("message", "message"),
+            ):
+                value = raw_reference.get(live_key)
+                if isinstance(value, str) and value:
+                    reference_status[public_key] = value
+        result["reference"] = reference_status
         if current_applied:
             settlement = _public_sam3d_settlement(live.get("settlement"))
             if settlement is not None:
@@ -2575,6 +2667,218 @@ class ManagerService:
             / "SAM3D"
             / f"{job_id}.json"
         )
+
+    def _prepare_sam3d_solution(
+        self,
+        job_id: str,
+        *,
+        expected_job_revision: str,
+        person_index: int,
+        height_m: float,
+        aspect_ratio: str,
+        output_resolution: str,
+        image_format: str,
+        horizontal_fov: float | None,
+        stale_action: str,
+    ) -> tuple[
+        Sam3dJobManager,
+        dict[str, object],
+        dict[str, object],
+        str,
+        str,
+    ]:
+        manager = self._sam3d()
+        job = manager.get(job_id)
+        if job["state"] != "succeeded":
+            raise Sam3dJobError("SAM3D job has not completed successfully")
+        if job.get("revision") != expected_job_revision:
+            raise ValueError(
+                f"SAM3D job revision has changed; refresh before {stale_action}"
+            )
+        manifest = manager.manifest(job_id)
+        if manifest.get("revision") != expected_job_revision:
+            raise ValueError(
+                f"SAM3D job revision has changed; refresh before {stale_action}"
+            )
+        solution = build_vam_solution(
+            manifest,
+            job_id=job_id,
+            person_index=person_index,
+            height_m=height_m,
+            aspect_ratio=aspect_ratio,
+            output_resolution=output_resolution,
+            image_format=image_format,
+            horizontal_fov=horizontal_fov,
+        )
+        solution_payload = (
+            json.dumps(
+                solution,
+                ensure_ascii=True,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            + "\n"
+        )
+        solution_sha256 = hashlib.sha256(
+            solution_payload.encode("ascii")
+        ).hexdigest()
+        return manager, job, solution, solution_payload, solution_sha256
+
+    def _write_sam3d_solution(self, job_id: str, payload: str) -> None:
+        solution_path = self._sam3d_solution_path(job_id)
+        solution_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        try:
+            solution_path.parent.chmod(0o700)
+        except OSError:
+            pass
+        atomic_write_text(solution_path, payload)
+        try:
+            solution_path.chmod(0o600)
+        except OSError:
+            pass
+
+    @staticmethod
+    def _read_sam3d_reference_source(path: Path) -> bytes:
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            descriptor = os.open(path, flags)
+        except FileNotFoundError:
+            raise
+        except OSError as error:
+            raise ValueError("SAM3D source is not a readable regular file") from error
+        try:
+            before = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(before.st_mode)
+                or before.st_size < 1
+                or before.st_size > SAM3D_UPLOAD_LIMIT
+            ):
+                raise ValueError("SAM3D source is not a bounded regular file")
+            with os.fdopen(descriptor, "rb", closefd=False) as stream:
+                data = stream.read(SAM3D_UPLOAD_LIMIT + 1)
+            after = os.fstat(descriptor)
+            if (
+                len(data) != before.st_size
+                or len(data) > SAM3D_UPLOAD_LIMIT
+                or before.st_dev != after.st_dev
+                or before.st_ino != after.st_ino
+                or before.st_size != after.st_size
+                or before.st_mtime_ns != after.st_mtime_ns
+            ):
+                raise ValueError("SAM3D source changed while it was being staged")
+            return data
+        finally:
+            os.close(descriptor)
+
+    @staticmethod
+    def _write_immutable_sam3d_reference(path: Path, data: bytes) -> None:
+        digest = hashlib.sha256(data).hexdigest()
+
+        def accept_existing() -> bool:
+            try:
+                existing = ManagerService._read_sam3d_reference_source(path)
+            except FileNotFoundError:
+                return False
+            except ValueError as error:
+                raise FileExistsError(
+                    "the staged SAM3D reference path is not a regular image"
+                ) from error
+            if len(existing) == len(data) and hashlib.sha256(existing).hexdigest() == digest:
+                return True
+            raise FileExistsError(
+                "the immutable staged SAM3D reference contains different data"
+            )
+
+        try:
+            path.lstat()
+        except FileNotFoundError:
+            pass
+        else:
+            if accept_existing():
+                return
+
+        temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+        descriptor = os.open(
+            temporary,
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL
+            | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+        )
+        try:
+            try:
+                view = memoryview(data)
+                while view:
+                    written = os.write(descriptor, view)
+                    if written <= 0:
+                        raise OSError("short write while staging SAM3D reference")
+                    view = view[written:]
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+            try:
+                os.link(temporary, path)
+            except FileExistsError:
+                if not accept_existing():
+                    raise
+        finally:
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass
+
+    def _stage_sam3d_reference(
+        self,
+        manager: Sam3dJobManager,
+        job_id: str,
+        job: dict[str, object],
+    ) -> dict[str, object]:
+        source_path, declared_content_type = manager.artifact(job_id, "source")
+        data = self._read_sam3d_reference_source(source_path)
+        image = inspect_image(data, declared_content_type)
+        if image.content_type not in {"image/jpeg", "image/png"}:
+            raise ValueError("SAM3D reference source must be a JPG or PNG image")
+        suffix = source_path.suffix.casefold()
+        allowed_suffixes = (
+            {".jpg", ".jpeg"}
+            if image.content_type == "image/jpeg"
+            else {".png"}
+        )
+        if suffix not in allowed_suffixes:
+            raise ValueError(
+                "SAM3D source extension does not match its validated image type"
+            )
+        source = job.get("source")
+        if (
+            not isinstance(source, dict)
+            or source.get("content_type") != image.content_type
+            or source.get("width") != image.width
+            or source.get("height") != image.height
+        ):
+            raise ValueError("SAM3D source metadata does not match its image")
+
+        relative_directory = _SAM3D_REFERENCE_RELATIVE_DIR
+        destination_directory = self.vam_root / relative_directory
+        destination_directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        resolved_directory = destination_directory.resolve(strict=True)
+        try:
+            resolved_directory.relative_to(self.vam_root.resolve(strict=True))
+        except ValueError as error:
+            raise ValueError(
+                "SAM3D reference destination must remain inside the VaM root"
+            ) from error
+        destination = resolved_directory / f"{job_id}{suffix}"
+        self._write_immutable_sam3d_reference(destination, data)
+        resource_ref = (
+            relative_directory.as_posix() + f"/{job_id}{suffix}"
+        )
+        return {
+            "resource_ref": resource_ref,
+            "sha256": hashlib.sha256(data).hexdigest(),
+            "width": image.width,
+            "height": image.height,
+        }
 
     def _read_sam3d_solution(
         self,
@@ -3187,6 +3491,7 @@ class ManagerService:
         output_resolution: str = "1280x720 (HD)",
         image_format: str = "jpeg",
         horizontal_fov: float | None = None,
+        keep_reference: bool = False,
     ) -> dict[str, object]:
         job_id = validate_sam3d_job_id(job_id)
         expected_job_revision = self._sam3d_solution_revision(
@@ -3195,6 +3500,8 @@ class ManagerService:
         )
         if not isinstance(create_camera, bool):
             raise TypeError("create_camera must be a boolean")
+        if not isinstance(keep_reference, bool):
+            raise TypeError("keep_reference must be a boolean")
         scene = self._require_live_capability(
             "sam3d-apply-v1",
             action_label="applying a SAM3D pose",
@@ -3232,48 +3539,40 @@ class ManagerService:
                     "camera_uid is not a compatible VR/Funscript camera atom"
                 )
 
-        manager = self._sam3d()
-        job = manager.get(job_id)
-        if job["state"] != "succeeded":
-            raise Sam3dJobError("SAM3D job has not completed successfully")
-        if job.get("revision") != expected_job_revision:
-            raise ValueError("SAM3D job revision has changed; refresh before applying")
-        manifest = manager.manifest(job_id)
-        if manifest.get("revision") != expected_job_revision:
-            raise ValueError("SAM3D job revision has changed; refresh before applying")
-        solution = build_vam_solution(
-            manifest,
-            job_id=job_id,
+        (
+            manager,
+            job,
+            solution,
+            solution_payload,
+            solution_sha256,
+        ) = self._prepare_sam3d_solution(
+            job_id,
+            expected_job_revision=expected_job_revision,
             person_index=person_index,
             height_m=height_m,
             aspect_ratio=aspect_ratio,
             output_resolution=output_resolution,
             image_format=image_format,
             horizontal_fov=horizontal_fov,
+            stale_action="applying",
         )
         solution_revision = str(solution["revision"])
-        solution_payload = (
-            json.dumps(
-                solution,
-                ensure_ascii=True,
-                sort_keys=True,
-                separators=(",", ":"),
-            )
-            + "\n"
-        )
-        solution_sha256 = hashlib.sha256(solution_payload.encode("ascii")).hexdigest()
-        solution_path = self._sam3d_solution_path(job_id)
         with self._bridge_mailbox_transaction():
-            solution_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-            try:
-                solution_path.parent.chmod(0o700)
-            except OSError:
-                pass
-            atomic_write_text(solution_path, solution_payload)
-            try:
-                solution_path.chmod(0o600)
-            except OSError:
-                pass
+            reference = (
+                self._stage_sam3d_reference(manager, job_id, job)
+                if keep_reference
+                else None
+            )
+            self._write_sam3d_solution(job_id, solution_payload)
+            reference_request: dict[str, object] = {}
+            if reference is not None:
+                reference_request = {
+                    "expected_job_revision": expected_job_revision,
+                    "resource_ref": reference["resource_ref"],
+                    "resource_sha256": reference["sha256"],
+                    "source_width": reference["width"],
+                    "source_height": reference["height"],
+                }
             bridge_request = request_sam3d_apply(
                 self.vam_root,
                 job_id=job_id,
@@ -3282,6 +3581,8 @@ class ManagerService:
                 target_uid=target_uid,
                 camera_uid=camera_uid,
                 create_camera=create_camera,
+                keep_reference=keep_reference,
+                **reference_request,
             )
         manager.record_vam_action(
             job_id,
@@ -3300,6 +3601,148 @@ class ManagerService:
             "target_uid": target_uid,
             "camera_uid": camera_uid,
             "create_camera": create_camera,
+            "keep_reference": keep_reference,
+            "reference": reference,
+            "action_state": "queued",
+        }
+
+    def show_sam3d_reference(
+        self,
+        job_id: str,
+        *,
+        expected_job_revision: object,
+        target_uid: object,
+        person_index: int,
+        height_m: float,
+        camera_uid: object,
+        create_camera: bool,
+        horizontal_fov: float | None = None,
+    ) -> dict[str, object]:
+        job_id = validate_sam3d_job_id(job_id)
+        expected_job_revision = self._sam3d_solution_revision(
+            expected_job_revision,
+            label="expected_job_revision",
+        )
+        if not isinstance(create_camera, bool):
+            raise TypeError("create_camera must be a boolean")
+        scene = self._require_live_capability(
+            "sam3d-reference-v1",
+            action_label="showing a SAM3D reference",
+        )
+        capabilities = {str(value) for value in scene.get("capabilities", [])}
+        if "sam3d-camera-vrfunscript-v1" not in capabilities:
+            raise ValueError(
+                "the loaded VAM-PIP bridge does not provide the VR/Funscript camera"
+            )
+        target_uid, _ = self._validate_live_atom_target(
+            scene,
+            target_uid,
+            expected_atom_type="Person",
+            create_if_missing=False,
+        )
+        camera_uid, camera_exists = self._validate_live_atom_target(
+            scene,
+            camera_uid,
+            expected_atom_type="Empty",
+            create_if_missing=create_camera,
+        )
+        if camera_exists:
+            camera_atom = self._sam3d_camera_atom(scene, camera_uid)
+            if (
+                camera_atom is None
+                or not isinstance(camera_atom.get("sam3dCamera"), dict)
+                or camera_atom["sam3dCamera"].get("compatible") is not True
+            ):
+                raise ValueError(
+                    "camera_uid is not a compatible VR/Funscript camera atom"
+                )
+
+        (
+            manager,
+            job,
+            solution,
+            solution_payload,
+            solution_sha256,
+        ) = self._prepare_sam3d_solution(
+            job_id,
+            expected_job_revision=expected_job_revision,
+            person_index=person_index,
+            height_m=height_m,
+            aspect_ratio="16:9",
+            output_resolution="1280x720 (HD)",
+            image_format="jpeg",
+            horizontal_fov=horizontal_fov,
+            stale_action="showing the reference",
+        )
+        solution_revision = str(solution["revision"])
+        with self._bridge_mailbox_transaction():
+            reference = self._stage_sam3d_reference(manager, job_id, job)
+            self._write_sam3d_solution(job_id, solution_payload)
+            bridge_request = request_sam3d_reference(
+                self.vam_root,
+                job_id=job_id,
+                expected_job_revision=expected_job_revision,
+                expected_revision=solution_revision,
+                solution_sha256=solution_sha256,
+                resource_ref=str(reference["resource_ref"]),
+                resource_sha256=str(reference["sha256"]),
+                source_width=int(reference["width"]),
+                source_height=int(reference["height"]),
+                target_uid=target_uid,
+                camera_uid=camera_uid,
+                create_camera=create_camera,
+            )
+        return {
+            "job_id": job_id,
+            "job_revision": expected_job_revision,
+            "solution_revision": solution_revision,
+            "bridge_request": bridge_request,
+            "target_uid": target_uid,
+            "camera_uid": camera_uid,
+            "create_camera": create_camera,
+            "reference": reference,
+            "action_state": "queued",
+        }
+
+    def remove_sam3d_reference(
+        self,
+        job_id: str,
+        *,
+        expected_job_revision: object,
+    ) -> dict[str, object]:
+        job_id = validate_sam3d_job_id(job_id)
+        expected_job_revision = self._sam3d_solution_revision(
+            expected_job_revision,
+            label="expected_job_revision",
+        )
+        self._require_live_capability(
+            "sam3d-reference-v1",
+            action_label="removing a SAM3D reference",
+        )
+        manager = self._sam3d()
+        job = manager.get(job_id)
+        if job["state"] != "succeeded":
+            raise Sam3dJobError("SAM3D job has not completed successfully")
+        if job.get("revision") != expected_job_revision:
+            raise ValueError(
+                "SAM3D job revision has changed; refresh before removing the reference"
+            )
+        manifest = manager.manifest(job_id)
+        if manifest.get("revision") != expected_job_revision:
+            raise ValueError(
+                "SAM3D job revision has changed; refresh before removing the reference"
+            )
+        bridge_request = self._queue_bridge_request(
+            lambda: request_remove_sam3d_reference(
+                self.vam_root,
+                job_id=job_id,
+                expected_job_revision=expected_job_revision,
+            )
+        )
+        return {
+            "job_id": job_id,
+            "job_revision": expected_job_revision,
+            "bridge_request": bridge_request,
             "action_state": "queued",
         }
 

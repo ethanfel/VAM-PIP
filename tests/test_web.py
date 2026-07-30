@@ -128,6 +128,129 @@ class WebSecurityTests(unittest.TestCase):
         self.assertFalse(document["operation"]["busy"])
         self.assertEqual(document["operation"]["status"], "idle")
 
+    def test_sam3d_reference_routes_are_strict_and_never_accept_paths(self) -> None:
+        job_id = "a" * 32
+        revision = "b" * 32
+        shown = {
+            "job_id": job_id,
+            "job_revision": revision,
+            "bridge_request": "c" * 32,
+            "reference": {
+                "resource_ref": f"Custom/Images/VAMPip/SAM3D/{job_id}.png",
+                "sha256": "d" * 64,
+                "width": 64,
+                "height": 64,
+            },
+        }
+        removed = {
+            "job_id": job_id,
+            "job_revision": revision,
+            "bridge_request": "e" * 32,
+        }
+        self.server.service.show_sam3d_reference = mock.Mock(return_value=shown)
+        self.server.service.remove_sam3d_reference = mock.Mock(return_value=removed)
+        headers = {
+            "X-VAMPIP-Token": self.token,
+            "Content-Type": "application/json",
+        }
+        document = {
+            "expected_job_revision": revision,
+            "target_uid": "Person",
+            "person_index": 0,
+            "height_m": 1.65,
+            "horizontal_fov": 70.0,
+            "camera_uid": "SAM Camera",
+            "create_camera": False,
+        }
+        body = json.dumps(document).encode("utf-8")
+        self.connection.request(
+            "POST",
+            f"/api/sam3d/jobs/{job_id}/reference",
+            body=body,
+            headers={**headers, "Content-Length": str(len(body))},
+        )
+        response = self.connection.getresponse()
+        self.assertEqual(response.status, 202)
+        self.assertEqual(self.response_json(response), shown)
+        self.server.service.show_sam3d_reference.assert_called_once_with(
+            job_id,
+            expected_job_revision=revision,
+            target_uid="Person",
+            person_index=0,
+            height_m=1.65,
+            horizontal_fov=70.0,
+            camera_uid="SAM Camera",
+            create_camera=False,
+        )
+
+        body = json.dumps({**document, "source_path": "/tmp/source.png"}).encode(
+            "utf-8"
+        )
+        self.connection.request(
+            "POST",
+            f"/api/sam3d/jobs/{job_id}/reference",
+            body=body,
+            headers={**headers, "Content-Length": str(len(body))},
+        )
+        response = self.connection.getresponse()
+        self.assertEqual(response.status, 400)
+        self.assertIn("unsupported", self.response_json(response)["error"])
+        self.assertEqual(
+            self.server.service.show_sam3d_reference.call_count,
+            1,
+        )
+
+        body = json.dumps({"expected_job_revision": revision}).encode("utf-8")
+        self.connection.request(
+            "DELETE",
+            f"/api/sam3d/jobs/{job_id}/reference",
+            body=body,
+            headers={**headers, "Content-Length": str(len(body))},
+        )
+        response = self.connection.getresponse()
+        self.assertEqual(response.status, 202)
+        self.assertEqual(self.response_json(response), removed)
+        self.server.service.remove_sam3d_reference.assert_called_once_with(
+            job_id,
+            expected_job_revision=revision,
+        )
+
+    def test_sam3d_apply_forwards_keep_reference_as_a_boolean(self) -> None:
+        job_id = "a" * 32
+        revision = "b" * 32
+        result = {
+            "job_id": job_id,
+            "bridge_request": "c" * 32,
+            "keep_reference": True,
+        }
+        self.server.service.apply_sam3d_result = mock.Mock(return_value=result)
+        document = {
+            "expected_job_revision": revision,
+            "target_uid": "Person",
+            "camera_uid": "SAM Camera",
+            "keep_reference": True,
+        }
+        body = json.dumps(document).encode("utf-8")
+        self.connection.request(
+            "POST",
+            f"/api/sam3d/jobs/{job_id}/apply",
+            body=body,
+            headers={
+                "X-VAMPIP-Token": self.token,
+                "Content-Type": "application/json",
+                "Content-Length": str(len(body)),
+            },
+        )
+        response = self.connection.getresponse()
+        self.assertEqual(response.status, 200)
+        self.assertEqual(self.response_json(response), result)
+        self.assertIs(
+            self.server.service.apply_sam3d_result.call_args.kwargs[
+                "keep_reference"
+            ],
+            True,
+        )
+
     def test_timeline_routes_are_authenticated_and_use_only_opaque_controls(
         self,
     ) -> None:

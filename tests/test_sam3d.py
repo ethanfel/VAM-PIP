@@ -1322,6 +1322,222 @@ class Sam3dBackendTests(unittest.TestCase):
         self.assertEqual(result["solution_revision"], solution["revision"])
         self.assertNotIn("sourcePath", json.dumps(request))
 
+    def test_reference_stages_validated_source_and_publishes_opaque_request(
+        self,
+    ) -> None:
+        manager, job = self.completed_job()
+        service = ManagerService(
+            self.addons,
+            self.state,
+            process_probe=lambda: [1234],
+            sam3d_manager=manager,
+        )
+        scene = {
+            "available": True,
+            "vam_running": True,
+            "capabilities": [
+                "sam3d-reference-v1",
+                "sam3d-camera-vrfunscript-v1",
+            ],
+            "atoms": [
+                {"uid": "Person", "type": "Person"},
+                {
+                    "uid": "SAM Camera",
+                    "type": "Empty",
+                    "sam3dCamera": {"compatible": True},
+                },
+            ],
+        }
+        service._require_live_capability = mock.Mock(return_value=scene)
+
+        result = service.show_sam3d_reference(
+            job["id"],
+            expected_job_revision=job["revision"],
+            target_uid="Person",
+            person_index=0,
+            height_m=1.65,
+            camera_uid="SAM Camera",
+            create_camera=False,
+            horizontal_fov=70.0,
+        )
+
+        staged = (
+            self.vam_root
+            / "Custom"
+            / "Images"
+            / "VAMPip"
+            / "SAM3D"
+            / f"{job['id']}.png"
+        )
+        source, _ = manager.artifact(job["id"], "source")
+        self.assertEqual(staged.read_bytes(), source.read_bytes())
+        self.assertEqual(
+            result["reference"]["resource_ref"],
+            f"Custom/Images/VAMPip/SAM3D/{job['id']}.png",
+        )
+        self.assertEqual(
+            result["reference"]["sha256"],
+            hashlib.sha256(source.read_bytes()).hexdigest(),
+        )
+        request = json.loads(
+            (bridge_directory(self.vam_root) / "request.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertEqual(request["command"], "showSam3dReference")
+        self.assertEqual(request["expectedJobRevision"], job["revision"])
+        self.assertEqual(
+            request["referenceResourceRef"],
+            f"Custom/Images/VAMPip/SAM3D/{job['id']}.png",
+        )
+        self.assertEqual(request["referenceSha256"], result["reference"]["sha256"])
+        self.assertEqual(request["referenceWidth"], 64)
+        self.assertEqual(request["referenceHeight"], 64)
+        self.assertRegex(request["solutionSha256"], r"^[0-9a-f]{64}$")
+        self.assertNotIn("sourcePath", json.dumps(request))
+
+    def test_reference_staging_is_immutable_and_rejects_symlink_sources(
+        self,
+    ) -> None:
+        manager, job = self.completed_job()
+        service = ManagerService(
+            self.addons,
+            self.state,
+            sam3d_manager=manager,
+        )
+        reference = service._stage_sam3d_reference(manager, job["id"], job)
+        staged = (
+            self.vam_root
+            / Path(str(reference["resource_ref"]))
+        )
+        staged.write_bytes(png_header(32, 32))
+        with self.assertRaisesRegex(FileExistsError, "different data"):
+            service._stage_sam3d_reference(manager, job["id"], job)
+
+        staged.unlink()
+        source, _ = manager.artifact(job["id"], "source")
+        replacement = self.base / "replacement.png"
+        replacement.write_bytes(source.read_bytes())
+        source.unlink()
+        source.symlink_to(replacement)
+        with self.assertRaisesRegex(ValueError, "regular file"):
+            service._stage_sam3d_reference(manager, job["id"], job)
+        source.unlink()
+        source.write_bytes(b"not-a-png")
+        with self.assertRaisesRegex(ValueError, "magic/header"):
+            service._stage_sam3d_reference(manager, job["id"], job)
+
+    def test_apply_keep_reference_stages_without_a_visible_panel(self) -> None:
+        manager, job = self.completed_job()
+        service = ManagerService(
+            self.addons,
+            self.state,
+            process_probe=lambda: [1234],
+            sam3d_manager=manager,
+        )
+        service._require_live_capability = mock.Mock(
+            return_value={
+                "available": True,
+                "vam_running": True,
+                "capabilities": [
+                    "sam3d-apply-v1",
+                    "sam3d-camera-vrfunscript-v1",
+                ],
+                "atoms": [
+                    {"uid": "Person", "type": "Person"},
+                    {
+                        "uid": "SAM Camera",
+                        "type": "Empty",
+                        "sam3dCamera": {"compatible": True},
+                    },
+                ],
+                "sam3d": {
+                    "applied": False,
+                    "reference": {"active": False},
+                },
+            }
+        )
+        result = service.apply_sam3d_result(
+            job["id"],
+            expected_job_revision=job["revision"],
+            target_uid="Person",
+            camera_uid="SAM Camera",
+            keep_reference=True,
+        )
+        request = json.loads(
+            (bridge_directory(self.vam_root) / "request.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        staged = (
+            self.vam_root
+            / "Custom"
+            / "Images"
+            / "VAMPip"
+            / "SAM3D"
+            / f"{job['id']}.png"
+        )
+        self.assertTrue(staged.is_file())
+        self.assertIs(request["keepReference"], True)
+        self.assertEqual(request["expectedJobRevision"], job["revision"])
+        self.assertEqual(
+            request["referenceResourceRef"],
+            f"Custom/Images/VAMPip/SAM3D/{job['id']}.png",
+        )
+        self.assertEqual(
+            request["referenceSha256"],
+            hashlib.sha256(staged.read_bytes()).hexdigest(),
+        )
+        self.assertEqual(request["referenceWidth"], 64)
+        self.assertEqual(request["referenceHeight"], 64)
+        self.assertEqual(result["reference"]["resource_ref"], request["referenceResourceRef"])
+
+    def test_job_decoration_exposes_only_matching_live_reference(self) -> None:
+        manager, job = self.completed_job()
+        service = ManagerService(
+            self.addons,
+            self.state,
+            sam3d_manager=manager,
+        )
+        service._scene_snapshot = mock.Mock(
+            return_value={
+                "available": True,
+                "vam_running": True,
+                "bridge": {"instanceId": "bridge-instance"},
+                "sam3d": {
+                    "applied": False,
+                    "reference": {
+                        "active": True,
+                        "atomUid": "VAMPip SAM3D Reference",
+                        "jobId": job["id"],
+                        "jobRevision": job["revision"],
+                        "solutionRevision": "f" * 32,
+                        "targetUid": "Person",
+                        "sourceWidth": 64,
+                        "sourceHeight": 64,
+                        "alignedToPose": True,
+                    },
+                },
+            }
+        )
+        decorated = service.sam3d_job(job["id"])
+        self.assertEqual(
+            decorated["reference"],
+            {
+                "active": True,
+                "visible": True,
+                "job_id": job["id"],
+                "job_revision": job["revision"],
+                "solution_revision": "f" * 32,
+                "target_uid": "Person",
+                "atom_uid": "VAMPip SAM3D Reference",
+                "aligned_to_pose": True,
+                "mode": "pose-aligned",
+                "source_width": 64,
+                "source_height": 64,
+            },
+        )
+
     def test_solution_reload_recomputes_revision_before_undo(self) -> None:
         manager, job = self.completed_job()
         service = ManagerService(

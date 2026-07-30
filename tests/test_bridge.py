@@ -28,7 +28,10 @@ from vampip.bridge import (
     request_scene_load,
     request_select_atom,
     request_select_person,
+    request_remove_sam3d_reference,
+    request_sam3d_apply,
     request_sam3d_capture,
+    request_sam3d_reference,
     request_subscene_load,
     request_timeline_control,
 )
@@ -101,6 +104,117 @@ class BridgeProtocolTests(unittest.TestCase):
                 solution_sha256="not-a-digest",
                 camera_uid="SAM Camera",
             )
+
+    def test_sam3d_reference_request_is_exactly_job_and_hash_bound(self) -> None:
+        request_id = request_sam3d_reference(
+            self.vam_root,
+            job_id="a" * 32,
+            expected_job_revision="b" * 32,
+            expected_revision="c" * 32,
+            solution_sha256="d" * 64,
+            resource_ref=(
+                "Custom/Images/VAMPip/SAM3D/" + ("a" * 32) + ".png"
+            ),
+            resource_sha256="e" * 64,
+            source_width=1024,
+            source_height=768,
+            target_uid="Person",
+            camera_uid="SAM Camera",
+            create_camera=False,
+        )
+        request = self.read_request()
+        self.assertEqual(request["requestId"], request_id)
+        self.assertEqual(request["command"], "showSam3dReference")
+        self.assertEqual(request["jobId"], "a" * 32)
+        self.assertEqual(request["expectedJobRevision"], "b" * 32)
+        self.assertEqual(request["expectedRevision"], "c" * 32)
+        self.assertEqual(request["solutionSha256"], "d" * 64)
+        self.assertEqual(
+            request["referenceResourceRef"],
+            "Custom/Images/VAMPip/SAM3D/" + ("a" * 32) + ".png",
+        )
+        self.assertEqual(request["referenceSha256"], "e" * 64)
+        self.assertEqual(request["referenceWidth"], 1024)
+        self.assertEqual(request["referenceHeight"], 768)
+        self.assertEqual(request["targetUid"], "Person")
+        self.assertEqual(request["cameraUid"], "SAM Camera")
+        self.assertIs(request["createCamera"], False)
+        self.assertNotIn("sourcePath", request)
+
+        with self.assertRaisesRegex(ValueError, "exactly match"):
+            request_sam3d_reference(
+                self.vam_root,
+                job_id="a" * 32,
+                expected_job_revision="b" * 32,
+                expected_revision="c" * 32,
+                solution_sha256="d" * 64,
+                resource_ref=(
+                    "Custom/Images/VAMPip/SAM3D/" + ("f" * 32) + ".png"
+                ),
+                resource_sha256="e" * 64,
+                source_width=1024,
+                source_height=768,
+                target_uid="Person",
+                camera_uid="SAM Camera",
+                create_camera=False,
+            )
+
+    def test_sam3d_apply_only_carries_reference_metadata_when_requested(
+        self,
+    ) -> None:
+        common = {
+            "job_id": "a" * 32,
+            "expected_revision": "c" * 32,
+            "solution_sha256": "d" * 64,
+            "target_uid": "Person",
+            "camera_uid": "SAM Camera",
+            "create_camera": False,
+        }
+        request_sam3d_apply(self.vam_root, **common)
+        request = self.read_request()
+        self.assertIs(request["keepReference"], False)
+        self.assertNotIn("referenceResourceRef", request)
+
+        request_sam3d_apply(
+            self.vam_root,
+            **common,
+            keep_reference=True,
+            expected_job_revision="b" * 32,
+            resource_ref=(
+                "Custom/Images/VAMPip/SAM3D/" + ("a" * 32) + ".jpg"
+            ),
+            resource_sha256="e" * 64,
+            source_width=640,
+            source_height=480,
+        )
+        request = self.read_request()
+        self.assertIs(request["keepReference"], True)
+        self.assertEqual(request["expectedJobRevision"], "b" * 32)
+        self.assertEqual(
+            request["referenceResourceRef"],
+            "Custom/Images/VAMPip/SAM3D/" + ("a" * 32) + ".jpg",
+        )
+        self.assertEqual(request["referenceSha256"], "e" * 64)
+        self.assertEqual(request["referenceWidth"], 640)
+        self.assertEqual(request["referenceHeight"], 480)
+
+        with self.assertRaisesRegex(ValueError, "requires"):
+            request_sam3d_apply(
+                self.vam_root,
+                **common,
+                keep_reference=True,
+            )
+
+    def test_remove_sam3d_reference_is_job_revision_bound(self) -> None:
+        request_remove_sam3d_reference(
+            self.vam_root,
+            job_id="a" * 32,
+            expected_job_revision="b" * 32,
+        )
+        request = self.read_request()
+        self.assertEqual(request["command"], "removeSam3dReference")
+        self.assertEqual(request["jobId"], "a" * 32)
+        self.assertEqual(request["expectedJobRevision"], "b" * 32)
 
     def test_timeline_control_uses_only_opaque_revision_bound_fields(self) -> None:
         request_id = request_timeline_control(

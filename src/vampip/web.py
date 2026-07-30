@@ -53,6 +53,7 @@ _SAM3D_SELECT = re.compile(r"^/api/sam3d/jobs/([0-9a-f]{32})/select$")
 _SAM3D_APPLY = re.compile(r"^/api/sam3d/jobs/([0-9a-f]{32})/apply$")
 _SAM3D_UNDO = re.compile(r"^/api/sam3d/jobs/([0-9a-f]{32})/undo$")
 _SAM3D_CAPTURE = re.compile(r"^/api/sam3d/jobs/([0-9a-f]{32})/capture$")
+_SAM3D_REFERENCE = re.compile(r"^/api/sam3d/jobs/([0-9a-f]{32})/reference$")
 _TOKEN_IN_LOG = re.compile(r"([?&]token=)[^&\s\"]+")
 
 
@@ -894,7 +895,12 @@ class ManagerRequestHandler(BaseHTTPRequestHandler):
                 self._json(HTTPStatus.CREATED, result)
                 return
 
-            document = self._read_json() if method == "POST" else {}
+            sam3d_reference = _SAM3D_REFERENCE.fullmatch(parsed.path)
+            document = (
+                self._read_json()
+                if method == "POST" or (method == "DELETE" and sam3d_reference)
+                else {}
+            )
             sam3d_body = _SAM3D_BODY_PROPORTIONS.fullmatch(parsed.path)
             if method == "POST" and sam3d_body:
                 action = document.get("action")
@@ -1042,6 +1048,70 @@ class ManagerRequestHandler(BaseHTTPRequestHandler):
                 self._sam3d_job_links(result)
                 self._json(HTTPStatus.OK, result)
                 return
+            if method == "POST" and sam3d_reference:
+                allowed_fields = {
+                    "expected_job_revision",
+                    "target_uid",
+                    "person_index",
+                    "height_m",
+                    "horizontal_fov",
+                    "camera_uid",
+                    "create_camera",
+                }
+                unexpected_fields = sorted(set(document) - allowed_fields)
+                if unexpected_fields:
+                    raise ValueError(
+                        "unsupported SAM3D reference field(s): "
+                        + ", ".join(unexpected_fields)
+                    )
+                missing = sorted(
+                    {
+                        "expected_job_revision",
+                        "target_uid",
+                        "person_index",
+                        "height_m",
+                        "camera_uid",
+                        "create_camera",
+                    }
+                    - set(document)
+                )
+                if missing:
+                    raise ValueError(
+                        "missing SAM3D reference field(s): " + ", ".join(missing)
+                    )
+                self._json(
+                    HTTPStatus.ACCEPTED,
+                    service.show_sam3d_reference(
+                        sam3d_reference.group(1),
+                        expected_job_revision=document["expected_job_revision"],
+                        target_uid=document["target_uid"],
+                        person_index=document["person_index"],
+                        height_m=document["height_m"],
+                        horizontal_fov=document.get("horizontal_fov"),
+                        camera_uid=document["camera_uid"],
+                        create_camera=document["create_camera"],
+                    ),
+                )
+                return
+            if method == "DELETE" and sam3d_reference:
+                unexpected_fields = sorted(
+                    set(document) - {"expected_job_revision"}
+                )
+                if unexpected_fields:
+                    raise ValueError(
+                        "unsupported SAM3D reference removal field(s): "
+                        + ", ".join(unexpected_fields)
+                    )
+                if "expected_job_revision" not in document:
+                    raise ValueError("expected_job_revision is required")
+                self._json(
+                    HTTPStatus.ACCEPTED,
+                    service.remove_sam3d_reference(
+                        sam3d_reference.group(1),
+                        expected_job_revision=document["expected_job_revision"],
+                    ),
+                )
+                return
             if method == "POST" and sam3d_apply:
                 allowed_fields = {
                     "expected_job_revision",
@@ -1054,6 +1124,7 @@ class ManagerRequestHandler(BaseHTTPRequestHandler):
                     "output_resolution",
                     "image_format",
                     "horizontal_fov",
+                    "keep_reference",
                 }
                 unexpected_fields = sorted(set(document) - allowed_fields)
                 if unexpected_fields:
@@ -1090,6 +1161,7 @@ class ManagerRequestHandler(BaseHTTPRequestHandler):
                         ),
                         image_format=document.get("image_format", "jpeg"),
                         horizontal_fov=document.get("horizontal_fov"),
+                        keep_reference=document.get("keep_reference", False),
                     ),
                 )
                 return

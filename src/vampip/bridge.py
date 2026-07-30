@@ -18,6 +18,7 @@ MAX_RESOURCE_REF_LENGTH = 1000
 SCENE_RESOURCE_PREFIX = "Saves/scene/"
 SUBSCENE_RESOURCE_PREFIX = "Custom/SubScene/"
 CUSTOM_UNITY_ASSET_RESOURCE_PREFIX = "Custom/Assets/"
+SAM3D_REFERENCE_RESOURCE_PREFIX = "Custom/Images/VAMPip/SAM3D/"
 CLOTHING_RESOURCE_PREFIXES = (
     "Custom/Clothing/Female/",
     "Custom/Clothing/Male/",
@@ -871,25 +872,181 @@ def request_sam3d_apply(
     target_uid: str,
     camera_uid: str,
     create_camera: bool,
+    keep_reference: bool = False,
+    expected_job_revision: str | None = None,
+    resource_ref: str | None = None,
+    resource_sha256: str | None = None,
+    source_width: int | None = None,
+    source_height: int | None = None,
 ) -> str:
     if not isinstance(create_camera, bool):
         raise TypeError("create_camera must be a bool")
+    if not isinstance(keep_reference, bool):
+        raise TypeError("keep_reference must be a bool")
+    reference_fields = (
+        expected_job_revision,
+        resource_ref,
+        resource_sha256,
+        source_width,
+        source_height,
+    )
+    if keep_reference:
+        if any(value is None for value in reference_fields):
+            raise ValueError(
+                "keep_reference requires the exact staged reference metadata"
+            )
+    elif any(value is not None for value in reference_fields):
+        raise ValueError(
+            "staged reference metadata is only valid when keep_reference is true"
+        )
+    document: dict[str, object] = {
+        "command": "applySam3dResult",
+        "jobId": _validate_opaque_token(job_id, label="job_id"),
+        "expectedRevision": _validate_opaque_token(
+            expected_revision,
+            label="expected_revision",
+        ),
+        "solutionSha256": _validate_sha256(
+            solution_sha256,
+            label="solution_sha256",
+        ),
+        "targetUid": _validate_target_uid(target_uid),
+        "cameraUid": _validate_target_uid(camera_uid),
+        "createCamera": create_camera,
+        "keepReference": keep_reference,
+    }
+    if keep_reference:
+        document.update(
+            _sam3d_reference_request_fields(
+                job_id=job_id,
+                expected_job_revision=expected_job_revision,
+                resource_ref=resource_ref,
+                resource_sha256=resource_sha256,
+                source_width=source_width,
+                source_height=source_height,
+            )
+        )
+    return _write_request(
+        vam_root,
+        document,
+    )
+
+
+def _sam3d_reference_request_fields(
+    *,
+    job_id: str,
+    expected_job_revision: object,
+    resource_ref: object,
+    resource_sha256: object,
+    source_width: object,
+    source_height: object,
+) -> dict[str, object]:
+    job_id = _validate_opaque_token(job_id, label="job_id")
+    expected_job_revision = _validate_opaque_token(
+        expected_job_revision,
+        label="expected_job_revision",
+    )
+    if not isinstance(resource_ref, str):
+        raise TypeError("resource_ref must be a string")
+    extension = Path(resource_ref).suffix.casefold()
+    if extension not in {".jpg", ".jpeg", ".png"}:
+        raise ValueError("SAM3D reference resource_ref must name a JPG or PNG image")
+    _validate_allowlisted_resource_ref(
+        resource_ref,
+        required_prefix=SAM3D_REFERENCE_RESOURCE_PREFIX,
+        extension=extension,
+        require_preset_basename=False,
+    )
+    expected_ref = f"{SAM3D_REFERENCE_RESOURCE_PREFIX}{job_id}{extension}"
+    if resource_ref != expected_ref:
+        raise ValueError(
+            "SAM3D reference resource_ref must exactly match its job ID"
+        )
+    resource_sha256 = _validate_sha256(
+        resource_sha256,
+        label="resource_sha256",
+    )
+    dimensions: list[int] = []
+    for label, value in (
+        ("source_width", source_width),
+        ("source_height", source_height),
+    ):
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise TypeError(f"{label} must be an int")
+        if value < 1 or value > 32_768:
+            raise ValueError(f"{label} must be between 1 and 32768")
+        dimensions.append(value)
+    if dimensions[0] * dimensions[1] > 50_000_000:
+        raise ValueError("SAM3D reference dimensions exceed the safe pixel limit")
+    return {
+        "expectedJobRevision": expected_job_revision,
+        "referenceResourceRef": resource_ref,
+        "referenceSha256": resource_sha256,
+        "referenceWidth": dimensions[0],
+        "referenceHeight": dimensions[1],
+    }
+
+
+def request_sam3d_reference(
+    vam_root: Path,
+    *,
+    job_id: str,
+    expected_job_revision: str,
+    expected_revision: str,
+    solution_sha256: str,
+    resource_ref: str,
+    resource_sha256: str,
+    source_width: int,
+    source_height: int,
+    target_uid: str,
+    camera_uid: str,
+    create_camera: bool,
+) -> str:
+    if not isinstance(create_camera, bool):
+        raise TypeError("create_camera must be a bool")
+    document: dict[str, object] = {
+        "command": "showSam3dReference",
+        "jobId": _validate_opaque_token(job_id, label="job_id"),
+        "expectedRevision": _validate_opaque_token(
+            expected_revision,
+            label="expected_revision",
+        ),
+        "solutionSha256": _validate_sha256(
+            solution_sha256,
+            label="solution_sha256",
+        ),
+        "targetUid": _validate_target_uid(target_uid),
+        "cameraUid": _validate_target_uid(camera_uid),
+        "createCamera": create_camera,
+    }
+    document.update(
+        _sam3d_reference_request_fields(
+            job_id=job_id,
+            expected_job_revision=expected_job_revision,
+            resource_ref=resource_ref,
+            resource_sha256=resource_sha256,
+            source_width=source_width,
+            source_height=source_height,
+        )
+    )
+    return _write_request(vam_root, document)
+
+
+def request_remove_sam3d_reference(
+    vam_root: Path,
+    *,
+    job_id: str,
+    expected_job_revision: str,
+) -> str:
     return _write_request(
         vam_root,
         {
-            "command": "applySam3dResult",
+            "command": "removeSam3dReference",
             "jobId": _validate_opaque_token(job_id, label="job_id"),
-            "expectedRevision": _validate_opaque_token(
-                expected_revision,
-                label="expected_revision",
+            "expectedJobRevision": _validate_opaque_token(
+                expected_job_revision,
+                label="expected_job_revision",
             ),
-            "solutionSha256": _validate_sha256(
-                solution_sha256,
-                label="solution_sha256",
-            ),
-            "targetUid": _validate_target_uid(target_uid),
-            "cameraUid": _validate_target_uid(camera_uid),
-            "createCamera": create_camera,
         },
     )
 
