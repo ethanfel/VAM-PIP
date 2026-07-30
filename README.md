@@ -292,6 +292,14 @@ stable cache so the exact undo cannot be bound to a stale mesh.
 choosing another pose image does not replace, reset, or re-analyze the Morph
 reference set.
 
+Morph can also place its full source image on a tool-owned, unlit image panel
+inside the VaM scene. The immutable copy is staged below
+`Custom/Images/VAMPip/SAM3D`, rather than `/tmp`, and can be updated or hidden
+from the workspace. **Keep reference aligned** is enabled by default in
+**Pose + camera**: applying a pose moves the panel with the inferred camera so
+the Person can be compared against the original frame. Pose undo restores the
+panel together with the Person and camera.
+
 Applying Structure and Body Shape creates one exact Person-wide undo snapshot
 and one atomic bridge request; another fit cannot replace that snapshot until
 it is restored. Body Scale, face morphs, materials, and breast/glute soft-body
