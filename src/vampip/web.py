@@ -911,6 +911,7 @@ class ManagerRequestHandler(BaseHTTPRequestHandler):
                     "fit_strength",
                     "shape_regions",
                     "shape_strength",
+                    "manual_shape",
                     "references",
                 }
                 action_fields = {
@@ -962,6 +963,11 @@ class ManagerRequestHandler(BaseHTTPRequestHandler):
                 shape_regions = document.get("shape_regions", [])
                 if "shape_regions" in document and not isinstance(shape_regions, list):
                     raise ValueError("shape_regions must be a list")
+                if "manual_shape" in document and not isinstance(
+                    document["manual_shape"],
+                    dict,
+                ):
+                    raise ValueError("manual_shape must be an object")
                 body_options = {
                     "target_uid": document["target_uid"],
                     "person_index": person_index,
@@ -976,6 +982,8 @@ class ManagerRequestHandler(BaseHTTPRequestHandler):
                             "shape_regions": shape_regions,
                         }
                     )
+                if "manual_shape" in document:
+                    body_options["manual_shape"] = document["manual_shape"]
                 result = service.sam3d_body_proportions(
                     sam3d_body.group(1),
                     **body_options,

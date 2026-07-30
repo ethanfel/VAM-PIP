@@ -55,6 +55,8 @@ from vampip.body_proportions import (
 from vampip.body_shape import (
     build_body_shape_analysis,
     live_body_shape,
+    manual_shape_regions,
+    normalize_manual_shape,
     normalize_shape_regions,
     normalize_shape_strength,
 )
@@ -1293,8 +1295,9 @@ def _public_body_proportions(value: object) -> dict[str, object] | None:
                         )
                         if response is not None:
                             responses[metric] = response
-                if shape_region in BODY_SHAPE_REGIONS and responses:
+                if shape_region in BODY_SHAPE_REGIONS:
                     public_morph["shapeRegion"] = shape_region
+                if responses:
                     public_morph["shapeResponses"] = responses
             morphs.append(public_morph)
 
@@ -2709,6 +2712,7 @@ class ManagerService:
         regions: object = None,
         shape_strength: object = 0.5,
         shape_regions: object = (),
+        manual_shape: object = None,
     ) -> dict[str, object]:
         job_id = validate_sam3d_job_id(job_id)
         reference_values = _normalize_sam3d_body_references(
@@ -2720,7 +2724,12 @@ class ManagerService:
         region_values = normalize_body_proportion_regions(regions)
         shape_strength_value = normalize_shape_strength(shape_strength)
         shape_region_values = normalize_shape_regions(shape_regions)
-        shape_enabled = bool(shape_region_values)
+        manual_shape_value = normalize_manual_shape(manual_shape)
+        manual_shape_region_values = manual_shape_regions(manual_shape_value)
+        manual_shape_offsets = manual_shape_value["offsets"]
+        assert isinstance(manual_shape_offsets, dict)
+        manual_shape_enabled = bool(manual_shape_offsets)
+        shape_enabled = bool(shape_region_values or manual_shape_enabled)
         scene = self._require_live_capability(
             ("person-body-shape-v1" if shape_enabled else "person-body-proportions-v1"),
             action_label="analyzing body proportions",
@@ -2881,6 +2890,7 @@ class ManagerService:
                 body_status,
                 strength=shape_strength_value,
                 regions=shape_region_values,
+                manual_shape=manual_shape_value,
             )
         shape_changes = (
             list(shape_analysis["changes"]) if shape_analysis is not None else []
@@ -2915,6 +2925,19 @@ class ManagerService:
             shape_analysis["current"] if shape_analysis is not None else None
         )
         analysis["shape_reference_disagreement"] = shape_reference_disagreement
+        if manual_shape_enabled and shape_analysis is not None:
+            analysis["manual_shape"] = manual_shape_value
+            analysis["manual_shape_regions"] = sorted(
+                manual_shape_region_values
+            )
+            analysis["automatic_shape_changes"] = shape_analysis.get(
+                "automatic_changes",
+                [],
+            )
+            analysis["manual_shape_changes"] = shape_analysis.get(
+                "manual_changes",
+                [],
+            )
         analysis["changes"] = combined_changes
         analysis["canApply"] = bool(
             analysis["ready"]
@@ -3033,6 +3056,7 @@ class ManagerService:
         regions: object = None,
         shape_strength: object = 0.5,
         shape_regions: object = (),
+        manual_shape: object = None,
     ) -> dict[str, object]:
         expected_job_revision = self._sam3d_solution_revision(
             expected_job_revision,
@@ -3051,6 +3075,7 @@ class ManagerService:
             regions=regions,
             shape_strength=shape_strength,
             shape_regions=shape_regions,
+            manual_shape=manual_shape,
         )
         if analysis["job_revision"] != expected_job_revision:
             raise ValueError("SAM3D job revision has changed; analyze again")

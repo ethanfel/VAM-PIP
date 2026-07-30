@@ -19,12 +19,32 @@ from vampip.sam3d_body_shape import (
 
 
 BODY_SHAPE_SCHEMA = 1
+MANUAL_BODY_SHAPE_SCHEMA = 1
 _OPAQUE_TOKEN = re.compile(r"^[0-9a-f]{32}$")
 _MAX_VALUE_CHANGE = 0.25
 _MAX_RELATIVE_TARGET = 0.15
 _MIN_RELATIVE_TARGET = 0.0125
 _MIN_CONFIDENCE = 0.30
 _MAX_LIVE_MORPHS = 64
+_MANUAL_SHAPE_VALUE_PRECISION = 6
+
+# ChestSeparateBreasts' positive direction increases separation.  Keeping the
+# direction named and server-owned prevents a WebUI client from choosing an
+# arbitrary morph or reversing its semantics.
+_BREAST_SPACING_DIRECTION = 1.0
+
+_MANUAL_SHAPE_TARGETS = {
+    "breast_size": ("breasts", "Breasts Size", 1.0),
+    "breast_spacing": (
+        "breasts",
+        "ChestSeparateBreasts",
+        _BREAST_SPACING_DIRECTION,
+    ),
+    "waist_width": ("waist", "Waist Width", 1.0),
+    "hip_width": ("hips", "Hip Size", 1.0),
+    "glute_projection": ("glutes", "Glutes Size", 1.0),
+    "thigh_size": ("thighs", "Thighs Size", 1.0),
+}
 
 _MORPH_TARGETS = (
     ("breasts", "Breasts Size"),
@@ -115,6 +135,59 @@ def normalize_shape_regions(value: object) -> frozenset[str]:
     return frozenset(result)
 
 
+def normalize_manual_shape(value: object) -> dict[str, object]:
+    """Return one canonical, bounded semantic manual-shape request.
+
+    The browser may select only semantic controls.  Morph identifiers, names,
+    absolute values, and revision tokens are deliberately absent from this
+    contract and are resolved again from the live bridge catalog.
+    """
+
+    if value is None:
+        return {"schema": MANUAL_BODY_SHAPE_SCHEMA, "offsets": {}}
+    if not isinstance(value, dict) or set(value) != {"schema", "offsets"}:
+        raise ValueError("manual_shape must contain only schema and offsets")
+    schema = value.get("schema")
+    if (
+        isinstance(schema, bool)
+        or not isinstance(schema, int)
+        or schema != MANUAL_BODY_SHAPE_SCHEMA
+    ):
+        raise ValueError("manual_shape schema is unsupported")
+    raw_offsets = value.get("offsets")
+    if not isinstance(raw_offsets, dict):
+        raise ValueError("manual_shape offsets must be an object")
+    unexpected = sorted(set(raw_offsets) - set(_MANUAL_SHAPE_TARGETS))
+    if unexpected:
+        raise ValueError(
+            "manual_shape contains unsupported offset(s): "
+            + ", ".join(unexpected)
+        )
+    offsets: dict[str, float] = {}
+    for control in _MANUAL_SHAPE_TARGETS:
+        if control not in raw_offsets:
+            continue
+        offset = _finite_number(
+            raw_offsets[control],
+            label=f"manual_shape offsets.{control}",
+            minimum=-1.0,
+            maximum=1.0,
+        )
+        offset = round(offset, _MANUAL_SHAPE_VALUE_PRECISION)
+        if offset != 0.0:
+            offsets[control] = offset
+    return {"schema": MANUAL_BODY_SHAPE_SCHEMA, "offsets": offsets}
+
+
+def manual_shape_regions(value: object) -> frozenset[str]:
+    normalized = normalize_manual_shape(value)
+    offsets = normalized["offsets"]
+    assert isinstance(offsets, dict)
+    return frozenset(
+        _MANUAL_SHAPE_TARGETS[control][0] for control in offsets
+    )
+
+
 def live_body_shape(value: object) -> dict[str, object]:
     """Validate and return the bridge's neutral-mesh shape signature."""
 
@@ -135,7 +208,11 @@ def _measurement(
     return float(item["ratio"]), float(item["confidence"])
 
 
-def _live_shape_morphs(value: object) -> list[dict[str, object]]:
+def _live_shape_morphs(
+    value: object,
+    *,
+    require_responses: bool = True,
+) -> list[dict[str, object]]:
     if not isinstance(value, list):
         return []
     result: list[dict[str, object]] = []
@@ -178,23 +255,24 @@ def _live_shape_morphs(value: object) -> list[dict[str, object]]:
             continue
         if minimum > maximum or not minimum <= current <= maximum:
             continue
-        raw_responses = raw.get("shapeResponses")
-        if not isinstance(raw_responses, dict):
-            continue
         responses: dict[str, float] = {}
-        try:
-            for metric, response in raw_responses.items():
-                if metric not in BODY_SHAPE_METRICS:
-                    continue
-                responses[metric] = _finite_number(
-                    response,
-                    label=f"{name} {metric} response",
-                    minimum=-10.0,
-                    maximum=10.0,
-                )
-        except ValueError:
+        raw_responses = raw.get("shapeResponses")
+        if raw_responses is not None and not isinstance(raw_responses, dict):
             continue
-        if not responses:
+        if isinstance(raw_responses, dict):
+            try:
+                for metric, response in raw_responses.items():
+                    if metric not in BODY_SHAPE_METRICS:
+                        continue
+                    responses[metric] = _finite_number(
+                        response,
+                        label=f"{name} {metric} response",
+                        minimum=-10.0,
+                        maximum=10.0,
+                    )
+            except ValueError:
+                continue
+        if require_responses and not responses:
             continue
         seen.add(key)
         result.append(
@@ -209,6 +287,120 @@ def _live_shape_morphs(value: object) -> list[dict[str, object]]:
             }
         )
     return result
+
+
+def _apply_manual_shape_offsets(
+    automatic_changes: list[dict[str, object]],
+    body_status: dict[str, object],
+    manual_shape: dict[str, object],
+) -> tuple[
+    list[dict[str, object]],
+    list[dict[str, object]],
+    list[dict[str, object]],
+]:
+    """Merge semantic corrections into server-derived automatic proposals."""
+
+    offsets = manual_shape["offsets"]
+    assert isinstance(offsets, dict)
+    if not offsets:
+        return automatic_changes, [], []
+
+    available = _live_shape_morphs(
+        body_status.get("morphs"),
+        require_responses=False,
+    )
+    changes = [dict(change) for change in automatic_changes]
+    change_positions = {
+        str(change.get("key")): index
+        for index, change in enumerate(changes)
+        if isinstance(change.get("key"), str)
+    }
+    manual_changes: list[dict[str, object]] = []
+    unavailable: list[dict[str, object]] = []
+
+    for control, semantic_offset in offsets.items():
+        region, name, direction = _MANUAL_SHAPE_TARGETS[control]
+        candidate, reason = _candidate_for_name(available, name, region)
+        if candidate is None:
+            unavailable.append(
+                {
+                    "region": region,
+                    "control": control,
+                    "reason": reason or "",
+                }
+            )
+            continue
+
+        key = str(candidate["key"])
+        current = float(candidate["value"])
+        position = change_positions.get(key)
+        automatic_value = (
+            float(changes[position]["value"])
+            if position is not None
+            else current
+        )
+        requested_offset = (
+            float(semantic_offset) * _MAX_VALUE_CHANGE * float(direction)
+        )
+        lower = max(float(candidate["min"]), current - _MAX_VALUE_CHANGE)
+        upper = min(float(candidate["max"]), current + _MAX_VALUE_CHANGE)
+        proposed = max(lower, min(upper, automatic_value + requested_offset))
+        applied_offset = proposed - automatic_value
+        limited = not math.isclose(
+            applied_offset,
+            requested_offset,
+            rel_tol=0.0,
+            abs_tol=1e-9,
+        )
+        manual_changes.append(
+            {
+                "control": control,
+                "region": region,
+                "name": name,
+                "semanticOffset": float(semantic_offset),
+                "requestedOffset": requested_offset,
+                "appliedOffset": applied_offset,
+                "limited": limited,
+            }
+        )
+
+        if abs(proposed - current) < 1e-5:
+            if position is not None:
+                changes.pop(position)
+                change_positions = {
+                    str(change.get("key")): index
+                    for index, change in enumerate(changes)
+                    if isinstance(change.get("key"), str)
+                }
+            continue
+
+        if position is None:
+            changes.append(
+                {
+                    "key": key,
+                    "name": name,
+                    "region": region,
+                    "fitKind": "shape",
+                    "from": current,
+                    "value": proposed,
+                    "delta": proposed - current,
+                    "metrics": [],
+                    "manualControl": control,
+                    "automaticValue": current,
+                    "manualOffset": applied_offset,
+                }
+            )
+            change_positions[key] = len(changes) - 1
+            continue
+
+        change = changes[position]
+        change["value"] = proposed
+        change["delta"] = proposed - current
+        change["manualControl"] = control
+        change["automaticValue"] = automatic_value
+        change["manualOffset"] = applied_offset
+
+    return changes, manual_changes, unavailable
 
 
 def _solve_linear(matrix: list[list[float]], vector: list[float]) -> list[float]:
@@ -297,6 +489,7 @@ def build_body_shape_analysis(
     *,
     strength: object,
     regions: object,
+    manual_shape: object = None,
 ) -> dict[str, object]:
     """Compare target/live neutral meshes and propose one bounded joint fit."""
 
@@ -304,6 +497,7 @@ def build_body_shape_analysis(
     validate_body_shape(live)
     strength_value = normalize_shape_strength(strength)
     region_values = normalize_shape_regions(regions)
+    manual_shape_value = normalize_manual_shape(manual_shape)
 
     rows: list[dict[str, object]] = []
     for metric in BODY_SHAPE_METRICS:
@@ -431,7 +625,15 @@ def build_body_shape_analysis(
                 }
             )
 
-    return {
+    automatic_changes = changes
+    changes, manual_changes, manual_unavailable = _apply_manual_shape_offsets(
+        automatic_changes,
+        body_status,
+        manual_shape_value,
+    )
+    unavailable.extend(manual_unavailable)
+
+    result: dict[str, object] = {
         "schema": BODY_SHAPE_SCHEMA,
         "strength": strength_value,
         "regions": sorted(region_values),
@@ -446,3 +648,17 @@ def build_body_shape_analysis(
             "physics settings are excluded."
         ),
     }
+    offsets = manual_shape_value["offsets"]
+    assert isinstance(offsets, dict)
+    if offsets:
+        result.update(
+            {
+                "manual_shape": manual_shape_value,
+                "manual_shape_regions": sorted(
+                    manual_shape_regions(manual_shape_value)
+                ),
+                "automatic_changes": automatic_changes,
+                "manual_changes": manual_changes,
+            }
+        )
+    return result

@@ -1491,12 +1491,21 @@ class BridgeSourceTests(unittest.TestCase):
         )
         for shape_morph in (
             "Breasts Size",
+            "ChestSeparateBreasts",
             "Waist Width",
             "Hip Size",
             "Glutes Size",
             "Thighs Size",
         ):
             self.assertIn(f'"{shape_morph}"', catalog_source)
+        self.assertIn(
+            'name != "ChestSeparateBreasts"',
+            catalog_source,
+        )
+        self.assertIn(
+            "IsBodyShapeCalibrationMorphName(entry.Name)",
+            catalog_source,
+        )
         self.assertIn("entry.FitKind =", catalog_source)
         self.assertIn('"structure"', catalog_source)
         self.assertIn('"shape"', catalog_source)

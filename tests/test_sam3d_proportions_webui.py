@@ -84,9 +84,10 @@ class Sam3dBodyProportionsWebUITests(unittest.TestCase):
             with self.subTest(control_id=control_id):
                 self.assertIn(f'id="{control_id}"', self.html)
         self.assertIn(
-            'const SAM3D_BODY_PROFILE_STORAGE_KEY = "vampip-sam3d-body-profiles-v3"',
+            'const SAM3D_BODY_PROFILE_STORAGE_KEY = "vampip-sam3d-body-profiles-v4"',
             self.javascript,
         )
+        self.assertIn('"vampip-sam3d-body-profiles-v3"', self.javascript)
         self.assertIn('"vampip-sam3d-body-profiles-v2"', self.javascript)
         self.assertIn(
             '"vampip-sam3d-body-profiles-v1"',
@@ -106,6 +107,10 @@ class Sam3dBodyProportionsWebUITests(unittest.TestCase):
             "reference_jobs:",
             "job_id:",
             "person_index:",
+            "manual_fit_mode:",
+            "manual_shape:",
+            "manual_reference:",
+            "manual_overlay:",
         ):
             with self.subTest(safe_field=safe_field):
                 self.assertIn(safe_field, persist)
@@ -119,7 +124,7 @@ class Sam3dBodyProportionsWebUITests(unittest.TestCase):
             with self.subTest(unsafe_field=unsafe_field):
                 self.assertNotIn(unsafe_field, persist)
         self.assertNotIn("reference_job_id:", persist)
-        self.assertIn("JSON.stringify({ schema: 3, profiles })", persist)
+        self.assertIn("JSON.stringify({ schema: 4, profiles })", persist)
         normalize_start = self.javascript.index("function normalizeSam3dBodyProfile(")
         normalize_end = self.javascript.index(
             "function loadSam3dBodyProfiles(", normalize_start
@@ -127,7 +132,8 @@ class Sam3dBodyProportionsWebUITests(unittest.TestCase):
         normalize = self.javascript[normalize_start:normalize_end]
         self.assertIn("raw.reference_job_id", normalize)
         self.assertIn("raw.reference_person_index", normalize)
-        self.assertIn("never live morph values or revisions", self.html)
+        self.assertIn("Morph-reference preferences—never live", self.html)
+        self.assertIn("morph values or revisions", self.html)
 
     @unittest.skipUnless(shutil.which("node"), "Node.js is not installed")
     def test_profile_reference_migration_is_deduplicated_and_bounded(self) -> None:
@@ -145,11 +151,15 @@ class Sam3dBodyProportionsWebUITests(unittest.TestCase):
             "const SAM3D_BODY_REFERENCE_MAX_COUNT = 8;\n"
             'const SAM3D_BODY_PROPORTION_REGIONS = ["arms", "legs", "torso", "widths"];\n'
             'const SAM3D_BODY_SHAPE_REGIONS = ["breasts", "waist", "hips", "glutes", "thighs"];\n'
+            'const SAM3D_MANUAL_SHAPE_KEYS = ["breast_size", "breast_spacing", "waist_width", "hip_width", "glute_projection", "thigh_size"];\n'
             "const asArray = (value) => Array.isArray(value) ? value : [];\n"
             "const integerValue = (value) => {\n"
             "  const number = Number(value);\n"
             "  return Number.isInteger(number) ? number : null;\n"
             "};\n"
+            "const normalizeSam3dManualShape = (raw = {}) => ({ schema: 1, offsets: Object.fromEntries(SAM3D_MANUAL_SHAPE_KEYS.map((key) => [key, Math.max(-1, Math.min(1, Number(raw?.offsets?.[key]) || 0))])) });\n"
+            "const sam3dManualShapeHasCorrections = (raw) => Object.values(normalizeSam3dManualShape(raw).offsets).some((value) => Math.abs(value) > 1e-6);\n"
+            "const normalizeSam3dManualOverlay = (raw = {}) => ({ panX: Number(raw.pan_x ?? raw.panX) || 0, panY: Number(raw.pan_y ?? raw.panY) || 0, scale: Number(raw.scale) || 1, opacity: Number(raw.opacity) || 0.55 });\n"
             f"{self.javascript[helpers_start:helpers_end]}\n"
             f"{self.javascript[profile_start:profile_end]}\n"
             """
@@ -229,7 +239,7 @@ process.stdout.write(JSON.stringify({
         self.assertTrue(all(":" in token for token in tokens))
 
     @unittest.skipUnless(shutil.which("node"), "Node.js is not installed")
-    def test_v2_profiles_migrate_to_v3_without_enabling_shape(self) -> None:
+    def test_v2_profiles_migrate_to_v4_without_enabling_shape_or_manual_fit(self) -> None:
         profile_start = self.javascript.index("function normalizeSam3dBodyProfile(")
         profile_end = self.javascript.index(
             "function selectedSam3dBodyProfile(", profile_start
@@ -239,12 +249,18 @@ process.stdout.write(JSON.stringify({
             "const SAM3D_JOB_ID_PATTERN = /^[0-9a-f]{32}$/i;\n"
             'const SAM3D_BODY_PROPORTION_REGIONS = ["arms", "legs", "torso", "widths"];\n'
             'const SAM3D_BODY_SHAPE_REGIONS = ["breasts", "waist", "hips", "glutes", "thighs"];\n'
-            'const SAM3D_BODY_PROFILE_STORAGE_KEY = "vampip-sam3d-body-profiles-v3";\n'
+            'const SAM3D_MANUAL_SHAPE_KEYS = ["breast_size", "breast_spacing", "waist_width", "hip_width", "glute_projection", "thigh_size"];\n'
+            'const SAM3D_BODY_PROFILE_STORAGE_KEY = "vampip-sam3d-body-profiles-v4";\n'
+            'const SAM3D_BODY_PROFILE_V3_STORAGE_KEY = "vampip-sam3d-body-profiles-v3";\n'
             'const SAM3D_BODY_PROFILE_V2_STORAGE_KEY = "vampip-sam3d-body-profiles-v2";\n'
             'const SAM3D_BODY_PROFILE_V1_STORAGE_KEY = "vampip-sam3d-body-profiles-v1";\n'
             "const SAM3D_BODY_PROFILE_MAX_COUNT = 24;\n"
             "const asArray = (value) => Array.isArray(value) ? value : [];\n"
             "const normalizeSam3dBodyReferences = () => [];\n"
+            "const normalizeSam3dBodyReference = () => null;\n"
+            'const normalizeSam3dManualShape = () => ({ schema: 1, offsets: { breast_size: 0, breast_spacing: 0, waist_width: 0, hip_width: 0, glute_projection: 0, thigh_size: 0 } });\n'
+            "const sam3dManualShapeHasCorrections = () => false;\n"
+            "const normalizeSam3dManualOverlay = () => ({ panX: 0, panY: 0, scale: 1, opacity: 0.55 });\n"
             "const app = { sam3dBodyProfiles: [] };\n"
             "const writes = [];\n"
             'const legacyId = "a".repeat(32);\n'
@@ -288,7 +304,12 @@ process.stdout.write(JSON.stringify({
 
         self.assertEqual(result["profile"]["shapeRegions"], [])
         self.assertEqual(result["profile"]["shapeStrength"], 50)
-        self.assertEqual(result["migratedDocument"]["schema"], 3)
+        self.assertEqual(result["profile"]["manualFitMode"], "estimator")
+        self.assertEqual(
+            set(result["profile"]["manualShape"]["offsets"].values()),
+            {0},
+        )
+        self.assertEqual(result["migratedDocument"]["schema"], 4)
         self.assertEqual(
             result["migratedDocument"]["profiles"][0]["shape_regions"],
             [],
@@ -300,7 +321,7 @@ process.stdout.write(JSON.stringify({
         self.assertEqual(len(result["writes"]), 1)
         self.assertEqual(
             result["writes"][0]["key"],
-            "vampip-sam3d-body-profiles-v3",
+            "vampip-sam3d-body-profiles-v4",
         )
 
     def test_morph_reference_gallery_is_independent_from_pose_selection(self) -> None:
@@ -656,6 +677,174 @@ process.stdout.write(JSON.stringify({
         self.assertNotIn("apply_pose", self.javascript)
         self.assertNotIn("sam3dPreserveHeight", self.javascript)
 
+    def test_manual_fit_uses_reference_overlay_and_bounded_semantic_controls(
+        self,
+    ) -> None:
+        for control_id in (
+            "sam3d-manual-fit",
+            "sam3d-manual-fit-estimator",
+            "sam3d-manual-fit-manual",
+            "sam3d-manual-fit-stage",
+            "sam3d-manual-fit-image",
+            "sam3d-manual-fit-svg",
+            "sam3d-manual-fit-silhouette",
+            "sam3d-manual-reference-select",
+            "sam3d-manual-auto-align",
+            "sam3d-manual-overlay-reset",
+            "sam3d-manual-overlay-scale",
+            "sam3d-manual-overlay-opacity",
+            "sam3d-manual-shape-reset",
+            "sam3d-manual-fit-update",
+        ):
+            with self.subTest(control_id=control_id):
+                self.assertIn(f'id="{control_id}"', self.html)
+        for name in (
+            "breast-size",
+            "breast-spacing",
+            "waist-width",
+            "hip-width",
+            "glute-projection",
+            "thigh-size",
+        ):
+            with self.subTest(manual_shape=name):
+                self.assertIn(
+                    f'id="sam3d-manual-shape-{name}" type="range" '
+                    'min="-100" max="100" step="1" value="0"',
+                    self.html,
+                )
+        self.assertIn(
+            "Nothing changes in VaM until Apply body fit.",
+            self.html,
+        )
+        self.assertIn("candidate?.body?.bbox || job?.bbox || job?.source?.bbox", self.javascript)
+        self.assertIn("function renderSam3dManualFit(", self.javascript)
+        self.assertIn("function renderSam3dManualOverlay(", self.javascript)
+        self.assertIn("getScreenCTM", self.javascript)
+        self.assertIn(
+            "renderSam3dManualFit(app.sam3dBodyProportions)",
+            self.javascript,
+        )
+        self.assertIn(
+            "const refreshManualProposal =\n"
+            "      sam3dManualShapeHasCorrections(settings.manualShape) &&\n"
+            "      Boolean(job) &&\n"
+            "      !app.sam3dBodyProportionsPendingAction &&\n"
+            "      !retainAppliedReview;",
+            self.javascript,
+        )
+        for selector in (
+            ".sam3d-manual-fit-workspace",
+            ".sam3d-manual-fit-stage",
+            ".sam3d-manual-fit-stage > img",
+            ".sam3d-manual-fit-stage > svg",
+            ".sam3d-manual-shape-fieldset",
+        ):
+            with self.subTest(selector=selector):
+                self.assertIn(selector, self.styles)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is not installed")
+    def test_manual_shape_is_canonical_bounded_and_post_only(self) -> None:
+        helper_start = self.javascript.index("function emptySam3dManualShape(")
+        helper_end = self.javascript.index(
+            "function normalizeSam3dManualOverlay(", helper_start
+        )
+        request_start = self.javascript.index(
+            "function sam3dBodyProportionRequest("
+        )
+        request_end = self.javascript.index(
+            "function sam3dBodyProportionUndoRequest(", request_start
+        )
+        client_start = self.javascript.index("const Sam3dClient = Object.freeze({")
+        client_end = self.javascript.index("function sam3dJobId(", client_start)
+        client = self.javascript[client_start:client_end]
+        self.assertNotIn('"manual_shape"', client)
+        load_start = self.javascript.index(
+            "async function loadSam3dBodyProportions("
+        )
+        load_end = self.javascript.index(
+            "function startSam3dBodyProportionPolling(", load_start
+        )
+        load = self.javascript[load_start:load_end]
+        self.assertIn("sam3dManualShapeHasCorrections(settings.manualShape)", load)
+        self.assertIn("!app.sam3dBodyProportionsPendingAction", load)
+        self.assertIn("SAM3D_BODY_PROPORTION_ACTIONS.analyze", load)
+        self.assertIn("sam3dBodyProportionRequest(job)", load)
+        self.assertIn("const preserveReviewedManual =", load)
+        self.assertIn("const retainAppliedReview =", load)
+        self.assertIn("!retainAppliedReview", load)
+        self.assertIn("...reviewedAnalysis,", load)
+        script = (
+            '"use strict";\n'
+            'const SAM3D_MANUAL_SHAPE_KEYS = ["breast_size", "breast_spacing", "waist_width", "hip_width", "glute_projection", "thigh_size"];\n'
+            f"{self.javascript[helper_start:helper_end]}\n"
+            "const serializeSam3dBodyReferences = () => '';\n"
+            "let settings = { targetUid: 'Person', personIndex: 0, references: [], regions: [], strength: 75, shapeRegions: [], shapeStrength: 50, manualShape: emptySam3dManualShape() };\n"
+            "const sam3dBodyProportionSettings = () => settings;\n"
+            f"{self.javascript[request_start:request_end]}\n"
+            """
+const normalized = normalizeSam3dManualShape({
+  schema: 99,
+  offsets: {
+    breast_size: 3,
+    breast_spacing: -4,
+    waist_width: 0.25,
+    hip_width: "0.5",
+    glute_projection: true,
+    thigh_size: Number.NaN,
+    ignored: 1,
+  },
+});
+const zeroRequest = sam3dBodyProportionRequest({ revision: "a".repeat(32) });
+settings = { ...settings, manualShape: normalized };
+const correctedRequest =
+  sam3dBodyProportionRequest({ revision: "a".repeat(32) });
+process.stdout.write(JSON.stringify({
+  normalized,
+  serialized: serializeSam3dManualShape(normalized),
+  zeroHasManual: Object.hasOwn(zeroRequest, "manual_shape"),
+  corrected: correctedRequest.manual_shape,
+}));
+"""
+        )
+        completed = subprocess.run(
+            ["node", "-"],
+            input=script,
+            text=True,
+            capture_output=True,
+            check=True,
+            timeout=10,
+        )
+        result = json.loads(completed.stdout)
+        self.assertEqual(result["normalized"]["schema"], 1)
+        self.assertEqual(
+            list(result["normalized"]["offsets"]),
+            [
+                "breast_size",
+                "breast_spacing",
+                "waist_width",
+                "hip_width",
+                "glute_projection",
+                "thigh_size",
+            ],
+        )
+        self.assertEqual(
+            result["normalized"]["offsets"],
+            {
+                "breast_size": 1,
+                "breast_spacing": -1,
+                "waist_width": 0.25,
+                "hip_width": 0.5,
+                "glute_projection": 0,
+                "thigh_size": 0,
+            },
+        )
+        self.assertFalse(result["zeroHasManual"])
+        self.assertEqual(result["corrected"], result["normalized"])
+        self.assertEqual(
+            json.loads(result["serialized"]),
+            result["normalized"],
+        )
+
     def test_endpoint_contract_is_centralized_and_revision_bound(self) -> None:
         client_start = self.javascript.index("const Sam3dClient = Object.freeze({")
         client_end = self.javascript.index("function sam3dJobId(", client_start)
@@ -677,6 +866,7 @@ process.stdout.write(JSON.stringify({
             'query.set("shape_regions", selectedShapeRegions.join(","))',
             client,
         )
+        self.assertNotIn('"manual_shape"', client)
 
         request_start = self.javascript.index("function sam3dBodyProportionRequest(")
         request_end = self.javascript.index(
@@ -692,6 +882,7 @@ process.stdout.write(JSON.stringify({
             "fit_strength",
             "shape_regions",
             "shape_strength",
+            "manual_shape",
             "expected_analysis_revision",
         ):
             with self.subTest(field=field):
@@ -716,7 +907,7 @@ process.stdout.write(JSON.stringify({
         )
         script = (
             '"use strict";\n'
-            'let settings = { targetUid: "Person", shapeRegions: ["breasts"] };\n'
+            'let settings = { targetUid: "Person", shapeRegions: ["breasts"], manualShape: null };\n'
             "let persons = [{\n"
             '  uid: "Person",\n'
             "  bodyProportions: {\n"
@@ -725,19 +916,22 @@ process.stdout.write(JSON.stringify({
             "  },\n"
             "}];\n"
             "const sam3dBodyProportionSettings = () => settings;\n"
+            "const sam3dManualShapeHasCorrections = (value) => Boolean(value?.active);\n"
             "const personList = () => persons;\n"
             f"{self.javascript[helper_start:helper_end]}\n"
             """
 const preparing = sam3dBodyShapeCalibrationState();
-settings = { targetUid: "Person", shapeRegions: [] };
+settings = { targetUid: "Person", shapeRegions: [], manualShape: null };
 const structureOnly = sam3dBodyShapeCalibrationState();
-settings = { targetUid: "Person", shapeRegions: ["waist"] };
+settings = { targetUid: "Person", shapeRegions: [], manualShape: { active: true } };
+const manualOnly = sam3dBodyShapeCalibrationState();
+settings = { targetUid: "Person", shapeRegions: ["waist"], manualShape: null };
 persons[0].bodyProportions = {
   bodyShapeReady: true,
   bodyShapePreparing: false,
 };
 const ready = sam3dBodyShapeCalibrationState();
-settings = { targetUid: "Person", shapeRegions: [] };
+settings = { targetUid: "Person", shapeRegions: [], manualShape: null };
 persons[0].bodyProportions = {
   bodyShapeReady: false,
   bodyShapePreparing: false,
@@ -747,6 +941,7 @@ const failed = sam3dBodyShapeCalibrationState();
 process.stdout.write(JSON.stringify({
   preparing,
   structureOnly,
+  manualOnly,
   ready,
   failed,
 }));
@@ -771,6 +966,8 @@ process.stdout.write(JSON.stringify({
         self.assertTrue(result["structureOnly"]["preparing"])
         self.assertFalse(result["structureOnly"]["analyzeBlocked"])
         self.assertTrue(result["structureOnly"]["applyBlocked"])
+        self.assertTrue(result["manualOnly"]["requested"])
+        self.assertTrue(result["manualOnly"]["analyzeBlocked"])
         self.assertTrue(result["ready"]["ready"])
         self.assertFalse(result["ready"]["preparing"])
         self.assertFalse(result["ready"]["analyzeBlocked"])
@@ -866,12 +1063,14 @@ process.stdout.write(JSON.stringify({
             "const SAM3D_JOB_ID_PATTERN = /^[0-9a-f]{32}$/i;\n"
             'const SAM3D_BODY_PROPORTION_REGIONS = ["arms", "legs", "torso", "widths"];\n'
             'const SAM3D_BODY_SHAPE_REGIONS = ["breasts", "waist", "hips", "glutes", "thighs"];\n'
+            'const SAM3D_MANUAL_SHAPE_KEYS = ["breast_size", "breast_spacing", "waist_width", "hip_width", "glute_projection", "thigh_size"];\n'
             "const asArray = (value) => Array.isArray(value) ? value : [];\n"
             "const integerValue = (value) => {\n"
             "  const number = Number(value);\n"
             "  return Number.isInteger(number) ? number : null;\n"
             "};\n"
             "const normalizeSam3dBodyReferences = () => [];\n"
+            "const normalizeSam3dManualShape = (value) => value || { schema: 1, offsets: {} };\n"
             f"{self.javascript[normalize_start:normalize_end]}\n"
             """
 const analysisRevision = "a".repeat(32);
@@ -908,7 +1107,15 @@ const grouped = normalizeSam3dBodyProportions({
   ],
   shape_unavailable: [{
     region: "glutes",
+    control: "glute_projection",
     reason: "No verified Glutes Size morph is loaded.",
+  }],
+  manual_shape_changes: [{
+    control: "breast_size",
+    semanticOffset: 1,
+    requestedOffset: 0.25,
+    appliedOffset: 0.1,
+    limited: true,
   }],
 });
 const explicit = normalizeSam3dBodyProportions({
@@ -942,6 +1149,20 @@ const legacy = normalizeSam3dBodyProportions({
     proposed_value: 0.1,
   }],
 });
+const crowded = normalizeSam3dBodyProportions({
+  analysis_revision: analysisRevision,
+  shape_unavailable: [
+    ...Array.from({ length: 9 }, (_, index) => ({
+      region: "breasts",
+      reason: `Automatic warning ${index}`,
+    })),
+    {
+      region: "breasts",
+      control: "breast_spacing",
+      reason: "The exact spacing morph is unavailable.",
+    },
+  ],
+});
 process.stdout.write(JSON.stringify({
   grouped: {
     ready: grouped.ready,
@@ -954,6 +1175,7 @@ process.stdout.write(JSON.stringify({
     shapeMeasurementRegions:
       grouped.shapeMeasurements.map((item) => item.region),
     shapeUnavailable: grouped.shapeUnavailable,
+    manualShapeChanges: grouped.manualShapeChanges,
   },
   explicit: {
     shapeIds: explicit.shapeMorphs.map((item) => item.id),
@@ -965,6 +1187,10 @@ process.stdout.write(JSON.stringify({
     shapeMeasurements: legacy.shapeMeasurements,
     shapeMorphs: legacy.shapeMorphs,
     shapeUnavailable: legacy.shapeUnavailable,
+  },
+  crowded: {
+    displayedCount: crowded.shapeUnavailable.length,
+    manualShapeUnavailable: crowded.manualShapeUnavailable,
   },
 }));
 """
@@ -998,7 +1224,20 @@ process.stdout.write(JSON.stringify({
             [
                 {
                     "region": "glutes",
+                    "control": "glute_projection",
                     "reason": "No verified Glutes Size morph is loaded.",
+                }
+            ],
+        )
+        self.assertEqual(
+            result["grouped"]["manualShapeChanges"],
+            [
+                {
+                    "control": "breast_size",
+                    "semanticOffset": 1,
+                    "requestedOffset": 0.25,
+                    "appliedOffset": 0.1,
+                    "limited": True,
                 }
             ],
         )
@@ -1009,6 +1248,17 @@ process.stdout.write(JSON.stringify({
         self.assertEqual(result["legacy"]["shapeMeasurements"], [])
         self.assertEqual(result["legacy"]["shapeMorphs"], [])
         self.assertEqual(result["legacy"]["shapeUnavailable"], [])
+        self.assertEqual(result["crowded"]["displayedCount"], 8)
+        self.assertEqual(
+            result["crowded"]["manualShapeUnavailable"],
+            [
+                {
+                    "region": "breasts",
+                    "control": "breast_spacing",
+                    "reason": "The exact spacing morph is unavailable.",
+                }
+            ],
+        )
 
     def test_unavailable_and_error_states_are_visible(self) -> None:
         self.assertIn("error.status === 404 || error.status === 501", self.javascript)
@@ -1024,6 +1274,10 @@ process.stdout.write(JSON.stringify({
         poll_end = self.javascript.index(
             "function markSam3dBodyProportionsDirty(", poll_start
         )
+        poll = self.javascript[poll_start:poll_end]
+        self.assertIn("const bodyShapeReviewRequested =", poll)
+        self.assertIn("restoredBodyShapeReady", poll)
+        self.assertIn("analysis?.bodyShapeReady", poll)
         render_start = self.javascript.index("function renderSam3dBodyProportions(")
         render_end = self.javascript.index(
             "async function analyzeSam3dBodyProportions(", render_start
@@ -1126,6 +1380,7 @@ const sam3dBodyReferenceSetIssue = () => "";
 const serializeSam3dBodyReferences = (references) =>
   references.map((reference) =>
     `${reference.jobId}:${reference.personIndex}`).join(",");
+const serializeSam3dManualShape = () => "";
 const sam3dBodyProportionRegionControl = () => makeElement();
 const sam3dBodyShapeRegionControl = () => makeElement();
 const snapshotBridgeBusy = () => false;
@@ -1135,6 +1390,7 @@ const renderSam3dBodyMeasurements = () => {};
 const renderSam3dMorphChanges = () => {};
 const renderSam3dShapeMeasurements = () => {};
 const renderSam3dShapeMorphChanges = () => {};
+const renderSam3dManualFit = () => {};
 const renderSam3dBodyProfileActionState = () => {};
 const errorMessage = (error) => String(error?.message || error || "");
 const toast = (title) => { toasts.push(title); };

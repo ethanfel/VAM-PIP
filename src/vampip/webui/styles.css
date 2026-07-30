@@ -5334,6 +5334,287 @@ body.resource-detail-open {
   font-variant-numeric: tabular-nums;
 }
 
+.sam3d-manual-fit {
+  display: grid;
+  gap: 13px;
+  margin-top: 15px;
+  padding: 14px;
+  background:
+    linear-gradient(145deg, rgba(190, 137, 255, 0.075), transparent 58%),
+    var(--surface-raised);
+  border: 1px solid rgba(190, 137, 255, 0.24);
+  border-radius: 11px;
+}
+
+.sam3d-manual-fit[hidden] {
+  display: none;
+}
+
+.sam3d-manual-fit-heading {
+  display: flex;
+  min-width: 0;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.sam3d-manual-fit-heading > div:first-child {
+  min-width: 0;
+}
+
+.sam3d-manual-fit-heading span,
+.sam3d-manual-fit-heading strong,
+.sam3d-manual-fit-heading small {
+  display: block;
+}
+
+.sam3d-manual-fit-heading > div:first-child > span {
+  color: #caa6ff;
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.sam3d-manual-fit-heading > div:first-child > strong {
+  margin-top: 3px;
+  color: var(--text);
+  font-size: 14px;
+}
+
+.sam3d-manual-fit-heading > div:first-child > small {
+  max-width: 580px;
+  margin-top: 4px;
+  color: var(--text-faint);
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+.sam3d-manual-fit-mode {
+  display: inline-grid;
+  flex: 0 0 auto;
+  grid-template-columns: repeat(2, minmax(82px, 1fr));
+  gap: 3px;
+  padding: 3px;
+  background: var(--surface-soft);
+  border: 1px solid var(--border-soft);
+  border-radius: 9px;
+}
+
+.sam3d-manual-fit-mode button {
+  min-height: 31px;
+  padding: 0 9px;
+  color: var(--text-faint);
+  background: transparent;
+  border: 0;
+  border-radius: 7px;
+  font-size: 10px;
+  font-weight: 750;
+}
+
+.sam3d-manual-fit-mode button.active {
+  color: var(--text);
+  background: var(--surface-hover);
+  box-shadow: 0 1px 5px rgba(0, 0, 0, 0.2);
+}
+
+.sam3d-manual-fit-workspace {
+  display: grid;
+  grid-template-columns: minmax(300px, 1.25fr) minmax(220px, 0.75fr);
+  min-width: 0;
+  gap: 13px;
+}
+
+.sam3d-manual-fit-preview {
+  min-width: 0;
+}
+
+.sam3d-manual-fit-stage {
+  position: relative;
+  display: grid;
+  width: 100%;
+  min-height: 360px;
+  max-height: min(68vh, 760px);
+  overflow: hidden;
+  place-items: center;
+  touch-action: none;
+  cursor: grab;
+  background: #090b0d;
+  border: 1px solid var(--border-soft);
+  border-radius: 10px;
+  user-select: none;
+}
+
+.sam3d-manual-fit-stage.is-dragging {
+  cursor: grabbing;
+}
+
+.sam3d-manual-fit-stage:focus-visible {
+  border-color: #caa6ff;
+  outline: 2px solid rgba(190, 137, 255, 0.24);
+}
+
+.sam3d-manual-fit-stage > img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  pointer-events: none;
+}
+
+.sam3d-manual-fit-stage > svg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+  pointer-events: none;
+  filter: drop-shadow(0 2px 7px rgba(0, 0, 0, 0.7));
+}
+
+#sam3d-manual-fit-body {
+  fill: rgba(190, 137, 255, 0.32);
+  stroke: rgba(226, 207, 255, 0.95);
+  stroke-linejoin: round;
+  stroke-width: 1.35;
+  vector-effect: non-scaling-stroke;
+}
+
+#sam3d-manual-fit-breast-left,
+#sam3d-manual-fit-breast-right {
+  fill: rgba(123, 222, 174, 0.28);
+  stroke: rgba(178, 245, 211, 0.95);
+  stroke-width: 1.15;
+  vector-effect: non-scaling-stroke;
+}
+
+.sam3d-manual-fit-centerline {
+  fill: none;
+  stroke: rgba(255, 255, 255, 0.42);
+  stroke-dasharray: 3 4;
+  stroke-width: 0.8;
+  vector-effect: non-scaling-stroke;
+}
+
+.sam3d-manual-fit-empty {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-content: center;
+  padding: 22px;
+  color: var(--text-faint);
+  background: var(--surface-soft);
+  font-size: 10px;
+  text-align: center;
+}
+
+.sam3d-manual-fit-empty[hidden] {
+  display: none;
+}
+
+.sam3d-manual-fit-preview > p {
+  margin: 8px 2px 0;
+  color: var(--text-faint);
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+.sam3d-manual-fit-controls {
+  display: grid;
+  min-width: 0;
+  align-content: start;
+  gap: 11px;
+}
+
+.sam3d-manual-fit-controls > label,
+.sam3d-manual-overlay-sliders > label,
+.sam3d-manual-shape-fieldset > label {
+  display: grid;
+  gap: 6px;
+  color: var(--text-soft);
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.sam3d-manual-fit-controls select {
+  width: 100%;
+  min-width: 0;
+  min-height: 36px;
+  padding: 0 31px 0 9px;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font: inherit;
+}
+
+.sam3d-manual-overlay-actions,
+.sam3d-manual-fit-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.sam3d-manual-fit-actions {
+  justify-content: space-between;
+  padding-top: 3px;
+}
+
+.sam3d-manual-overlay-sliders {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 9px;
+  padding: 10px;
+  background: var(--surface-soft);
+  border: 1px solid var(--border-soft);
+  border-radius: 9px;
+}
+
+.sam3d-manual-overlay-sliders label > span,
+.sam3d-manual-shape-fieldset label > span {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.sam3d-manual-overlay-sliders output,
+.sam3d-manual-shape-fieldset output {
+  flex: 0 0 auto;
+  color: #caa6ff;
+  font-size: 9px;
+  font-variant-numeric: tabular-nums;
+}
+
+.sam3d-manual-overlay-sliders input,
+.sam3d-manual-shape-fieldset input {
+  width: 100%;
+  accent-color: #b989ff;
+}
+
+.sam3d-manual-shape-fieldset {
+  display: grid;
+  min-width: 0;
+  gap: 10px;
+  margin: 0;
+  padding: 11px;
+  background: var(--surface-soft);
+  border: 1px solid var(--border-soft);
+  border-radius: 9px;
+}
+
+.sam3d-manual-shape-fieldset legend {
+  padding: 0 5px;
+  color: var(--text-soft);
+  font-size: 10px;
+  font-weight: 750;
+}
+
+.sam3d-manual-fit.is-estimator .sam3d-manual-shape-fieldset {
+  opacity: 0.56;
+}
+
 .sam3d-proportions-section {
   margin-top: 15px;
 }
@@ -5762,6 +6043,19 @@ body.resource-detail-open {
     grid-column: 1;
   }
 
+  .sam3d-manual-fit-heading {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .sam3d-manual-fit-mode {
+    width: 100%;
+  }
+
+  .sam3d-manual-fit-workspace {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
   .sam3d-title-row {
     align-items: flex-start;
     flex-direction: column;
@@ -5866,6 +6160,23 @@ body.resource-detail-open {
   .sam3d-proportions-report,
   .sam3d-proportions-controls {
     padding: 13px;
+  }
+
+  .sam3d-manual-fit {
+    padding: 11px;
+  }
+
+  .sam3d-manual-fit-stage {
+    min-height: 280px;
+  }
+
+  .sam3d-manual-overlay-sliders {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .sam3d-manual-overlay-actions > button,
+  .sam3d-manual-fit-actions > button {
+    flex: 1 1 auto;
   }
 
   .sam3d-handoff-tabs {

@@ -8,6 +8,7 @@ from unittest import mock
 
 from vampip.body_shape import (
     build_body_shape_analysis,
+    normalize_manual_shape,
     normalize_shape_regions,
 )
 from vampip.bridge import bridge_directory
@@ -184,6 +185,290 @@ def _live_body_status() -> dict[str, object]:
 
 
 class BodyShapeSolverTests(unittest.TestCase):
+    def test_manual_shape_contract_is_strict_bounded_and_canonical(self) -> None:
+        normalized = normalize_manual_shape(
+            {
+                "schema": 1,
+                "offsets": {
+                    "thigh_size": 0,
+                    "breast_size": 0.123456789,
+                    "hip_width": -1,
+                },
+            }
+        )
+        self.assertEqual(
+            normalized,
+            {
+                "schema": 1,
+                "offsets": {
+                    "breast_size": 0.123457,
+                    "hip_width": -1.0,
+                },
+            },
+        )
+        self.assertEqual(
+            normalize_manual_shape(None),
+            {"schema": 1, "offsets": {}},
+        )
+
+        invalid = (
+            {"offsets": {}},
+            {"schema": True, "offsets": {}},
+            {"schema": 2, "offsets": {}},
+            {"schema": 1, "offsets": []},
+            {"schema": 1, "offsets": {"face_size": 0.1}},
+            {"schema": 1, "offsets": {"breast_size": True}},
+            {"schema": 1, "offsets": {"breast_size": float("nan")}},
+            {"schema": 1, "offsets": {"breast_size": 1.001}},
+            {"schema": 1, "offsets": {}, "morphs": []},
+        )
+        for value in invalid:
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                normalize_manual_shape(value)
+
+    def test_manual_offset_resolves_only_a_verified_builtin(self) -> None:
+        status = _live_body_status()
+        status["morphs"] = [
+            _shape_morph(
+                "3" * 32,
+                "Breasts Size",
+                "breasts",
+                {},
+            )
+        ]
+        result = build_body_shape_analysis(
+            _shape_signature(),
+            _shape_signature(),
+            status,
+            strength=1.0,
+            regions=[],
+            manual_shape={
+                "schema": 1,
+                "offsets": {"breast_size": 0.4},
+            },
+        )
+
+        self.assertEqual(len(result["changes"]), 1)
+        change = result["changes"][0]
+        self.assertEqual(change["name"], "Breasts Size")
+        self.assertAlmostEqual(change["value"], 0.1)
+        self.assertEqual(change["manualControl"], "breast_size")
+        self.assertEqual(
+            result["manual_shape"],
+            {"schema": 1, "offsets": {"breast_size": 0.4}},
+        )
+        self.assertEqual(result["manual_shape_regions"], ["breasts"])
+
+        status["morphs"][0]["builtIn"] = False
+        rejected = build_body_shape_analysis(
+            _shape_signature(),
+            _shape_signature(),
+            status,
+            strength=1.0,
+            regions=[],
+            manual_shape={
+                "schema": 1,
+                "offsets": {"breast_size": 0.4},
+            },
+        )
+        self.assertEqual(rejected["changes"], [])
+        self.assertEqual(
+            rejected["unavailable"][0]["control"],
+            "breast_size",
+        )
+
+    def test_each_manual_control_uses_its_exact_server_mapping_and_direction(
+        self,
+    ) -> None:
+        cases = (
+            ("breast_size", "breasts", "Breasts Size"),
+            (
+                "breast_spacing",
+                "breasts",
+                "ChestSeparateBreasts",
+            ),
+            ("waist_width", "waist", "Waist Width"),
+            ("hip_width", "hips", "Hip Size"),
+            ("glute_projection", "glutes", "Glutes Size"),
+            ("thigh_size", "thighs", "Thighs Size"),
+        )
+        for index, (control, region, name) in enumerate(cases):
+            for semantic_offset in (-0.4, 0.4):
+                with self.subTest(
+                    control=control,
+                    semantic_offset=semantic_offset,
+                ):
+                    status = _live_body_status()
+                    status["morphs"] = [
+                        _shape_morph(
+                            f"{index + 3:x}" * 32,
+                            name,
+                            region,
+                            {},
+                        )
+                    ]
+                    result = build_body_shape_analysis(
+                        _shape_signature(),
+                        _shape_signature(),
+                        status,
+                        strength=1.0,
+                        regions=[],
+                        manual_shape={
+                            "schema": 1,
+                            "offsets": {control: semantic_offset},
+                        },
+                    )
+
+                    self.assertEqual(len(result["changes"]), 1)
+                    self.assertEqual(result["changes"][0]["name"], name)
+                    self.assertEqual(
+                        result["changes"][0]["region"],
+                        region,
+                    )
+                    self.assertAlmostEqual(
+                        result["changes"][0]["value"],
+                        semantic_offset * 0.25,
+                    )
+
+                    status["morphs"][0]["shapeRegion"] = "wrong"
+                    rejected = build_body_shape_analysis(
+                        _shape_signature(),
+                        _shape_signature(),
+                        status,
+                        strength=1.0,
+                        regions=[],
+                        manual_shape={
+                            "schema": 1,
+                            "offsets": {control: semantic_offset},
+                        },
+                    )
+                    self.assertEqual(rejected["changes"], [])
+                    self.assertEqual(
+                        rejected["unavailable"][0]["control"],
+                        control,
+                    )
+
+    def test_manual_offset_merges_after_estimator_and_stays_current_bounded(
+        self,
+    ) -> None:
+        live = _shape_signature()
+        target = _shape_signature(
+            changed={
+                "breastGirthExcess": 0.13,
+                "breastProjection": 0.055,
+            }
+        )
+        status = _live_body_status()
+        automatic = build_body_shape_analysis(
+            target,
+            live,
+            status,
+            strength=1.0,
+            regions=["breasts"],
+        )
+        automatic_delta = float(automatic["changes"][0]["delta"])
+        self.assertGreater(automatic_delta, 0.0)
+
+        boosted = build_body_shape_analysis(
+            target,
+            live,
+            status,
+            strength=1.0,
+            regions=["breasts"],
+            manual_shape={
+                "schema": 1,
+                "offsets": {"breast_size": 0.5},
+            },
+        )
+        self.assertAlmostEqual(boosted["changes"][0]["delta"], 0.25)
+        self.assertTrue(boosted["manual_changes"][0]["limited"])
+
+        cancelled = build_body_shape_analysis(
+            target,
+            live,
+            status,
+            strength=1.0,
+            regions=["breasts"],
+            manual_shape={
+                "schema": 1,
+                "offsets": {
+                    "breast_size": -automatic_delta / 0.25,
+                },
+            },
+        )
+        self.assertEqual(cancelled["changes"], [])
+        self.assertEqual(len(cancelled["automatic_changes"]), 1)
+        self.assertAlmostEqual(
+            cancelled["manual_changes"][0]["appliedOffset"],
+            -automatic_delta,
+            places=5,
+        )
+
+        status["morphs"][1]["value"] = 0.9
+        limited = build_body_shape_analysis(
+            live,
+            live,
+            status,
+            strength=1.0,
+            regions=[],
+            manual_shape={
+                "schema": 1,
+                "offsets": {"breast_size": 1.0},
+            },
+        )
+        self.assertAlmostEqual(limited["changes"][0]["value"], 1.0)
+        self.assertAlmostEqual(limited["changes"][0]["delta"], 0.1)
+        self.assertTrue(limited["manual_changes"][0]["limited"])
+
+        status["morphs"][1]["value"] = 1.0
+        fully_limited = build_body_shape_analysis(
+            live,
+            live,
+            status,
+            strength=1.0,
+            regions=[],
+            manual_shape={
+                "schema": 1,
+                "offsets": {"breast_size": 1.0},
+            },
+        )
+        self.assertEqual(fully_limited["changes"], [])
+        self.assertEqual(
+            fully_limited["manual_changes"][0]["appliedOffset"],
+            0.0,
+        )
+        self.assertTrue(
+            fully_limited["manual_changes"][0]["limited"],
+        )
+
+    def test_manual_breast_spacing_is_unavailable_without_exact_morph(
+        self,
+    ) -> None:
+        result = build_body_shape_analysis(
+            _shape_signature(),
+            _shape_signature(),
+            _live_body_status(),
+            strength=1.0,
+            regions=[],
+            manual_shape={
+                "schema": 1,
+                "offsets": {"breast_spacing": 0.5},
+            },
+        )
+
+        self.assertEqual(result["changes"], [])
+        self.assertEqual(
+            result["unavailable"][0],
+            {
+                "region": "breasts",
+                "control": "breast_spacing",
+                "reason": (
+                    "The verified built-in ChestSeparateBreasts morph "
+                    "is not loaded."
+                ),
+            },
+        )
+
     def test_solver_uses_only_verified_builtins_and_bounds_changes(self) -> None:
         live = _shape_signature()
         target = _shape_signature(
@@ -369,6 +654,14 @@ class BodyShapeSolverTests(unittest.TestCase):
 
     def test_public_scene_copy_preserves_only_valid_shape_contract(self) -> None:
         status = _live_body_status()
+        status["morphs"].append(
+            _shape_morph(
+                "3" * 32,
+                "ChestSeparateBreasts",
+                "breasts",
+                {},
+            )
+        )
         status["bodyShapeReady"] = True
         status["bodyShapePreparing"] = False
         status["bodyShapeReason"] = "neutral mesh ready"
@@ -391,6 +684,13 @@ class BodyShapeSolverTests(unittest.TestCase):
             set(shape_morph["shapeResponses"]),
             {"breastGirthExcess", "breastProjection"},
         )
+        spacing_morph = next(
+            morph
+            for morph in public["morphs"]
+            if morph.get("name") == "ChestSeparateBreasts"
+        )
+        self.assertEqual(spacing_morph["shapeRegion"], "breasts")
+        self.assertNotIn("shapeResponses", spacing_morph)
 
         simplejson = json.loads(
             json.dumps(status),
@@ -519,6 +819,24 @@ class BodyShapeServiceTests(unittest.TestCase):
             action_label="analyzing body proportions",
         )
         return result
+
+    def test_manual_shape_is_validated_before_live_bridge_access(self) -> None:
+        with (
+            mock.patch.object(
+                self.service,
+                "_require_live_capability",
+            ) as capability,
+            self.assertRaisesRegex(ValueError, "unsupported offset"),
+        ):
+            self.service.sam3d_body_proportions(
+                self.job_id,
+                target_uid="Person",
+                manual_shape={
+                    "schema": 1,
+                    "offsets": {"morph_key": 0.5},
+                },
+            )
+        capability.assert_not_called()
 
     def test_analysis_combines_structure_and_shape_without_face_or_physics(
         self,
@@ -708,6 +1026,97 @@ class BodyShapeServiceTests(unittest.TestCase):
             {item["key"] for item in request["changes"]},
             {"1" * 32, "2" * 32},
         )
+
+    def test_manual_shape_is_revision_bound_and_recomputed_on_apply(self) -> None:
+        self.body["morphs"].append(
+            _shape_morph(
+                "3" * 32,
+                "ChestSeparateBreasts",
+                "breasts",
+                {},
+            )
+        )
+        manual_shape = {
+            "schema": 1,
+            "offsets": {"breast_spacing": 0.5},
+        }
+        with (
+            mock.patch.object(
+                self.service,
+                "_require_live_capability",
+                return_value=self.scene,
+            ),
+            mock.patch.object(
+                self.service,
+                "_sam3d",
+                return_value=self.manager,
+            ),
+        ):
+            analysis = self.service.sam3d_body_proportions(
+                self.job_id,
+                target_uid="Person",
+                regions=[],
+                shape_regions=[],
+                manual_shape=manual_shape,
+            )
+            self.assertEqual(analysis["manual_shape"], manual_shape)
+            self.assertEqual(analysis["manual_shape_regions"], ["breasts"])
+            self.assertEqual(
+                analysis["shape_changes"][0]["name"],
+                "ChestSeparateBreasts",
+            )
+
+            changed = self.service.sam3d_body_proportions(
+                self.job_id,
+                target_uid="Person",
+                regions=[],
+                shape_regions=[],
+                manual_shape={
+                    "schema": 1,
+                    "offsets": {"breast_spacing": 0.4},
+                },
+            )
+            self.assertNotEqual(
+                changed["analysis_revision"],
+                analysis["analysis_revision"],
+            )
+
+            with self.assertRaisesRegex(ValueError, "fit settings changed"):
+                self.service.apply_sam3d_body_proportions(
+                    self.job_id,
+                    expected_job_revision=self.job_revision,
+                    expected_analysis_revision=analysis["analysis_revision"],
+                    target_uid="Person",
+                    regions=[],
+                    shape_regions=[],
+                    manual_shape={
+                        "schema": 1,
+                        "offsets": {"breast_spacing": 0.4},
+                    },
+                )
+
+            applied = self.service.apply_sam3d_body_proportions(
+                self.job_id,
+                expected_job_revision=self.job_revision,
+                expected_analysis_revision=analysis["analysis_revision"],
+                target_uid="Person",
+                regions=[],
+                shape_regions=[],
+                manual_shape=manual_shape,
+            )
+
+        self.assertEqual(applied["action_state"], "queued")
+        request = json.loads(
+            (bridge_directory(self.service.vam_root) / "request.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertEqual(
+            request["changes"],
+            [{"key": "3" * 32, "value": 0.125}],
+        )
+        self.assertNotIn("manual", json.dumps(request).casefold())
+        self.assertNotIn("name", json.dumps(request).casefold())
 
 
 if __name__ == "__main__":

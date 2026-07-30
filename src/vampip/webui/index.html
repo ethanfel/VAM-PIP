@@ -993,8 +993,9 @@
                         >Delete</button>
                       </div>
                       <p id="sam3d-profile-note">
-                        Profiles stay in this browser and store Structure and Body Shape
-                        preferences plus Morph references—never live morph values or revisions.
+                        Profiles stay in this browser and store Structure, Body Shape,
+                        Manual Fit, overlay, and Morph-reference preferences—never live
+                        morph values or revisions.
                       </p>
                     </section>
 
@@ -1177,6 +1178,175 @@
                           <strong id="sam3d-proportions-disagreement">—</strong>
                         </div>
                       </div>
+
+                      <section
+                        class="sam3d-manual-fit"
+                        id="sam3d-manual-fit"
+                        aria-labelledby="sam3d-manual-fit-title"
+                      >
+                        <header class="sam3d-manual-fit-heading">
+                          <div>
+                            <span>After estimation</span>
+                            <strong id="sam3d-manual-fit-title">Refine the silhouette manually</strong>
+                            <small>
+                              Corrections are layered over the estimated target. Nothing changes in VaM until Apply body fit.
+                            </small>
+                          </div>
+                          <div
+                            class="sam3d-manual-fit-mode"
+                            role="group"
+                            aria-label="Body Shape target"
+                          >
+                            <button
+                              class="active"
+                              id="sam3d-manual-fit-estimator"
+                              type="button"
+                              aria-pressed="true"
+                            >Estimator</button>
+                            <button
+                              id="sam3d-manual-fit-manual"
+                              type="button"
+                              aria-pressed="false"
+                            >Manual fit</button>
+                          </div>
+                        </header>
+
+                        <div class="sam3d-manual-fit-workspace">
+                          <div class="sam3d-manual-fit-preview">
+                            <div
+                              class="sam3d-manual-fit-stage"
+                              id="sam3d-manual-fit-stage"
+                              tabindex="0"
+                              aria-label="Reference image with draggable silhouette overlay"
+                              aria-describedby="sam3d-manual-fit-help"
+                            >
+                              <img
+                                id="sam3d-manual-fit-image"
+                                alt=""
+                              >
+                              <svg
+                                id="sam3d-manual-fit-svg"
+                                viewBox="0 0 100 160"
+                                aria-hidden="true"
+                                focusable="false"
+                                preserveAspectRatio="xMidYMid meet"
+                              >
+                                <g id="sam3d-manual-fit-silhouette">
+                                  <path id="sam3d-manual-fit-body"></path>
+                                  <ellipse id="sam3d-manual-fit-breast-left"></ellipse>
+                                  <ellipse id="sam3d-manual-fit-breast-right"></ellipse>
+                                  <path
+                                    class="sam3d-manual-fit-centerline"
+                                    d="M 50 22 L 50 151"
+                                  ></path>
+                                </g>
+                              </svg>
+                              <div
+                                class="sam3d-manual-fit-empty"
+                                id="sam3d-manual-fit-empty"
+                                hidden
+                              >
+                                Reference image unavailable
+                              </div>
+                            </div>
+                            <p id="sam3d-manual-fit-help">
+                              Drag the silhouette—or focus it and use the arrow keys—to pan.
+                              Auto align uses the reconstruction box. The upright outline is a
+                              visual guide; reposition it for seated, side, or rear references.
+                            </p>
+                          </div>
+
+                          <div class="sam3d-manual-fit-controls">
+                            <label for="sam3d-manual-reference-select">
+                              <span>Background reference</span>
+                              <select id="sam3d-manual-reference-select"></select>
+                            </label>
+                            <div class="sam3d-manual-overlay-actions">
+                              <button
+                                class="secondary-button small"
+                                id="sam3d-manual-auto-align"
+                                type="button"
+                              >Auto align</button>
+                              <button
+                                class="quiet-button"
+                                id="sam3d-manual-overlay-reset"
+                                type="button"
+                              >Reset overlay</button>
+                            </div>
+                            <div class="sam3d-manual-overlay-sliders">
+                              <label for="sam3d-manual-overlay-scale">
+                                <span>
+                                  <strong>Overlay scale</strong>
+                                  <output id="sam3d-manual-overlay-scale-value">100%</output>
+                                </span>
+                                <input
+                                  id="sam3d-manual-overlay-scale"
+                                  type="range"
+                                  min="50"
+                                  max="180"
+                                  step="1"
+                                  value="100"
+                                >
+                              </label>
+                              <label for="sam3d-manual-overlay-opacity">
+                                <span>
+                                  <strong>Overlay opacity</strong>
+                                  <output id="sam3d-manual-overlay-opacity-value">55%</output>
+                                </span>
+                                <input
+                                  id="sam3d-manual-overlay-opacity"
+                                  type="range"
+                                  min="10"
+                                  max="100"
+                                  step="1"
+                                  value="55"
+                                >
+                              </label>
+                            </div>
+
+                            <fieldset class="sam3d-manual-shape-fieldset">
+                              <legend>Corrections from estimator</legend>
+                              <label for="sam3d-manual-shape-breast-size">
+                                <span><strong>Breast size</strong><output id="sam3d-manual-shape-breast-size-value">Estimator</output></span>
+                                <input id="sam3d-manual-shape-breast-size" type="range" min="-100" max="100" step="1" value="0">
+                              </label>
+                              <label for="sam3d-manual-shape-breast-spacing">
+                                <span><strong>Breast spacing</strong><output id="sam3d-manual-shape-breast-spacing-value">Estimator</output></span>
+                                <input id="sam3d-manual-shape-breast-spacing" type="range" min="-100" max="100" step="1" value="0">
+                              </label>
+                              <label for="sam3d-manual-shape-waist-width">
+                                <span><strong>Waist width</strong><output id="sam3d-manual-shape-waist-width-value">Estimator</output></span>
+                                <input id="sam3d-manual-shape-waist-width" type="range" min="-100" max="100" step="1" value="0">
+                              </label>
+                              <label for="sam3d-manual-shape-hip-width">
+                                <span><strong>Hip width</strong><output id="sam3d-manual-shape-hip-width-value">Estimator</output></span>
+                                <input id="sam3d-manual-shape-hip-width" type="range" min="-100" max="100" step="1" value="0">
+                              </label>
+                              <label for="sam3d-manual-shape-glute-projection">
+                                <span><strong>Glute projection</strong><output id="sam3d-manual-shape-glute-projection-value">Estimator</output></span>
+                                <input id="sam3d-manual-shape-glute-projection" type="range" min="-100" max="100" step="1" value="0">
+                              </label>
+                              <label for="sam3d-manual-shape-thigh-size">
+                                <span><strong>Thigh size</strong><output id="sam3d-manual-shape-thigh-size-value">Estimator</output></span>
+                                <input id="sam3d-manual-shape-thigh-size" type="range" min="-100" max="100" step="1" value="0">
+                              </label>
+                            </fieldset>
+                            <div class="sam3d-manual-fit-actions">
+                              <button
+                                class="quiet-button"
+                                id="sam3d-manual-shape-reset"
+                                type="button"
+                              >Reset corrections</button>
+                              <button
+                                class="primary-button small"
+                                id="sam3d-manual-fit-update"
+                                type="button"
+                                disabled
+                              >Update proposal</button>
+                            </div>
+                          </div>
+                        </div>
+                      </section>
 
                       <div class="sam3d-proportions-section">
                         <div class="sam3d-proportions-section-heading">

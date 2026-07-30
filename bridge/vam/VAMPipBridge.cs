@@ -8033,6 +8033,10 @@ namespace VAMPip
             {
                 return "breasts";
             }
+            if (name == "ChestSeparateBreasts")
+            {
+                return "breasts";
+            }
             if (name == "Waist Width")
             {
                 return "waist";
@@ -8056,6 +8060,14 @@ namespace VAMPip
             string name)
         {
             return BodyShapeRegionForMorphName(name).Length != 0;
+        }
+
+        private static bool IsBodyShapeCalibrationMorphName(
+            string name)
+        {
+            return
+                IsAllowlistedBodyShapeMorphName(name) &&
+                name != "ChestSeparateBreasts";
         }
 
         private static bool IsEligibleBodyProportionMorph(
@@ -10713,6 +10725,7 @@ namespace VAMPip
                 if (entry == null ||
                     entry.Morph == null ||
                     entry.FitKind != "shape" ||
+                    !IsBodyShapeCalibrationMorphName(entry.Name) ||
                     entry.Morph.hasBoneModificationFormulas)
                 {
                     continue;
@@ -10927,6 +10940,7 @@ namespace VAMPip
                 if (entry == null ||
                     entry.Morph == null ||
                     entry.FitKind != "shape" ||
+                    !IsBodyShapeCalibrationMorphName(entry.Name) ||
                     entry.Morph.hasBoneModificationFormulas ||
                     !IsEligibleBodyProportionMorph(
                         entry.Bank,
@@ -11205,7 +11219,9 @@ namespace VAMPip
                      index++)
                 {
                     if (entries[index] != null &&
-                        entries[index].FitKind == "shape")
+                        entries[index].FitKind == "shape" &&
+                        IsBodyShapeCalibrationMorphName(
+                            entries[index].Name))
                     {
                         build.Entries.Add(entries[index]);
                     }
