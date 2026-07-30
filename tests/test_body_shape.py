@@ -789,6 +789,34 @@ class BodyShapeServiceTests(unittest.TestCase):
             "sam3d": {"applied": False},
         }
 
+    def _set_bridge_action(
+        self,
+        *,
+        state: str = "ok",
+        message: str = "Body-proportion morphs applied.",
+    ) -> str:
+        request_id = "f" * 32
+        directory = bridge_directory(self.service.vam_root)
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / "request.json").write_text(
+            json.dumps(
+                {
+                    "protocol": 2,
+                    "requestId": request_id,
+                    "command": "setPersonBodyProportions",
+                    "targetUid": "Person",
+                }
+            ),
+            encoding="utf-8",
+        )
+        self.scene["bridge"] = {
+            "requestId": request_id,
+            "lastCompletedRequestId": request_id if state == "ok" else "",
+            "state": state,
+            "message": message,
+        }
+        return request_id
+
     def tearDown(self) -> None:
         self.service.close()
         self.temporary.cleanup()
@@ -883,6 +911,74 @@ class BodyShapeServiceTests(unittest.TestCase):
 
         get_manager.assert_not_called()
         self.manager.body_shape.assert_not_called()
+
+    def test_changed_apply_settlement_survives_shape_cache_rebuild(self) -> None:
+        self.body.pop("bodyShape")
+        self.body["bodyShapeReady"] = False
+        self.body["bodyShapePreparing"] = True
+        self.body["undoAvailable"] = False
+        self.body["undoPending"] = True
+        self._set_bridge_action()
+
+        with (
+            mock.patch.object(
+                self.service,
+                "_require_live_capability",
+                return_value=self.scene,
+            ),
+            mock.patch.object(
+                self.service,
+                "_sam3d",
+                return_value=self.manager,
+            ),
+        ):
+            result = self.service.sam3d_body_proportions(
+                self.job_id,
+                target_uid="Person",
+                regions=["legs"],
+                shape_regions=["breasts"],
+            )
+
+        self.assertTrue(result["applied"])
+        self.assertTrue(result["person_fit_active"])
+        self.assertTrue(result["undo_pending"])
+        self.assertFalse(result["can_undo"])
+        self.assertEqual(result["state"], "running")
+        self.assertIn("finalizing the exact undo", result["message"])
+        self.assertFalse(result["body_shape_ready"])
+        self.assertEqual(result["shape_changes"], [])
+
+    def test_terminal_noop_is_reconciled_as_failure_not_success(self) -> None:
+        self.body.pop("bodyShape")
+        self.body["bodyShapeReady"] = False
+        self.body["bodyShapePreparing"] = True
+        self.body["undoAvailable"] = False
+        self.body["undoPending"] = False
+        self._set_bridge_action()
+
+        with (
+            mock.patch.object(
+                self.service,
+                "_require_live_capability",
+                return_value=self.scene,
+            ),
+            mock.patch.object(
+                self.service,
+                "_sam3d",
+                return_value=self.manager,
+            ),
+        ):
+            result = self.service.sam3d_body_proportions(
+                self.job_id,
+                target_uid="Person",
+                regions=["legs"],
+                shape_regions=["breasts"],
+            )
+
+        self.assertFalse(result["applied"])
+        self.assertFalse(result["can_undo"])
+        self.assertEqual(result["state"], "failed")
+        self.assertIn("did not publish an exact", result["message"])
 
     def test_pending_exact_undo_blocks_a_second_body_fit(self) -> None:
         self.body["undoPending"] = True

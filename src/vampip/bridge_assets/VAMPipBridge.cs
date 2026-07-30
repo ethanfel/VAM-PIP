@@ -653,13 +653,8 @@ namespace VAMPip
             public Atom Atom;
             public DAZCharacterSelector Geometry;
             public string TargetUid;
-            public string PostApplyGenerationKey;
-            public string PreApplyGenerationKey;
-            public string PreApplyBodyShapeChecksum;
-            public bool RequireBodyShapeReady;
-            public bool RequireChangedBodyShapeChecksum;
-            public string PendingBodyShapeChecksum;
-            public int PendingStableObservations;
+            public string Revision;
+            public string PostApplyMorphStateKey;
             public List<BodyProportionUndoValue> Values;
         }
 
@@ -3360,63 +3355,8 @@ namespace VAMPip
                         "undo. Restore it before applying another fit.");
                 }
 
-                PersonBodyProportionSnapshot snapshot = null;
-                if (!_personBodyProportionSnapshots.TryGetValue(
-                        request.TargetUid,
-                        out snapshot) ||
-                    !object.ReferenceEquals(snapshot.Atom, person) ||
-                    !object.ReferenceEquals(
-                        snapshot.Geometry,
-                        geometry) ||
-                    !string.Equals(
-                        snapshot.Revision,
-                        request.BodyProportionRevision,
-                        StringComparison.OrdinalIgnoreCase))
-                {
-                    throw new Exception(
-                        "The body-proportion revision is stale; refresh the " +
-                        "selected Person.");
-                }
-
                 List<BodyProportionMorphEntry> currentEntries =
                     GetBodyProportionMorphEntries(geometry);
-                string currentBodyShapeChecksum = "";
-                if (!TryBodyShapeMeshChecksum(
-                        geometry,
-                        out currentBodyShapeChecksum) ||
-                    !string.Equals(
-                        snapshot.BodyShapeMeshChecksum,
-                        currentBodyShapeChecksum,
-                        StringComparison.Ordinal))
-                {
-                    throw new Exception(
-                        "The neutral body-shape cache changed; refresh the " +
-                        "selected Person.");
-                }
-                if (!IsValidBodyShapeSignature(
-                        snapshot.BodyShape))
-                {
-                    throw new Exception(
-                        "The neutral body-shape cache is not ready; wait for " +
-                        "preparation or inspect bodyShapeReason.");
-                }
-                BodyShapeSignature currentBodyShape =
-                    snapshot.BodyShape;
-                string currentGeneration =
-                    BuildBodyProportionGenerationKey(
-                        geometry,
-                        currentEntries,
-                        currentBodyShape,
-                        currentBodyShapeChecksum);
-                if (!IsCurrentBodyProportionSnapshot(
-                        snapshot,
-                        currentEntries,
-                        currentGeneration))
-                {
-                    throw new Exception(
-                        "The Person's morph state changed; refresh body " +
-                        "proportions before applying.");
-                }
 
                 if (undo)
                 {
@@ -3427,8 +3367,14 @@ namespace VAMPip
                             savedUndo.Geometry,
                             geometry) ||
                         !string.Equals(
-                            savedUndo.PostApplyGenerationKey,
-                            currentGeneration,
+                            savedUndo.Revision,
+                            request.BodyProportionRevision,
+                            StringComparison.OrdinalIgnoreCase) ||
+                        !string.Equals(
+                            savedUndo.PostApplyMorphStateKey,
+                            BuildBodyProportionMorphStateKey(
+                                geometry,
+                                currentEntries),
                             StringComparison.Ordinal) ||
                         savedUndo.Values == null ||
                         savedUndo.Values.Count == 0)
@@ -3465,18 +3411,66 @@ namespace VAMPip
                 }
                 else
                 {
+                    PersonBodyProportionSnapshot snapshot = null;
+                    if (!_personBodyProportionSnapshots.TryGetValue(
+                            request.TargetUid,
+                            out snapshot) ||
+                        !object.ReferenceEquals(snapshot.Atom, person) ||
+                        !object.ReferenceEquals(
+                            snapshot.Geometry,
+                            geometry) ||
+                        !string.Equals(
+                            snapshot.Revision,
+                            request.BodyProportionRevision,
+                            StringComparison.OrdinalIgnoreCase))
+                    {
+                        throw new Exception(
+                            "The body-proportion revision is stale; refresh " +
+                            "the selected Person.");
+                    }
+                    string currentBodyShapeChecksum = "";
+                    if (!TryBodyShapeMeshChecksum(
+                            geometry,
+                            out currentBodyShapeChecksum) ||
+                        !string.Equals(
+                            snapshot.BodyShapeMeshChecksum,
+                            currentBodyShapeChecksum,
+                            StringComparison.Ordinal))
+                    {
+                        throw new Exception(
+                            "The neutral body-shape cache changed; refresh " +
+                            "the selected Person.");
+                    }
+                    if (!IsValidBodyShapeSignature(
+                            snapshot.BodyShape))
+                    {
+                        throw new Exception(
+                            "The neutral body-shape cache is not ready; wait " +
+                            "for preparation or inspect bodyShapeReason.");
+                    }
+                    string currentGeneration =
+                        BuildBodyProportionGenerationKey(
+                            geometry,
+                            currentEntries,
+                            snapshot.BodyShape,
+                            currentBodyShapeChecksum);
+                    if (!IsCurrentBodyProportionSnapshot(
+                            snapshot,
+                            currentEntries,
+                            currentGeneration))
+                    {
+                        throw new Exception(
+                            "The Person's morph state changed; refresh body " +
+                            "proportions before applying.");
+                    }
+
                     PersonBodyProportionUndo newUndo =
                         new PersonBodyProportionUndo();
                     newUndo.Atom = person;
                     newUndo.Geometry = geometry;
                     newUndo.TargetUid = request.TargetUid;
-                    newUndo.PreApplyGenerationKey =
-                        currentGeneration;
-                    newUndo.PreApplyBodyShapeChecksum =
-                        currentBodyShapeChecksum;
-                    newUndo.RequireBodyShapeReady = true;
-                    newUndo.RequireChangedBodyShapeChecksum =
-                        false;
+                    newUndo.Revision =
+                        Guid.NewGuid().ToString("N");
                     newUndo.Values =
                         new List<BodyProportionUndoValue>();
 
@@ -3522,8 +3516,6 @@ namespace VAMPip
                         {
                             continue;
                         }
-                        newUndo.RequireChangedBodyShapeChecksum =
-                            true;
                         BodyProportionUndoValue old =
                             new BodyProportionUndoValue();
                         old.Morph = entry.Morph;
@@ -3538,15 +3530,21 @@ namespace VAMPip
                             entry.Morph,
                             change.Value);
                     }
-                    if (newUndo.Values.Count != 0)
+                    if (newUndo.Values.Count == 0)
                     {
-                        newUndo.PostApplyGenerationKey = "";
-                        newUndo.PendingBodyShapeChecksum = "";
-                        newUndo.PendingStableObservations = 0;
-                        _personBodyProportionUndo[
-                            request.TargetUid] = newUndo;
-                        undoBookkeepingChanged = true;
+                        throw new Exception(
+                            "No body-proportion morph values changed; " +
+                            "refresh the analysis before applying again.");
                     }
+                    List<BodyProportionMorphEntry> appliedEntries =
+                        GetBodyProportionMorphEntries(geometry);
+                    newUndo.PostApplyMorphStateKey =
+                        BuildBodyProportionMorphStateKey(
+                            geometry,
+                            appliedEntries);
+                    _personBodyProportionUndo[
+                        request.TargetUid] = newUndo;
+                    undoBookkeepingChanged = true;
                 }
 
                 SuperController.singleton.ResetSimulation(
@@ -9574,11 +9572,9 @@ namespace VAMPip
             return result;
         }
 
-        private static string BuildBodyProportionGenerationKey(
+        private static string BuildBodyProportionMorphStateKey(
             DAZCharacterSelector geometry,
-            List<BodyProportionMorphEntry> entries,
-            BodyShapeSignature bodyShape,
-            string bodyShapeMeshChecksum)
+            List<BodyProportionMorphEntry> entries)
         {
             ulong first = 1469598103934665603UL;
             ulong second = 7809847782465536322UL;
@@ -9633,6 +9629,23 @@ namespace VAMPip
                         entry.Maximum.ToString("R"));
                 }
             }
+            return first.ToString("x16") + second.ToString("x16");
+        }
+
+        private static string BuildBodyProportionGenerationKey(
+            DAZCharacterSelector geometry,
+            List<BodyProportionMorphEntry> entries,
+            BodyShapeSignature bodyShape,
+            string bodyShapeMeshChecksum)
+        {
+            ulong first = 1469598103934665603UL;
+            ulong second = 7809847782465536322UL;
+            HashCuaText(
+                ref first,
+                ref second,
+                BuildBodyProportionMorphStateKey(
+                    geometry,
+                    entries));
             HashBodyShapeSignature(
                 ref first,
                 ref second,
@@ -12944,6 +12957,10 @@ namespace VAMPip
                     entries,
                     bodyShape,
                     bodyShapeMeshChecksum);
+            string morphStateKey =
+                BuildBodyProportionMorphStateKey(
+                    geometry,
+                    entries);
             bool reuse =
                 priorSnapshotAvailable &&
                 IsCurrentBodyProportionSnapshot(
@@ -13053,74 +13070,12 @@ namespace VAMPip
                 undo.Values.Count != 0;
             bool undoAvailable = false;
             bool undoPending = false;
-            if (undoRecordAvailable &&
-                string.IsNullOrEmpty(
-                    undo.PostApplyGenerationKey))
-            {
-                bool waitingForBodyShape =
-                    undo.RequireBodyShapeReady &&
-                    !bodyShapeReady;
-                bool waitingForChangedChecksum =
-                    undo.RequireChangedBodyShapeChecksum &&
-                    (
-                        bodyShapeMeshChecksum.Length == 0 ||
-                        string.Equals(
-                            bodyShapeMeshChecksum,
-                            undo.PreApplyBodyShapeChecksum,
-                            StringComparison.Ordinal));
-                bool waitingForChangedGeneration =
-                    undo.PreApplyGenerationKey != null &&
-                    undo.PreApplyGenerationKey.Length != 0 &&
-                    string.Equals(
-                        generationKey,
-                        undo.PreApplyGenerationKey,
-                        StringComparison.Ordinal);
-                if (
-                    waitingForBodyShape ||
-                    waitingForChangedChecksum ||
-                    waitingForChangedGeneration)
-                {
-                    undo.PendingBodyShapeChecksum = "";
-                    undo.PendingStableObservations = 0;
-                    undoPending = true;
-                }
-                else
-                {
-                    string stabilityToken =
-                        generationKey;
-                    if (string.Equals(
-                            undo.PendingBodyShapeChecksum,
-                            stabilityToken,
-                            StringComparison.Ordinal))
-                    {
-                        undo.PendingStableObservations++;
-                    }
-                    else
-                    {
-                        undo.PendingBodyShapeChecksum =
-                            stabilityToken;
-                        undo.PendingStableObservations = 1;
-                    }
-                    if (undo.PendingStableObservations >= 2)
-                    {
-                        undo.PostApplyGenerationKey =
-                            generationKey;
-                        undo.PendingBodyShapeChecksum = "";
-                        undo.PendingStableObservations = 0;
-                        undoAvailable = true;
-                    }
-                    else
-                    {
-                        undoPending = true;
-                    }
-                }
-            }
-            else if (undoRecordAvailable)
+            if (undoRecordAvailable)
             {
                 undoAvailable =
                     string.Equals(
-                        undo.PostApplyGenerationKey,
-                        generationKey,
+                        undo.PostApplyMorphStateKey,
+                        morphStateKey,
                         StringComparison.Ordinal);
             }
             if (!undoRecordAvailable ||
@@ -13135,7 +13090,7 @@ namespace VAMPip
             result["undoAvailable"].AsBool = undoAvailable;
             result["undoPending"].AsBool = undoPending;
             result["undoRevision"] =
-                undoAvailable ? snapshot.Revision : "";
+                undoAvailable ? undo.Revision : "";
             result["morphCount"].AsInt = entries.Count;
             if (entries.Count == 0)
             {

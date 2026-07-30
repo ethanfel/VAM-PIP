@@ -2990,6 +2990,45 @@ class ManagerService:
             )
         return status
 
+    def _live_body_proportion_action(
+        self,
+        scene: dict[str, object],
+        target_uid: str,
+    ) -> dict[str, str] | None:
+        request = read_bridge_request(self.vam_root)
+        bridge = scene.get("bridge")
+        if (
+            not isinstance(request, dict)
+            or request.get("command")
+            not in {
+                "setPersonBodyProportions",
+                "undoPersonBodyProportions",
+            }
+            or request.get("targetUid") != target_uid
+            or not isinstance(bridge, dict)
+            or bridge.get("requestId") != request.get("requestId")
+        ):
+            return None
+        request_id = str(request.get("requestId") or "")
+        bridge_state = str(bridge.get("state") or "").casefold()
+        if bridge_state == "error":
+            state = "failed"
+        elif (
+            bridge_state == "ok"
+            and bridge.get("lastCompletedRequestId") == request_id
+        ):
+            state = "succeeded"
+        elif bridge_state in {"applying", "running"}:
+            state = "running"
+        else:
+            state = "queued"
+        return {
+            "command": str(request["command"]),
+            "request_id": request_id,
+            "state": state,
+            "message": str(bridge.get("message") or ""),
+        }
+
     @staticmethod
     def _body_analysis_revision(document: dict[str, object]) -> str:
         unsigned = {
@@ -3045,6 +3084,7 @@ class ManagerService:
             create_if_missing=False,
         )
         body_status = self._live_body_proportion_status(scene, target_uid)
+        bridge_action = self._live_body_proportion_action(scene, target_uid)
         body_shape_ready = body_status.get("bodyShapeReady") is True
         body_shape_preparing = body_status.get("bodyShapePreparing") is True
         body_shape_reason = _presentation_text(
@@ -3054,22 +3094,35 @@ class ManagerService:
         current_body_shape: dict[str, object] | None = None
         if shape_enabled:
             if not body_shape_ready:
-                raise ValueError(
-                    "VaM body-shape measurements are unavailable: "
-                    + (
-                        body_shape_reason
-                        or "neutral body-shape calibration is not ready"
-                    )
+                body_fit_active = bool(
+                    body_status.get("undoAvailable") is True
+                    or body_status.get("undoPending") is True
                 )
-            try:
-                current_body_shape = live_body_shape(body_status.get("bodyShape"))
-            except ValueError as exc:
-                if body_shape_reason:
+                body_action_active = bool(
+                    isinstance(bridge_action, dict)
+                    and bridge_action.get("state")
+                    in {"queued", "running", "succeeded", "failed"}
+                )
+                if not body_fit_active and not body_action_active:
                     raise ValueError(
                         "VaM body-shape measurements are unavailable: "
-                        + body_shape_reason
-                    ) from exc
-                raise
+                        + (
+                            body_shape_reason
+                            or "neutral body-shape calibration is not ready"
+                        )
+                    )
+            else:
+                try:
+                    current_body_shape = live_body_shape(
+                        body_status.get("bodyShape")
+                    )
+                except ValueError as exc:
+                    if body_shape_reason:
+                        raise ValueError(
+                            "VaM body-shape measurements are unavailable: "
+                            + body_shape_reason
+                        ) from exc
+                    raise
         manager = self._sam3d()
         signatures: list[dict[str, object]] = []
         shape_signatures: list[dict[str, object]] = []
@@ -3175,7 +3228,6 @@ class ManagerService:
         shape_target: dict[str, object] | None = None
         shape_reference_disagreement: float | None = None
         if shape_enabled:
-            assert current_body_shape is not None
             shape_target = consensus_body_shapes(
                 shape_signatures,
                 source_ids=[item[0] for item in reference_values],
@@ -3188,14 +3240,15 @@ class ManagerService:
                 shape_reference_disagreement = float(
                     shape_consensus["overallRelativeDisagreement"]
                 )
-            shape_analysis = build_body_shape_analysis(
-                shape_target,
-                current_body_shape,
-                body_status,
-                strength=shape_strength_value,
-                regions=shape_region_values,
-                manual_shape=manual_shape_value,
-            )
+            if current_body_shape is not None:
+                shape_analysis = build_body_shape_analysis(
+                    shape_target,
+                    current_body_shape,
+                    body_status,
+                    strength=shape_strength_value,
+                    regions=shape_region_values,
+                    manual_shape=manual_shape_value,
+                )
         shape_changes = (
             list(shape_analysis["changes"]) if shape_analysis is not None else []
         )
@@ -3259,6 +3312,34 @@ class ManagerService:
         undo_available = body_status.get("undoAvailable") is True
         undo_pending = body_status.get("undoPending") is True
         person_fit_active = undo_available or undo_pending
+        action_state = (
+            str(bridge_action.get("state") or "")
+            if isinstance(bridge_action, dict)
+            else ""
+        )
+        action_message = (
+            str(bridge_action.get("message") or "")
+            if isinstance(bridge_action, dict)
+            else ""
+        )
+        if (
+            isinstance(bridge_action, dict)
+            and bridge_action.get("command") == "setPersonBodyProportions"
+            and action_state == "succeeded"
+        ):
+            if undo_pending:
+                action_state = "running"
+                action_message = (
+                    "VaM applied the body morphs and is finalizing the exact "
+                    "undo snapshot."
+                )
+            elif not undo_available:
+                action_state = "failed"
+                action_message = (
+                    "VaM reported completion but did not publish an exact "
+                    "body-fit undo snapshot. Refresh the analysis before "
+                    "trying again."
+                )
         result: dict[str, object] = {
             **analysis,
             "job_id": job_id,
@@ -3326,25 +3407,10 @@ class ManagerService:
         revision = self._body_analysis_revision(result)
         result["analysis_revision"] = revision
         result["analysisRevision"] = revision
-        bridge_request = read_bridge_request(self.vam_root)
-        bridge_status = scene.get("bridge")
-        if (
-            isinstance(bridge_request, dict)
-            and bridge_request.get("command")
-            in {
-                "setPersonBodyProportions",
-                "undoPersonBodyProportions",
-            }
-            and bridge_request.get("targetUid") == target_uid
-            and isinstance(bridge_status, dict)
-            and bridge_status.get("requestId") == bridge_request.get("requestId")
-        ):
-            state = str(bridge_status.get("state") or "").casefold()
-            if state:
-                result["state"] = state
-            message = str(bridge_status.get("message") or "")
-            if message:
-                result["message"] = message
+        if action_state:
+            result["state"] = action_state
+        if action_message:
+            result["message"] = action_message
         return result
 
     def apply_sam3d_body_proportions(

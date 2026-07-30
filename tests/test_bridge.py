@@ -1526,52 +1526,44 @@ class BridgeSourceTests(unittest.TestCase):
             apply_source,
         )
         self.assertIn(
-            'newUndo.PostApplyGenerationKey = "";',
+            "newUndo.PostApplyMorphStateKey =",
             apply_source,
         )
         self.assertIn(
-            "newUndo.PendingStableObservations = 0;",
+            "BuildBodyProportionMorphStateKey(",
             apply_source,
         )
         self.assertIn(
-            "newUndo.PreApplyGenerationKey =",
+            "newUndo.Revision =",
             apply_source,
         )
         self.assertIn(
-            "newUndo.PreApplyBodyShapeChecksum =",
-            apply_source,
-        )
-        self.assertIn(
-            "newUndo.RequireBodyShapeReady =",
+            '"No body-proportion morph values changed; "',
             apply_source,
         )
         self.assertNotIn(
             "TryBuildBodyShapeSignature(",
             apply_source,
         )
+        undo_branch = apply_source.index("if (undo)")
         readiness_guard = apply_source.index(
             "if (!IsValidBodyShapeSignature(\n"
-            "                        snapshot.BodyShape))"
+            "                            snapshot.BodyShape))"
         )
-        undo_branch = apply_source.index(
-            "if (undo)",
-            readiness_guard,
-        )
-        self.assertLess(readiness_guard, undo_branch)
+        self.assertLess(undo_branch, readiness_guard)
         self.assertIn(
-            '"preparation or inspect bodyShapeReason."',
+            '"for preparation or inspect bodyShapeReason."',
             apply_source,
-        )
-        require_changed = apply_source.index(
-            "newUndo.RequireChangedBodyShapeChecksum =\n"
-            "                            true;",
-            undo_branch,
         )
         saved_value = apply_source.index(
             "BodyProportionUndoValue old =",
-            require_changed,
+            undo_branch,
         )
-        self.assertLess(require_changed, saved_value)
+        post_state = apply_source.index(
+            "newUndo.PostApplyMorphStateKey =",
+            saved_value,
+        )
+        self.assertLess(saved_value, post_state)
 
         catalog_start = source.index(
             "private static bool IsAllowlistedBodyProportionMorphName("
@@ -1633,7 +1625,7 @@ class BridgeSourceTests(unittest.TestCase):
         self.assertIn("TryBodyShapeMeshChecksum(", catalog_source)
         self.assertIn("snapshot.BodyShapeMeshChecksum", catalog_source)
         self.assertIn(
-            "undo.PendingStableObservations >= 2",
+            "BuildBodyProportionMorphStateKey(",
             catalog_source,
         )
         status_start = catalog_source.index(
@@ -1660,30 +1652,10 @@ class BridgeSourceTests(unittest.TestCase):
             "PopulateBodyShapeResponses(",
             status_source,
         )
-        self.assertIn(
-            "undo.RequireChangedBodyShapeChecksum",
-            status_source,
-        )
-        self.assertIn(
-            "undo.PreApplyBodyShapeChecksum",
-            status_source,
-        )
-        self.assertIn(
-            "undo.PreApplyGenerationKey",
-            status_source,
-        )
-        self.assertIn(
-            "undo.RequireBodyShapeReady",
-            status_source,
-        )
-        self.assertIn(
-            "waitingForChangedChecksum",
-            status_source,
-        )
-        self.assertIn(
-            "waitingForChangedGeneration",
-            status_source,
-        )
+        self.assertIn("undo.PostApplyMorphStateKey", status_source)
+        self.assertIn('undoAvailable ? undo.Revision : ""', status_source)
+        self.assertNotIn("undo.RequireBodyShapeReady", status_source)
+        self.assertNotIn("undo.PendingStableObservations", status_source)
         coroutine_start = catalog_source.index(
             "private IEnumerator BuildPersonBodyShapeCacheCoroutine("
         )
