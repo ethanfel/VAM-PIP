@@ -5813,6 +5813,66 @@ body.resource-detail-open {
   padding: 12px 0 0;
 }
 
+.sam3d-vam-reference {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  margin: 16px 18px 0;
+  padding: 13px 14px;
+  background:
+    linear-gradient(135deg, rgba(128, 191, 255, 0.08), transparent 62%),
+    var(--surface-raised);
+  border: 1px solid rgba(128, 191, 255, 0.2);
+  border-radius: 11px;
+}
+
+.sam3d-vam-reference-copy {
+  min-width: 0;
+}
+
+.sam3d-vam-reference-copy > span,
+.sam3d-vam-reference-copy > strong {
+  display: block;
+}
+
+.sam3d-vam-reference-copy > span {
+  color: var(--blue);
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.sam3d-vam-reference-copy > strong {
+  margin-top: 3px;
+  color: var(--text);
+  font-size: 13px;
+}
+
+.sam3d-vam-reference-copy > p {
+  margin: 5px 0 0;
+  color: var(--text-soft);
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.sam3d-vam-reference-copy > p.is-error {
+  color: var(--danger);
+}
+
+.sam3d-vam-reference-copy > p.is-active {
+  color: var(--accent);
+}
+
+.sam3d-vam-reference-actions {
+  display: flex;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
 .sam3d-target-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(155px, 1fr));
@@ -5852,6 +5912,45 @@ body.resource-detail-open {
   color: var(--danger);
   background: var(--danger-wash);
   border-color: rgba(255, 133, 141, 0.22);
+}
+
+.sam3d-keep-reference {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin: 0 18px 14px;
+  padding: 11px 13px;
+  color: var(--text-soft);
+  background: var(--surface-raised);
+  border: 1px solid var(--border-soft);
+  border-radius: 9px;
+}
+
+.sam3d-keep-reference > input {
+  flex: 0 0 auto;
+  margin-top: 2px;
+}
+
+.sam3d-keep-reference > span,
+.sam3d-keep-reference strong,
+.sam3d-keep-reference small {
+  display: block;
+}
+
+.sam3d-keep-reference strong {
+  color: var(--text);
+  font-size: 11px;
+}
+
+.sam3d-keep-reference small {
+  margin-top: 3px;
+  color: var(--text-faint);
+  font-size: 9px;
+  line-height: 1.45;
+}
+
+.sam3d-keep-reference:has(input:disabled) {
+  opacity: 0.55;
 }
 
 .sam3d-action-row {
@@ -6156,6 +6255,21 @@ body.resource-detail-open {
   }
 
   .sam3d-action-row > button {
+    width: 100%;
+  }
+
+  .sam3d-vam-reference {
+    align-items: stretch;
+    flex-direction: column;
+    margin: 12px;
+  }
+
+  .sam3d-vam-reference-actions {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .sam3d-vam-reference-actions > button {
     width: 100%;
   }
 

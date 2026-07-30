@@ -955,6 +955,34 @@
                   >Analyze</button>
                 </header>
 
+                <section
+                  class="sam3d-vam-reference"
+                  id="sam3d-reference-panel"
+                  aria-labelledby="sam3d-reference-title"
+                >
+                  <div class="sam3d-vam-reference-copy">
+                    <span>In-scene comparison</span>
+                    <strong id="sam3d-reference-title">Place the full reference behind the Person</strong>
+                    <p id="sam3d-reference-state" role="status" aria-live="polite">
+                      Show the current pose job’s full source image in VaM, then adjust the body against it.
+                    </p>
+                  </div>
+                  <div class="sam3d-vam-reference-actions">
+                    <button
+                      class="secondary-button"
+                      id="sam3d-reference-show"
+                      type="button"
+                      disabled
+                    >Show reference in VaM</button>
+                    <button
+                      class="quiet-button"
+                      id="sam3d-reference-hide"
+                      type="button"
+                      disabled
+                    >Hide reference</button>
+                  </div>
+                </section>
+
                 <div class="sam3d-proportions-layout">
                   <div class="sam3d-proportions-controls">
                     <section
@@ -1501,6 +1529,16 @@
                     </select>
                   </label>
                 </div>
+
+                <label class="sam3d-keep-reference" for="sam3d-keep-reference">
+                  <input id="sam3d-keep-reference" type="checkbox" checked>
+                  <span>
+                    <strong>Keep reference aligned</strong>
+                    <small>
+                      Move the full source image with the reconstructed camera so the posed Person stays registered against it.
+                    </small>
+                  </span>
+                </label>
 
                 <p class="sam3d-apply-note" id="sam3d-apply-note" role="status" aria-live="polite">
                   Select an existing Person and an Empty atom running VR Video &amp; Funscript Exporter.

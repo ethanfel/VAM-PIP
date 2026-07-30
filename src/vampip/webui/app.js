@@ -1101,6 +1101,10 @@ function cacheElements() {
     "sam3d-shape-strength-value",
     "sam3d-proportions-apply",
     "sam3d-proportions-undo",
+    "sam3d-reference-panel",
+    "sam3d-reference-state",
+    "sam3d-reference-show",
+    "sam3d-reference-hide",
     "sam3d-profile-select",
     "sam3d-profile-new",
     "sam3d-profile-save",
@@ -1150,6 +1154,7 @@ function cacheElements() {
     "sam3d-aspect-ratio",
     "sam3d-output-resolution",
     "sam3d-image-format",
+    "sam3d-keep-reference",
     "sam3d-apply-note",
     "sam3d-apply-button",
     "sam3d-undo-button",
@@ -1643,6 +1648,14 @@ function bindEvents() {
     "click",
     undoSam3dBodyProportions,
   );
+  elements.sam3dReferenceShow.addEventListener(
+    "click",
+    showSam3dReference,
+  );
+  elements.sam3dReferenceHide.addEventListener(
+    "click",
+    hideSam3dReference,
+  );
   for (const target of [
     elements.sam3dPersonTarget,
     elements.sam3dCameraTarget,
@@ -1651,13 +1664,20 @@ function bindEvents() {
     elements.sam3dOutputResolution,
     elements.sam3dImageFormat,
   ]) {
-    target.addEventListener("change", renderSam3dApplyState);
+    target.addEventListener("change", () => {
+      renderSam3dReferenceState();
+      renderSam3dApplyState();
+    });
   }
   elements.sam3dPersonTarget.addEventListener("change", () => {
     app.sam3dBodyProportions = null;
     app.sam3dBodyProportionsError = null;
     app.sam3dBodyProportionsDirty = false;
     renderSam3dBodyProportions();
+  });
+  elements.sam3dKeepReference.addEventListener("change", () => {
+    renderSam3dReferenceState();
+    renderSam3dApplyState();
   });
   elements.sam3dAspectRatio.addEventListener("change", () => {
     renderSam3dResolutionOptions();
@@ -6604,6 +6624,7 @@ async function loadPersons({ quiet = false } = {}) {
       renderAtomContext();
       if (app.view === "sam3d") {
         renderSam3dTargets();
+        renderSam3dReferenceState();
         renderSam3dBodyProportions();
         renderSam3dApplyState();
       }
@@ -7444,6 +7465,9 @@ const Sam3dClient = Object.freeze({
     bodyProportions(jobId) {
       return `${this.job(jobId)}/body-proportions`;
     },
+    reference(jobId) {
+      return `${this.job(jobId)}/reference`;
+    },
     artifact(jobId, kind) {
       const allowed = new Set([
         "capture",
@@ -7501,6 +7525,20 @@ const Sam3dClient = Object.freeze({
     return api(this.paths.apply(jobId), {
       method: "POST",
       body: request,
+    });
+  },
+
+  showReference(jobId, request) {
+    return api(this.paths.reference(jobId), {
+      method: "POST",
+      body: request,
+    });
+  },
+
+  hideReference(jobId, expectedJobRevision) {
+    return api(this.paths.reference(jobId), {
+      method: "DELETE",
+      body: { expected_job_revision: expectedJobRevision },
     });
   },
 
@@ -7882,6 +7920,63 @@ function normalizeSam3dBodyReferenceSupport(raw) {
     .slice(0, 32);
 }
 
+function normalizeSam3dReference(raw, expectedJobId = "") {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const fallbackJobId = String(expectedJobId || "").trim().toLowerCase();
+  const declaredJobId = String(
+    raw.job_id || raw.jobId || fallbackJobId,
+  ).trim().toLowerCase();
+  if (
+    !SAM3D_JOB_ID_PATTERN.test(declaredJobId) ||
+    (
+      SAM3D_JOB_ID_PATTERN.test(fallbackJobId) &&
+      declaredJobId !== fallbackJobId
+    )
+  ) {
+    return null;
+  }
+  const state = String(raw.state || raw.status || "")
+    .trim()
+    .toLowerCase()
+    .slice(0, 32);
+  const mode = String(
+    raw.mode || raw.alignment_mode || raw.alignmentMode || "",
+  )
+    .trim()
+    .toLowerCase();
+  const visible = Boolean(
+    raw.visible === true ||
+      raw.active === true ||
+      raw.shown === true ||
+      ["active", "body-fit", "pose-aligned", "visible"].includes(state),
+  );
+  const width = Math.max(
+    0,
+    integerValue(raw.width ?? raw.source_width ?? raw.sourceWidth) || 0,
+  );
+  const height = Math.max(
+    0,
+    integerValue(raw.height ?? raw.source_height ?? raw.sourceHeight) || 0,
+  );
+  const sha256 = String(raw.sha256 || raw.digest || "").trim().toLowerCase();
+  return {
+    visible,
+    jobId: declaredJobId,
+    targetUid: String(raw.target_uid || raw.targetUid || "").trim(),
+    cameraUid: String(raw.camera_uid || raw.cameraUid || "").trim(),
+    atomUid: String(raw.atom_uid || raw.atomUid || "").trim(),
+    mode: ["body-fit", "pose-aligned"].includes(mode) ? mode : "",
+    state,
+    message: String(raw.message || raw.detail || "").trim().slice(0, 500),
+    resourceRef: String(
+      raw.resource_ref || raw.resourceRef || "",
+    ).trim(),
+    sha256: /^[0-9a-f]{64}$/.test(sha256) ? sha256 : "",
+    width,
+    height,
+  };
+}
+
 function normalizeSam3dJob(raw) {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
   let id;
@@ -8012,6 +8107,15 @@ function normalizeSam3dJob(raw) {
       return true;
     })
     .slice(0, SAM3D_MAX_CAPTURES);
+  const reference = normalizeSam3dReference(
+    raw.reference ||
+      raw.sam3d_reference ||
+      raw.sam3dReference ||
+      result.reference ||
+      result.sam3d_reference ||
+      result.sam3dReference,
+    id,
+  );
   return {
     ...raw,
     id,
@@ -8099,6 +8203,7 @@ function normalizeSam3dJob(raw) {
       captures.length > 0 ||
       app.sam3dCaptureReadyJobs.has(id),
     captures,
+    reference,
     artifactUrls,
     rawResult: result,
   };
@@ -8375,6 +8480,7 @@ function renderSam3dWorkspace() {
   renderSam3dBodyProfiles();
   renderSam3dResolutionOptions();
   renderSam3dTargets();
+  renderSam3dReferenceState();
   renderSam3dBodyProportions();
   renderSam3dApplyState();
   renderSam3dHandoff();
@@ -9420,6 +9526,7 @@ function renderSam3dJob() {
     elements.sam3dAspectRatio.value = "16:9";
     renderSam3dResolutionOptions("1920x1080 (FHD)");
     elements.sam3dImageFormat.value = "jpeg";
+    elements.sam3dKeepReference.checked = true;
   }
   renderSam3dPreview();
 }
@@ -12888,7 +12995,8 @@ function renderSam3dTargets() {
     (
       capabilities.has("sam3d-camera-create-v1") ||
       capabilities.has("sam3d-camera-create") ||
-      sam3dApplyCapabilityAvailable()
+      sam3dApplyCapabilityAvailable() ||
+      sam3dReferenceCapabilityAvailable()
     )
   ) {
     elements.sam3dCameraTarget.append(
@@ -12961,6 +13069,21 @@ function sam3dCaptureCapabilityAvailable() {
   );
 }
 
+function sam3dReferenceCapabilityAvailable() {
+  const capabilities = new Set([
+    ...sam3dCapabilitySet(),
+    ...personCapabilities(),
+  ]);
+  return capabilities.has("sam3d-reference-v1");
+}
+
+function sam3dKeepReferenceRequested() {
+  return Boolean(
+    elements.sam3dKeepReference.checked &&
+      sam3dReferenceCapabilityAvailable(),
+  );
+}
+
 function renderSam3dResolutionOptions(preferred = "") {
   const aspectValues = Object.keys(SAM3D_RENDERER_RESOLUTIONS);
   if (elements.sam3dAspectRatio.options.length !== aspectValues.length) {
@@ -12985,7 +13108,7 @@ function renderSam3dResolutionOptions(preferred = "") {
       : choices[0] || "";
 }
 
-function sam3dApplySettings() {
+function sam3dCameraPlacementSettings() {
   const fovRaw = String(elements.sam3dCameraFov.value || "").trim();
   const horizontalFov = fovRaw ? Number(fovRaw) : null;
   if (
@@ -13000,6 +13123,11 @@ function sam3dApplySettings() {
   if (!Number.isFinite(heightM) || heightM < 0.5 || heightM > 3) {
     throw new Error("Estimated body height must be between 0.5 m and 3 m.");
   }
+  return { horizontalFov, heightM };
+}
+
+function sam3dApplySettings() {
+  const { horizontalFov, heightM } = sam3dCameraPlacementSettings();
   const aspectRatio = elements.sam3dAspectRatio.value;
   const outputResolution = elements.sam3dOutputResolution.value;
   const choices = SAM3D_RENDERER_RESOLUTIONS[aspectRatio];
@@ -13017,6 +13145,233 @@ function sam3dApplySettings() {
     outputResolution,
     imageFormat,
   };
+}
+
+function sam3dReferenceRequest(job = app.sam3dSelectedJob) {
+  if (!job || !SAM3D_JOB_ID_PATTERN.test(String(job.revision || ""))) {
+    throw new Error("The current SAM 3D job has no valid revision.");
+  }
+  const targetUid = String(elements.sam3dPersonTarget.value || "").trim();
+  if (!targetUid) {
+    throw new Error("Choose a target Person before showing the reference.");
+  }
+  const cameraValue = String(elements.sam3dCameraTarget.value || "").trim();
+  if (!cameraValue) {
+    throw new Error(
+      "Choose or create a VR Video & Funscript camera for the reference view.",
+    );
+  }
+  const createCamera = cameraValue === "__create__";
+  const settings = sam3dCameraPlacementSettings();
+  const request = {
+    expected_job_revision: job.revision,
+    target_uid: targetUid,
+    person_index: app.sam3dSelectedBodyIndex,
+    height_m: settings.heightM,
+    camera_uid: createCamera ? SAM3D_DEFAULT_CAMERA_UID : cameraValue,
+    create_camera: createCamera,
+  };
+  if (settings.horizontalFov !== null) {
+    request.horizontal_fov = settings.horizontalFov;
+  }
+  return request;
+}
+
+function sam3dReferenceSettingsError() {
+  try {
+    sam3dReferenceRequest();
+    return "";
+  } catch (error) {
+    return errorMessage(error);
+  }
+}
+
+function renderSam3dReferenceState() {
+  const job = app.sam3dSelectedJob;
+  const reference = job?.reference;
+  const active = Boolean(reference?.visible);
+  const capability = sam3dReferenceCapabilityAvailable();
+  const bridgeBusy = snapshotBridgeBusy();
+  const vamReady =
+    personVamRunning() &&
+    Boolean(app.person?.available) &&
+    !Boolean(app.person?.loading);
+  const busy =
+    app.sam3dMutationInFlight ||
+    app.sam3dBodyProportionsInFlight ||
+    Boolean(app.sam3dBodyProportionsPendingAction) ||
+    bridgeBusy;
+  const revisionReady = Boolean(
+    job && SAM3D_JOB_ID_PATTERN.test(String(job.revision || "")),
+  );
+  const settingsError =
+    job && sam3dJobSucceeded(job) ? sam3dReferenceSettingsError() : "";
+
+  if (!app.sam3dMutationInFlight) {
+    elements.sam3dReferenceShow.textContent = active
+      ? "Update reference in VaM"
+      : "Show reference in VaM";
+  }
+  elements.sam3dReferenceShow.disabled =
+    busy ||
+    !job ||
+    !sam3dJobSucceeded(job) ||
+    !revisionReady ||
+    !vamReady ||
+    !capability ||
+    Boolean(settingsError);
+  elements.sam3dReferenceHide.disabled =
+    busy ||
+    !job ||
+    !revisionReady ||
+    !vamReady ||
+    !capability ||
+    !active;
+
+  elements.sam3dReferenceState.classList.remove("is-active", "is-error");
+  let message =
+    "Show the current pose job’s full source image behind the Person before applying the body fit.";
+  if (!job || !sam3dJobSucceeded(job)) {
+    message = "Select a completed reconstruction to place its source image in VaM.";
+  } else if (!personVamRunning()) {
+    message = "Start VaM before placing the reference image.";
+  } else if (!app.person?.available || app.person?.loading) {
+    message = "Waiting for a fresh VaM scene snapshot.";
+  } else if (!capability) {
+    message =
+      "Reload the updated VAM-PIP bridge to enable the in-scene reference.";
+  } else if (bridgeBusy) {
+    message =
+      String(app.person?.bridge?.message || "").trim() ||
+      "The VaM bridge is processing another request.";
+  } else if (reference?.state === "queued" || reference?.state === "running") {
+    message =
+      reference.message ||
+      "The bridge is updating the reference image inside VaM.";
+  } else if (active) {
+    const target = reference.targetUid || "the Person";
+    const alignment =
+      reference.mode === "pose-aligned"
+        ? "aligned with the reconstructed pose and camera"
+        : "placed for body fitting";
+    message =
+      `The full source image is ${alignment} behind ${target}. ` +
+      (
+        sam3dKeepReferenceRequested()
+          ? "Pose + camera will keep it aligned."
+          : "Enable Keep reference aligned before applying the pose."
+      );
+    elements.sam3dReferenceState.classList.add("is-active");
+  } else if (settingsError) {
+    message = settingsError;
+    elements.sam3dReferenceState.classList.add("is-error");
+  } else {
+    message =
+      `Show the full ${job.sourceName || "source image"} behind ` +
+      `${elements.sam3dPersonTarget.value || "the selected Person"}.`;
+  }
+  elements.sam3dReferenceState.textContent = message;
+
+  const lockKeepReference =
+    !capability || busy || sam3dJobIsApplied(job);
+  elements.sam3dKeepReference.disabled = lockKeepReference;
+  elements.sam3dKeepReference.title = capability
+    ? ""
+    : "Reload the updated VAM-PIP bridge to enable reference alignment.";
+}
+
+async function showSam3dReference() {
+  const job = app.sam3dSelectedJob;
+  if (!job || elements.sam3dReferenceShow.disabled) return;
+  const updating = Boolean(job.reference?.visible);
+  app.sam3dMutationInFlight = true;
+  setButtonBusy(
+    elements.sam3dReferenceShow,
+    true,
+    updating ? "Updating…" : "Showing…",
+  );
+  renderSam3dReferenceState();
+  renderSam3dApplyState();
+  try {
+    const request = sam3dReferenceRequest(job);
+    const payload = await Sam3dClient.showReference(job.id, request);
+    requireBridgeQueue(payload, "SAM 3D reference");
+    const responseReference = normalizeSam3dReference(
+      payload.reference,
+      job.id,
+    );
+    mergeSam3dJob({
+      ...job,
+      reference: responseReference
+        ? {
+            ...responseReference,
+            state: "queued",
+            message: String(payload.message || ""),
+          }
+        : job.reference,
+      vamActionState: String(payload.action_state || "queued"),
+      vamActionMessage: String(
+        payload.message ||
+          "Waiting for VaM to place the full reference image.",
+      ),
+    });
+    toast(
+      updating ? "Reference update queued" : "Reference queued",
+      payload.message ||
+        "The bridge is placing the full source image behind the Person.",
+    );
+    await loadPersons({ quiet: true });
+    await loadSam3dJob(job.id, { quiet: true });
+    startSam3dPolling();
+  } catch (error) {
+    toast("Could not show reference in VaM", errorMessage(error), "error");
+  } finally {
+    app.sam3dMutationInFlight = false;
+    setButtonBusy(elements.sam3dReferenceShow, false);
+    renderSam3dWorkspace();
+  }
+}
+
+async function hideSam3dReference() {
+  const job = app.sam3dSelectedJob;
+  if (!job || elements.sam3dReferenceHide.disabled) return;
+  app.sam3dMutationInFlight = true;
+  setButtonBusy(elements.sam3dReferenceHide, true, "Hiding…");
+  renderSam3dReferenceState();
+  renderSam3dApplyState();
+  try {
+    const payload = await Sam3dClient.hideReference(job.id, job.revision);
+    requireBridgeQueue(payload, "Remove SAM 3D reference");
+    mergeSam3dJob({
+      ...job,
+      reference: job.reference
+        ? {
+            ...job.reference,
+            state: "queued",
+            message: String(payload.message || ""),
+          }
+        : null,
+      vamActionState: String(payload.action_state || "queued"),
+      vamActionMessage: String(
+        payload.message ||
+          "Waiting for VaM to remove the reference image.",
+      ),
+    });
+    toast(
+      "Reference removal queued",
+      payload.message ||
+        "The bridge is removing the VAM-PIP reference from the scene.",
+    );
+    await loadPersons({ quiet: true });
+    await loadSam3dJob(job.id, { quiet: true });
+    startSam3dPolling();
+  } catch (error) {
+    toast("Could not hide reference in VaM", errorMessage(error), "error");
+  } finally {
+    app.sam3dMutationInFlight = false;
+    setButtonBusy(elements.sam3dReferenceHide, false);
+    renderSam3dWorkspace();
+  }
 }
 
 function sam3dSolutionRevision(job = app.sam3dSelectedJob) {
@@ -13171,17 +13526,24 @@ async function applySam3dResult() {
   const cameraValue = elements.sam3dCameraTarget.value;
   const createCamera = cameraValue === "__create__";
   const settings = sam3dApplySettings();
+  const keepReference = sam3dKeepReferenceRequested();
   const confirmed = await showDialog({
     eyebrow: "Apply SAM 3D reconstruction",
     title: "Replace this Person’s pose and move the camera?",
     message:
-      "VAM-PIP will change the mapped Person controllers and the VR Video & Funscript camera together. One-level undo is kept for this apply.",
+      "VAM-PIP will change the mapped Person controllers and the VR Video & Funscript camera together. One-level undo is kept for this apply." +
+      (
+        keepReference
+          ? " The full source image will stay aligned behind the posed Person."
+          : ""
+      ),
     confirmLabel: "Apply pose + camera",
     icon: "warning",
     plan: [
       ["Person", personUid],
       ["Camera", createCamera ? "Create camera" : cameraValue],
       ["Body", app.sam3dSelectedBodyIndex + 1],
+      ["Reference", keepReference ? "Keep aligned" : "Do not align"],
     ],
   });
   if (!confirmed) return;
@@ -13200,6 +13562,7 @@ async function applySam3dResult() {
       aspect_ratio: settings.aspectRatio,
       output_resolution: settings.outputResolution,
       image_format: settings.imageFormat,
+      keep_reference: keepReference,
     };
     if (settings.horizontalFov !== null) {
       request.horizontal_fov = settings.horizontalFov;
