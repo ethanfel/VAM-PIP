@@ -721,6 +721,22 @@ process.stdout.write(JSON.stringify({
         self.assertIn("function renderSam3dManualOverlay(", self.javascript)
         self.assertIn("getScreenCTM", self.javascript)
         self.assertIn(
+            "height: clamp(280px, 68vh, 760px);",
+            self.styles,
+        )
+        self.assertIn(
+            ".sam3d-manual-fit-stage > img {\n"
+            "  position: absolute;\n"
+            "  inset: 0;",
+            self.styles,
+        )
+        self.assertIn("object-fit: contain;", self.styles)
+        self.assertIn("object-position: center center;", self.styles)
+        self.assertNotIn(
+            "elements.sam3dManualFitStage.style.aspectRatio",
+            self.javascript,
+        )
+        self.assertIn(
             "renderSam3dManualFit(app.sam3dBodyProportions)",
             self.javascript,
         )

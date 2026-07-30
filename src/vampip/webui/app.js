@@ -10756,8 +10756,6 @@ function renderSam3dManualFit(analysis) {
     elements.sam3dManualFitImage.src = sourceUrl;
   }
   if (geometry) {
-    elements.sam3dManualFitStage.style.aspectRatio =
-      `${geometry.width} / ${geometry.height}`;
     elements.sam3dManualFitSvg.setAttribute(
       "viewBox",
       `0 0 ${geometry.width} ${geometry.height}`,

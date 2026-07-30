@@ -5433,8 +5433,7 @@ body.resource-detail-open {
   position: relative;
   display: grid;
   width: 100%;
-  min-height: 360px;
-  max-height: min(68vh, 760px);
+  height: clamp(280px, 68vh, 760px);
   overflow: hidden;
   place-items: center;
   touch-action: none;
@@ -5455,10 +5454,13 @@ body.resource-detail-open {
 }
 
 .sam3d-manual-fit-stage > img {
+  position: absolute;
+  inset: 0;
   display: block;
   width: 100%;
   height: 100%;
   object-fit: contain;
+  object-position: center center;
   pointer-events: none;
 }
 
@@ -6164,10 +6166,6 @@ body.resource-detail-open {
 
   .sam3d-manual-fit {
     padding: 11px;
-  }
-
-  .sam3d-manual-fit-stage {
-    min-height: 280px;
   }
 
   .sam3d-manual-overlay-sliders {
