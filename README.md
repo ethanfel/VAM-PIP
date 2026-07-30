@@ -609,4 +609,10 @@ and editable installs.
 
 ## License
 
-MIT
+VAM-PIP's original code is licensed under the
+[GNU General Public License v3.0 only](LICENSE).
+
+Bundled third-party components remain under their original licenses. In
+particular, `src/vampip/renderer_assets/VRRendererX/` contains work licensed
+under CC BY-SA 2.0 and MIT; its license notices are included alongside that
+component.

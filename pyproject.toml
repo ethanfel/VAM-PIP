@@ -8,10 +8,17 @@ version = "0.18.0"
 description = "Safe Virt-A-Mate package management, profiles, leases, and browser UI"
 readme = "README.md"
 requires-python = ">=3.10"
-license = "MIT"
-license-files = ["LICENSE"]
+license = "GPL-3.0-only"
+license-files = [
+    "LICENSE",
+    "src/vampip/renderer_assets/VRRendererX/LICENSE.txt",
+    "src/vampip/renderer_assets/VRRendererX/LICENSE-LilyRender360.txt",
+]
 authors = [{ name = "VAM-PIP contributors" }]
 dependencies = []
+classifiers = [
+    "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
+]
 
 [project.urls]
 Homepage = "https://github.com/ethanfel/VAM-PIP"
