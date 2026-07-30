@@ -12108,6 +12108,9 @@ async function pollSam3dBodyProportions() {
         undoPending: Boolean(
           rawStatus.undoPending ?? rawStatus.undo_pending,
         ),
+        undoAvailable: Boolean(
+          rawStatus.undoAvailable ?? rawStatus.undo_available,
+        ),
         bodyShapePreparing: Boolean(
           rawStatus.bodyShapePreparing ??
             rawStatus.body_shape_preparing,
@@ -12118,8 +12121,12 @@ async function pollSam3dBodyProportions() {
     // The full reconciliation request below owns connection/error reporting.
   }
   const waitingForLiveSettlement =
-    Boolean(liveBodyStatus?.undoPending) ||
-    Boolean(liveBodyStatus?.bodyShapePreparing);
+    action === SAM3D_BODY_PROPORTION_ACTIONS.apply
+      ? Boolean(liveBodyStatus?.undoPending)
+      : Boolean(
+          liveBodyStatus?.bodyShapePreparing &&
+          !liveBodyStatus?.undoAvailable,
+        );
   if (waitingForLiveSettlement) {
     const appliedAndPreparingUndo =
       action === SAM3D_BODY_PROPORTION_ACTIONS.apply &&

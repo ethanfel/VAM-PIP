@@ -1518,11 +1518,12 @@ const startSam3dBodyProportionPolling = () => { rescheduled += 1; };
 const toast = (title) => { toasts.push(title); };
 const asArray = (value) => Array.isArray(value) ? value : [];
 const fetchLiveSceneSnapshot = async () => ({
-  persons: outcome === "settling"
+  persons: ["settling", "undo-settling", "failed-preparing"].includes(outcome)
     ? [{
         uid: "Person",
         bodyProportions: {
-          undoPending: true,
+          undoPending: outcome === "settling",
+          undoAvailable: false,
           bodyShapeReady: false,
           bodyShapePreparing: true,
         },
@@ -1531,6 +1532,19 @@ const fetchLiveSceneSnapshot = async () => ({
 });
 async function loadSam3dBodyProportions() {
   analysisLoads += 1;
+  if (outcome === "failed-preparing") {
+    app.sam3dBodyProportionsError = null;
+    app.sam3dBodyProportions = {
+      ready: true,
+      state: "error",
+      message: "Bridge rejected the body fit.",
+      applied: false,
+      canApply: false,
+      canUndo: false,
+      applyRevision: "",
+    };
+    return app.sam3dBodyProportions;
+  }
   if (outcome === "error") {
     app.sam3dBodyProportionsError =
       new Error("Could not read the bridge status.");
@@ -1562,8 +1576,39 @@ async function loadSam3dBodyProportions() {
     rescheduled,
   };
 
+  outcome = "undo-settling";
+  app.sam3dBodyProportionPollTimer = null;
+  app.sam3dBodyProportionsPendingAction =
+    SAM3D_BODY_PROPORTION_ACTIONS.undo;
+  app.sam3dBodyProportionPollAttempts = 0;
+  await pollSam3dBodyProportions();
+  const undoSettling = {
+    pendingAction: app.sam3dBodyProportionsPendingAction,
+    state: app.sam3dBodyProportions.state,
+    message: app.sam3dBodyProportions.message,
+    analysisLoads,
+    rescheduled,
+  };
+
+  outcome = "failed-preparing";
+  app.sam3dBodyProportionPollTimer = null;
+  app.sam3dBodyProportionsPendingAction =
+    SAM3D_BODY_PROPORTION_ACTIONS.apply;
+  app.sam3dBodyProportionPollAttempts = 0;
+  await pollSam3dBodyProportions();
+  const failedPreparing = {
+    pendingAction: app.sam3dBodyProportionsPendingAction,
+    error: app.sam3dBodyProportionsError?.message || "",
+    analysisLoads,
+    rescheduled,
+  };
+
   outcome = "unchanged";
   app.sam3dBodyProportionPollTimer = null;
+  app.sam3dBodyProportionsPendingAction =
+    SAM3D_BODY_PROPORTION_ACTIONS.apply;
+  app.sam3dBodyProportionPollAttempts = 0;
+  app.sam3dBodyProportionsError = null;
   const unchanged = {
   };
   await pollSam3dBodyProportions();
@@ -1590,7 +1635,13 @@ async function loadSam3dBodyProportions() {
     rescheduled,
   };
   process.stdout.write(JSON.stringify({
-    settling, unchanged, errored, renders, analysisLoads,
+    settling,
+    undoSettling,
+    failedPreparing,
+    unchanged,
+    errored,
+    renders,
+    analysisLoads,
   }));
 })().catch((error) => {
   process.stderr.write(String(error?.stack || error));
@@ -1620,6 +1671,21 @@ async function loadSam3dBodyProportions() {
         self.assertFalse(result["settling"]["hasError"])
         self.assertEqual(result["settling"]["analysisLoads"], 0)
         self.assertEqual(result["settling"]["rescheduled"], 1)
+        self.assertEqual(result["undoSettling"]["pendingAction"], "undo")
+        self.assertEqual(result["undoSettling"]["state"], "reconciling")
+        self.assertIn(
+            "restored the morph values",
+            result["undoSettling"]["message"],
+        )
+        self.assertEqual(result["undoSettling"]["analysisLoads"], 0)
+        self.assertEqual(result["undoSettling"]["rescheduled"], 2)
+        self.assertEqual(result["failedPreparing"]["pendingAction"], "")
+        self.assertEqual(
+            result["failedPreparing"]["error"],
+            "Bridge rejected the body fit.",
+        )
+        self.assertEqual(result["failedPreparing"]["analysisLoads"], 1)
+        self.assertEqual(result["failedPreparing"]["rescheduled"], 2)
         self.assertEqual(result["unchanged"]["pendingAction"], "")
         self.assertEqual(result["unchanged"]["pollAttempts"], 0)
         self.assertEqual(result["unchanged"]["state"], "unchanged")
@@ -1629,16 +1695,16 @@ async function loadSam3dBodyProportions() {
             result["unchanged"]["message"],
         )
         self.assertEqual(result["unchanged"]["toasts"], ["Body fit unchanged"])
-        self.assertEqual(result["unchanged"]["rescheduled"], 1)
+        self.assertEqual(result["unchanged"]["rescheduled"], 2)
         self.assertEqual(result["errored"]["pendingAction"], "")
         self.assertEqual(result["errored"]["pollAttempts"], 0)
         self.assertEqual(
             result["errored"]["error"],
             "Could not read the bridge status.",
         )
-        self.assertEqual(result["errored"]["rescheduled"], 1)
-        self.assertEqual(result["renders"], 3)
-        self.assertEqual(result["analysisLoads"], 2)
+        self.assertEqual(result["errored"]["rescheduled"], 2)
+        self.assertEqual(result["renders"], 5)
+        self.assertEqual(result["analysisLoads"], 3)
 
     def test_panel_is_responsive(self) -> None:
         for selector in (
